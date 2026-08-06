@@ -783,6 +783,12 @@ while :; do
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
 
+  # Exact no-mistakes Codex companion reconciliation is an idempotent journal
+  # tick owned by fm-nm-live.sh. It is cheap when no journals exist and never
+  # changes watcher wake classification.
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-nm-live.sh" reconcile-all >/dev/null 2>&1 || true
+
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
   # only republishes results already captured durably and restarts a source

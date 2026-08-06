@@ -43,6 +43,12 @@
 # footer appears, so an immediate peek would otherwise see the stale idle pane.
 # The pause is fm-send-only; the shared submit core (used by the away-mode daemon,
 # which only needs "submitted") does not pay it, and the --key path is unaffected.
+#
+# Eligible Herdr no-mistakes companion behavior is owned entirely by
+# bin/fm-nm-live.sh. This caller asks it to prepare before typing, confirms only
+# after the backend verdict is exactly `empty`, and cancels an unconfirmed
+# preparation on delivery failure. A post-delivery live-view error is a warning,
+# never an "unsent" result, because the canonical skill command already landed.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -268,9 +274,11 @@ MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
-if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
-  MARK_FROM_FIRSTMATE=1
+if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ]; then
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+  if [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
+    MARK_FROM_FIRSTMATE=1
+  fi
 fi
 
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
@@ -301,6 +309,11 @@ if [ "${1:-}" = "--key" ]; then
   fm_send_record_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
+  NM_LIVE_ATTEMPT=
+  if [ -n "$TARGET_TASK_ID" ]; then
+    NM_LIVE_ATTEMPT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "${FM_NM_LIVE_HELPER:-$SCRIPT_DIR/fm-nm-live.sh}" prepare "$TARGET_TASK_ID" "$MESSAGE") || exit 1
+  fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
@@ -359,6 +372,10 @@ else
     send_rc=$?
   fi
   if [ "$send_rc" -ne 0 ]; then
+    if [ -n "$NM_LIVE_ATTEMPT" ]; then
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "${FM_NM_LIVE_HELPER:-$SCRIPT_DIR/fm-nm-live.sh}" cancel "$TARGET_TASK_ID" "$NM_LIVE_ATTEMPT" >/dev/null 2>&1 || true
+    fi
     if [ "$TARGET_BACKEND" = remote ] && [ "$send_rc" -eq 255 ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
       echo "error: text delivery to remote secondmate $TARGET_REMOTE_ID is unknown; do not resend - same-host reconciliation is required" >&2
@@ -374,6 +391,10 @@ else
     empty)
       ;;
     send-failed)
+      if [ -n "$NM_LIVE_ATTEMPT" ]; then
+        FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+          "${FM_NM_LIVE_HELPER:-$SCRIPT_DIR/fm-nm-live.sh}" cancel "$TARGET_TASK_ID" "$NM_LIVE_ATTEMPT" >/dev/null 2>&1 || true
+      fi
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
@@ -381,6 +402,10 @@ else
       exit 1
       ;;
     *)
+      if [ -n "$NM_LIVE_ATTEMPT" ]; then
+        FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+          "${FM_NM_LIVE_HELPER:-$SCRIPT_DIR/fm-nm-live.sh}" cancel "$TARGET_TASK_ID" "$NM_LIVE_ATTEMPT" >/dev/null 2>&1 || true
+      fi
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
@@ -388,6 +413,12 @@ else
       exit 1
       ;;
   esac
+  if [ -n "$NM_LIVE_ATTEMPT" ]; then
+    if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "${FM_NM_LIVE_HELPER:-$SCRIPT_DIR/fm-nm-live.sh}" confirm "$TARGET_TASK_ID" "$NM_LIVE_ATTEMPT"; then
+      echo "warning: text was delivered to $T, but no-mistakes live-view reconciliation failed; do not resend. Inspect $STATE/$TARGET_TASK_ID.nm-live." >&2
+    fi
+  fi
   # Delivery confirmed. Mark the pending expectation delivered without resolving
   # it: only a correlated parent report acknowledges the request.
   if [ -n "$PENDING_REPLY_CORR" ]; then

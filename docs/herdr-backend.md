@@ -172,6 +172,13 @@ Operational compromises:
 `tests/fm-herdr-session-cleanup-e2e.test.sh` covers the restored-shell cleanup in a guarded non-default named lab.
 `tests/fm-backend-herdr-focus-flash-e2e.test.sh` reproduces the raw explicit-close focus steal on the installed release and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval; [`verification/runtime-backends.md`](verification/runtime-backends.md#workspace-removal-focus-safety) owns the active versioned evidence.
 
+## No-mistakes live Codex companion
+
+Eligible Herdr no-mistakes ship tasks gain a default-on companion tab in the exact recorded parent workspace without changing the authoritative task endpoint.
+[`codex-app-backend.md`](codex-app-backend.md#no-mistakes-live-companion) owns the trigger, App Server prerequisite, run and thread attribution, private journal, creation, restart, rotation, opt-out, and cleanup contract.
+Herdr contributes only its exact named-session, structured-id, `--no-focus`, process-state, and focus-preserving close primitives.
+The companion label is view-only context and never identity, Firstmate input never targets its pane, and a focused companion is left open for later cleanup.
+
 ## Default-tab prune safety
 
 `herdr workspace create` seeds one default tab.

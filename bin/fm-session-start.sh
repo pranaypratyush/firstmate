@@ -415,6 +415,15 @@ if [ -n "$BOOT_OUT" ]; then
 else
   printf '(silent - all good)\n'
 fi
+if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
+  NM_LIVE_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-nm-live.sh" reconcile-all 2>&1)
+  NM_LIVE_RC=$?
+  if [ "$NM_LIVE_RC" -ne 0 ]; then
+    printf 'NM_LIVE: reconciliation retained a quarantined or deferred journal\n'
+    [ -z "$NM_LIVE_OUT" ] || printf '%s\n' "$NM_LIVE_OUT"
+  fi
+fi
 
 # --- 3. wake-drain -------------------------------------------------------
 # Drained records are this turn's first work queue, and the drain's separate

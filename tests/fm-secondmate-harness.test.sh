@@ -15,7 +15,7 @@
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
 #      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
 #      config/backlog-backend, config/backend, config/herdr-presentation-spaces,
-#      config/startup-memory-budget, and config/trace-context -
+#      config/nm-live-view, config/startup-memory-budget, and config/trace-context -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
 #      dispatch profiles, backlog backend, runtime-backend default, Herdr
 #      presentation choice, startup-memory budget, and trace context inherit the
@@ -23,6 +23,8 @@
 #      primary file and an absent destination file both mean the same
 #      unconfigured default, so the generic absence mirror converges that item
 #      without deciding its release-dependent floor.
+#      config/nm-live-view likewise preserves the primary home's default-on or
+#      explicit opt-out decision.
 #      It is primary-authoritative
 #      (re-pushed at secondmate spawn, on the bootstrap secondmate sweep, and by
 #      config push).
@@ -271,6 +273,7 @@ test_propagate_lib() {
   printf 'manual\n' > "$src/backlog-backend"
   printf 'tmux\n' > "$src/backend"
   : > "$src/herdr-presentation-spaces"
+  printf 'off\n' > "$src/nm-live-view"
   : > "$src/trace-context"
   stdout="$d/clean-copy.out"
   stderr="$d/clean-copy.err"
@@ -282,6 +285,7 @@ test_propagate_lib() {
   [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
   [ "$(cat "$dest/backend")" = tmux ] || fail "backend not propagated"
   [ -f "$dest/herdr-presentation-spaces" ] || fail "herdr-presentation-spaces not propagated"
+  [ "$(cat "$dest/nm-live-view")" = off ] || fail "nm-live-view not propagated"
   printf 'herdr\n' > "$dest/backend"
   propagate_inheritable_config "$src" "$dest"
   [ "$(cat "$dest/backend")" = tmux ] || fail "primary backend did not overwrite a divergent destination"
@@ -322,13 +326,14 @@ test_propagate_lib() {
   # 4. removing the source mirrors absence downstream (primary-authoritative)
   printf 'herdr\n' > "$dest/backend"
   rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" \
-    "$src/backend" "$src/herdr-presentation-spaces" "$src/trace-context"
+    "$src/backend" "$src/herdr-presentation-spaces" "$src/nm-live-view" "$src/trace-context"
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-dispatch.json" ] && fail "dispatch profile absence not mirrored downstream"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
   [ -e "$dest/backlog-backend" ] && fail "backlog-backend absence not mirrored downstream"
   [ -e "$dest/backend" ] && fail "backend absence not mirrored downstream"
   [ -e "$dest/herdr-presentation-spaces" ] && fail "herdr-presentation-spaces absence not mirrored downstream"
+  [ -e "$dest/nm-live-view" ] && fail "nm-live-view absence not mirrored downstream"
   [ -e "$dest/trace-context" ] && fail "trace-context absence not mirrored downstream"
 
   rm -f "$dest/crew-harness"
@@ -940,7 +945,7 @@ new_world() {
     printf 'projects/\nstate/\ndata/\n.no-mistakes/\n'
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
     printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
-    printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
+    printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/nm-live-view\nconfig/startup-memory-budget\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
@@ -1178,6 +1183,7 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
+  printf 'off\n' > "$w/home/config/nm-live-view"
   : > "$w/home/config/trace-context"
   printf 'grok\n' > "$w/home/config/secondmate-harness"
   run_bootstrap "$w" >/dev/null
@@ -1189,6 +1195,8 @@ test_bootstrap_sweep_propagates_and_reconverges() {
     || fail "sweep: backlog-backend not pushed into the live home"
   [ "$(cat "$w/sm/config/backend" 2>/dev/null)" = tmux ] \
     || fail "sweep: backend not pushed into the live home"
+  [ "$(cat "$w/sm/config/nm-live-view" 2>/dev/null)" = off ] \
+    || fail "sweep: nm-live-view not pushed into the live home"
   [ ! -e "$w/sm/config/trace-context" ] \
     || fail "sweep: trace-context changed a legacy live home before relaunch"
   [ -e "$w/sm/config/secondmate-harness" ] \
@@ -1199,6 +1207,7 @@ test_bootstrap_sweep_propagates_and_reconverges() {
   printf 'claude\n' > "$w/home/config/crew-harness"
   printf 'tasks-axi\n' > "$w/home/config/backlog-backend"
   printf 'zellij\n' > "$w/home/config/backend"
+  printf 'on\n' > "$w/home/config/nm-live-view"
   run_bootstrap "$w" >/dev/null
   [ "$(cat "$w/sm/config/crew-harness" 2>/dev/null)" = claude ] \
     || fail "sweep: home did not re-converge to the primary's new crew-harness"
@@ -1208,10 +1217,12 @@ test_bootstrap_sweep_propagates_and_reconverges() {
     || fail "sweep: home did not re-converge to the primary's new backlog-backend"
   [ "$(cat "$w/sm/config/backend" 2>/dev/null)" = zellij ] \
     || fail "sweep: home did not re-converge to the primary's new backend"
+  [ "$(cat "$w/sm/config/nm-live-view" 2>/dev/null)" = on ] \
+    || fail "sweep: home did not re-converge to the primary's new nm-live-view"
 
   # Mirror absence: primary clears inherited config; the home's copies are removed.
   rm -f "$w/home/config/crew-dispatch.json" "$w/home/config/crew-harness" \
-    "$w/home/config/backlog-backend" "$w/home/config/backend"
+    "$w/home/config/backlog-backend" "$w/home/config/backend" "$w/home/config/nm-live-view"
   run_bootstrap "$w" >/dev/null
   [ -e "$w/sm/config/crew-dispatch.json" ] \
     && fail "sweep: home crew-dispatch.json not removed after the primary cleared it"
@@ -1221,6 +1232,8 @@ test_bootstrap_sweep_propagates_and_reconverges() {
     && fail "sweep: home backlog-backend not removed after the primary cleared it"
   [ -e "$w/sm/config/backend" ] \
     && fail "sweep: home backend not removed after the primary cleared it"
+  [ -e "$w/sm/config/nm-live-view" ] \
+    && fail "sweep: home nm-live-view not removed after the primary cleared it"
   pass "B7 bootstrap sweep pushes, re-converges, and mirrors absence; never inherits secondmate-harness"
 }
 
@@ -1236,6 +1249,7 @@ test_bootstrap_sweep_propagates_when_tracked_current() {
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
+  printf 'off\n' > "$w/home/config/nm-live-view"
   run_bootstrap "$w" >/dev/null
   [ "$(cat "$w/sm/config/crew-dispatch.json" 2>/dev/null)" = '{"default":{"harness":"codex"}}' ] \
     || fail "crew-dispatch.json did not propagate to a tracked-current home"
@@ -1245,6 +1259,8 @@ test_bootstrap_sweep_propagates_when_tracked_current() {
     || fail "backlog-backend did not propagate to a tracked-current home"
   [ "$(cat "$w/sm/config/backend" 2>/dev/null)" = tmux ] \
     || fail "backend did not propagate to a tracked-current home"
+  [ "$(cat "$w/sm/config/nm-live-view" 2>/dev/null)" = off ] \
+    || fail "nm-live-view did not propagate to a tracked-current home"
   pass "B8 bootstrap sweep propagates config even when the home's tracked files are already current"
 }
 
@@ -1454,6 +1470,7 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
+  printf 'off\n' > "$w/home/config/nm-live-view"
   record_live_watcher_fixture "$w/home"
   : > "$w/home/config/trace-context"
   err="$w/config-push-basic.err"
@@ -1473,6 +1490,8 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "config push did not report backlog-backend as pushed"
   assert_contains "$out" "backend: pushed" \
     "config push did not report backend as pushed"
+  assert_contains "$out" "nm-live-view: pushed" \
+    "config push did not report nm-live-view as pushed"
   assert_contains "$out" "trace-context: unchanged" \
     "live config push must report trace-context as session-scoped and unchanged"
   [ ! -e "$w/sm/config/trace-context" ] \
@@ -1484,9 +1503,12 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
   [ "$(git -C "$w/sm" rev-parse HEAD)" = "$old_head" ] \
     || fail "config push fast-forwarded tracked files"
   [ "$(cat "$w/sm/config/backend")" = tmux ] || fail "config push did not write backend"
+  [ "$(cat "$w/sm/config/nm-live-view")" = off ] || fail "config push did not write nm-live-view"
   instruction=$(reread_instruction_path "$w/sm") || fail "config-push reread instruction missing"
   assert_contains "$(cat "$instruction")" $'-----BEGIN config/backend-----\ntmux\n-----END config/backend-----' \
     "config-push reread must include exact backend bytes"
+  assert_contains "$(cat "$instruction")" $'-----BEGIN config/nm-live-view-----\noff\n-----END config/nm-live-view-----' \
+    "config-push reread must include exact nm-live-view bytes"
   [ ! -s "$err" ] || fail "clean config push wrote unexpected stderr: $(cat "$err")"
   assert_contains "$(cat "$log")" "[fm-from-firstmate]" \
     "config reread must use the marked routed secondmate path"
@@ -1502,6 +1524,8 @@ test_config_push_propagates_reports_without_ff_or_nudge() {
     "idempotent config push did not report backlog-backend as unchanged"
   assert_contains "$out2" "backend: unchanged" \
     "idempotent config push did not report backend as unchanged"
+  assert_contains "$out2" "nm-live-view: unchanged" \
+    "idempotent config push did not report nm-live-view as unchanged"
   assert_contains "$out2" "trace-context: unchanged" \
     "idempotent config push did not preserve session-scoped trace context"
   assert_not_contains "$out2" "config-reread: sent" \
@@ -1641,6 +1665,7 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
   printf 'codex\n' > "$w/home/config/crew-harness"
   printf 'manual\n' > "$w/home/config/backlog-backend"
   printf 'tmux\n' > "$w/home/config/backend"
+  printf 'off\n' > "$w/home/config/nm-live-view"
   {
     shared_captain_header_for_tests
     printf '%s\n' "shared secret preference body that must never appear in a config reread"
@@ -1661,6 +1686,7 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
   [ "$(cat "$w/alpha/config/crew-harness")" = codex ] || fail "alpha harness not updated"
   [ "$(cat "$w/alpha/config/backlog-backend")" = manual ] || fail "alpha backlog-backend not updated"
   [ "$(cat "$w/alpha/config/backend")" = tmux ] || fail "alpha backend not updated"
+  [ "$(cat "$w/alpha/config/nm-live-view")" = off ] || fail "alpha nm-live-view not updated"
 
   instr_a=$(reread_instruction_path "$w/alpha") || fail "alpha instruction missing after config push"
   instr_b=$(reread_instruction_path "$w/beta") || fail "beta instruction missing after config push"
@@ -1677,14 +1703,16 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
   assert_contains "$(cat "$instr_a")" "config/crew-harness" "alpha missing harness path"
   assert_contains "$(cat "$instr_a")" "config/backlog-backend" "alpha missing backlog path"
   assert_contains "$(cat "$instr_a")" "config/backend" "alpha missing backend path"
+  assert_contains "$(cat "$instr_a")" "config/nm-live-view" "alpha missing nm-live-view path"
   # Path order follows FM_INHERITABLE_CONFIG.
   awk '
     /config\/crew-dispatch\.json/ { d=NR }
     /config\/crew-harness/ { h=NR }
     /config\/backlog-backend/ { b=NR }
     /config\/backend/ && !/backlog-backend/ { k=NR }
+    /config\/nm-live-view/ { n=NR }
     END {
-      if (!(d && h && b && k && d < h && h < b && b < k)) exit 1
+      if (!(d && h && b && k && n && d < h && h < b && b < k && k < n)) exit 1
     }
   ' "$instr_a" || fail "alpha instruction path order is not deterministic allowlist order"
 
@@ -1697,6 +1725,8 @@ test_config_reread_per_home_changed_sets_and_exact_bytes() {
     "alpha instruction must include exact backlog-backend scalar bytes"
   assert_contains "$(cat "$instr_a")" $'-----BEGIN config/backend-----\ntmux\n-----END config/backend-----' \
     "alpha instruction must include exact backend scalar bytes"
+  assert_contains "$(cat "$instr_a")" $'-----BEGIN config/nm-live-view-----\noff\n-----END config/nm-live-view-----' \
+    "alpha instruction must include exact nm-live-view scalar bytes"
 
   # No parsed/effective summary, no SHA, no captain-shared dump.
   assert_not_contains "$(cat "$instr_a")" "Default worker" "must not emit parsed worker summary"

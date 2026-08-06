@@ -2199,6 +2199,13 @@ fi
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
+  # The companion lives outside the task worktree so its potentially focused
+  # TUI cannot be killed by the worktree reaper. Ask its state-machine owner to
+  # close the exact pane first; a focused or ambiguous pane keeps its private
+  # journal for locked startup reconciliation after normal task metadata goes.
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-nm-live.sh" cleanup "$ID" || \
+    echo "warning: no-mistakes live companion cleanup for $ID was deferred or quarantined; its private journal was retained" >&2
   conclude_task_no_mistakes_run "$WT"
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
