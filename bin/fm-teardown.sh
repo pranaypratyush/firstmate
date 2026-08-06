@@ -39,8 +39,9 @@
 # an Orca target from ambient CLI state.
 # A ship/scout with worktree_ownership=adopted keeps an externally pre-leased
 # worktree. Teardown applies the same report, dirty-worktree, and landed-work
-# gates, concludes task-owned validation, reaps task processes, closes the exact
-# endpoint, and retires ordinary task state, but never detaches or deletes the
+# gates, concludes task-owned validation, reaps only the task-owned temporary
+# root, closes the exact endpoint, and retires ordinary task state, but never
+# scans or signals arbitrary processes by adopted-worktree cwd, detaches or deletes the
 # branch, removes worktree files, returns/prunes/resets the worktree, or calls a
 # worktree-provider removal operation. The marker is accepted only once and only
 # with one adopted_branch= and adopted_head= on the supported tmux ordinary-task
@@ -406,8 +407,7 @@ require_worktree_ownership() {  # <meta>
 
 validate_adopted_worktree_metadata() {  # <meta> <kind> <backend>
   local meta=$1 kind=$2 backend=$3 branch_count head_count branch head
-  local wt project wt_real project_real wt_top project_top wt_common project_common
-  local registered=0 item listed listed_real
+  local wt project
   [ "$kind" = ship ] || [ "$kind" = scout ] || {
     echo "error: adopted worktree ownership is valid only for ordinary ship or scout tasks in $meta" >&2
     return 1
@@ -432,47 +432,22 @@ validate_adopted_worktree_metadata() {  # <meta> <kind> <backend>
   # explicit --force. When it exists, prove the complete project relationship
   # before process cleanup or any other path-scoped action.
   [ -e "$wt" ] || return 0
-  [ -d "$project" ] || {
-    echo "error: adopted worktree project is unavailable for $meta; ownership cannot be verified" >&2
-    return 1
-  }
-  wt_real=$(cd -- "$wt" 2>/dev/null && pwd -P) || wt_real=
-  project_real=$(cd -- "$project" 2>/dev/null && pwd -P) || project_real=
-  wt_top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null || true)
-  project_top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null || true)
-  wt_top=$(cd -- "$wt_top" 2>/dev/null && pwd -P) || wt_top=
-  project_top=$(cd -- "$project_top" 2>/dev/null && pwd -P) || project_top=
-  [ "$wt" = "$wt_real" ] && [ "$project" = "$project_real" ] \
-    && [ "$wt_real" = "$wt_top" ] && [ "$project_real" = "$project_top" ] \
-    && [ "$wt_real" != "$project_real" ] || {
-    echo "error: adopted worktree path or project root in $meta is no longer exact; preserving task state" >&2
-    return 1
-  }
-  wt_common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
-  project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
-  wt_common=$(cd -- "$wt_common" 2>/dev/null && pwd -P) || wt_common=
-  project_common=$(cd -- "$project_common" 2>/dev/null && pwd -P) || project_common=
-  [ -n "$wt_common" ] && [ "$wt_common" = "$project_common" ] || {
-    echo "error: adopted worktree in $meta no longer belongs to its recorded project; preserving task state" >&2
-    return 1
-  }
-  while IFS= read -r -d '' item; do
-    case "$item" in
-      worktree\ *)
-        listed=${item#worktree }
-        listed_real=$(cd -- "$listed" 2>/dev/null && pwd -P) || listed_real=$listed
-        [ "$listed_real" != "$wt_real" ] || registered=$((registered + 1))
+  # shellcheck source=bin/fm-adopted-worktree-lib.sh
+  . "$SCRIPT_DIR/fm-adopted-worktree-lib.sh"
+  if ! fm_adopted_worktree_identity_matches "$wt" "$project" "$wt" "$branch" ""; then
+    case "${FM_ADOPTED_IDENTITY_ERROR:-unknown}" in
+      registration|inventory)
+        echo "error: adopted worktree in $meta is not exactly registered with its project; preserving task state" >&2
+        ;;
+      named-branch|mismatch)
+        echo "error: adopted worktree branch no longer matches the intake identity in $meta; preserving task state" >&2
+        ;;
+      *)
+        echo "error: adopted worktree path or project identity in $meta is no longer exact (${FM_ADOPTED_IDENTITY_ERROR:-unknown}); preserving task state" >&2
         ;;
     esac
-  done < <(git -C "$project" worktree list --porcelain -z)
-  [ "$registered" -eq 1 ] || {
-    echo "error: adopted worktree in $meta is not exactly registered with its project; preserving task state" >&2
     return 1
-  }
-  [ "$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "$branch" ] || {
-    echo "error: adopted worktree branch no longer matches the intake identity in $meta; preserving task state" >&2
-    return 1
-  }
+  fi
 }
 
 # This is the first cleanup authorization check. It is metadata-only and must
@@ -2328,7 +2303,11 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  if [ "$WORKTREE_OWNERSHIP" = adopted ]; then
+    [ -z "$TASK_TMP" ] || reap_task_worktree_processes tasktmp "$TASK_TMP"
+  else
+    reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  fi
 fi
 
 # A Herdr close may reposition shared workspace order, so the whole

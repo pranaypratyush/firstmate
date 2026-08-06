@@ -52,7 +52,9 @@
 #   durable task meta in this home. A home-wide adoption lock closes the
 #   check-to-publication race between different task ids. A recovery spawn may
 #   reuse its own adopted claim only when the path, project, ownership marker, and
-#   named branch still agree.
+#   named branch still agree. Recovery atomically replaces only spawn-owned meta
+#   fields, retains every other durable field, and rolls the generated addendum
+#   back if refusal occurs before the matching metadata publication.
 #   The first supported runtime is tmux only. Herdr, zellij, cmux, Orca,
 #   --secondmate, and batch dispatch are refused before endpoint creation. The
 #   supported harnesses are codex, pi, pi-signed, and muse because their spawn
@@ -65,6 +67,11 @@
 #   verify all three values before any other action. The same values and
 #   worktree_ownership=adopted are recorded in task meta. Absence of that marker
 #   retains the historical Firstmate-owned allocation contract byte-for-byte.
+#   The complete worktree identity is revalidated immediately before atomic meta
+#   publication. Until launch delivery succeeds, abort cleanup owns the endpoint
+#   by its stable tmux window id; a later send refusal removes that endpoint while
+#   retaining aligned durable metadata and addendum state for a collision-free
+#   same-id retry.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -652,6 +659,10 @@ if [ "$EXISTING_WORKTREE_SET" -eq 1 ] && [ "$BACKEND" != tmux ]; then
   echo "error: --existing-worktree currently supports backend=tmux only; '$BACKEND' may own or mutate worktree lifecycle in ways adoption does not authorize" >&2
   exit 1
 fi
+if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
+  # shellcheck source=bin/fm-adopted-worktree-lib.sh
+  . "$SCRIPT_DIR/fm-adopted-worktree-lib.sh"
+fi
 if [ "$BACKEND" = orca ]; then
   fm_backend_orca_runtime_check || exit 1
 fi
@@ -671,8 +682,12 @@ CONFIG_INHERIT_LOCK_HELD=0
 ADOPTION_LOCK=
 ADOPTION_LOCK_HELD=0
 ADOPTED_ENDPOINT_ABORT_CLEANUP=0
+ADOPTED_ENDPOINT_ID=
 ADOPTED_BRIEF_ABORT_CLEANUP=0
+ADOPTED_BRIEF_PREVIOUS_TMP=
+ADOPTED_BRIEF_PREVIOUS_PRESENT=0
 ADOPTED_META_TMP=
+ADOPTED_PRIOR_META=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -741,12 +756,21 @@ spawn_abort_cleanup() {
   fi
   if [ "$ADOPTED_ENDPOINT_ABORT_CLEANUP" = 1 ]; then
     ADOPTED_ENDPOINT_ABORT_CLEANUP=0
-    fm_backend_kill "$BACKEND" "$T" "" "$W" 2>/dev/null || true
+    if [ -n "$ADOPTED_ENDPOINT_ID" ]; then
+      fm_backend_tmux_kill_window_id "$ADOPTED_ENDPOINT_ID" 2>/dev/null || \
+        echo "warning: failed to remove adopted task endpoint $ADOPTED_ENDPOINT_ID after spawn refusal" >&2
+    fi
   fi
   if [ "$ADOPTED_BRIEF_ABORT_CLEANUP" = 1 ]; then
     ADOPTED_BRIEF_ABORT_CLEANUP=0
-    rm -f -- "$STATE/$ID.adopted-brief.md"
+    if [ "$ADOPTED_BRIEF_PREVIOUS_PRESENT" = 1 ] && [ -n "$ADOPTED_BRIEF_PREVIOUS_TMP" ]; then
+      mv -f -- "$ADOPTED_BRIEF_PREVIOUS_TMP" "$STATE/$ID.adopted-brief.md" || true
+      ADOPTED_BRIEF_PREVIOUS_TMP=
+    else
+      rm -f -- "$STATE/$ID.adopted-brief.md"
+    fi
   fi
+  [ -z "$ADOPTED_BRIEF_PREVIOUS_TMP" ] || rm -f -- "$ADOPTED_BRIEF_PREVIOUS_TMP"
   [ -z "$ADOPTED_META_TMP" ] || rm -f -- "$ADOPTED_META_TMP"
   if [ "$ADOPTION_LOCK_HELD" = 1 ]; then
     ADOPTION_LOCK_HELD=0
@@ -1484,83 +1508,46 @@ adopted_meta_exact_value() {  # <meta> <key>
 }
 
 verify_adopted_identity() {  # <phase>
-  local phase=$1 actual_path actual_branch actual_head
-  actual_path=$(cd -- "$WT" 2>/dev/null && pwd -P) || actual_path=
-  actual_branch=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  actual_head=$(git -C "$WT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
-  if [ "$actual_path" != "$ADOPTED_WORKTREE_PATH" ] \
-     || [ "$actual_branch" != "$ADOPTED_WORKTREE_BRANCH" ] \
-     || [ "$actual_head" != "$ADOPTED_WORKTREE_HEAD" ]; then
-    echo "error: adopted worktree identity changed during $phase; expected path '$ADOPTED_WORKTREE_PATH', branch '$ADOPTED_WORKTREE_BRANCH', HEAD '$ADOPTED_WORKTREE_HEAD', got path '${actual_path:-missing}', branch '${actual_branch:-detached-or-missing}', HEAD '${actual_head:-missing}'" >&2
-    return 1
-  fi
+  local phase=$1
+  fm_adopted_worktree_identity_matches \
+    "$WT" "$PROJ_ABS_REAL" "$ADOPTED_WORKTREE_PATH" \
+    "$ADOPTED_WORKTREE_BRANCH" "$ADOPTED_WORKTREE_HEAD" || {
+      echo "error: adopted worktree identity changed during $phase; expected path '$ADOPTED_WORKTREE_PATH', branch '$ADOPTED_WORKTREE_BRANCH', HEAD '$ADOPTED_WORKTREE_HEAD' (validation=${FM_ADOPTED_IDENTITY_ERROR:-unknown} detail=${FM_ADOPTED_IDENTITY_DETAIL:-none})" >&2
+      return 1
+    }
+}
+
+report_adopted_snapshot_refusal() {
+  case "${FM_ADOPTED_IDENTITY_ERROR:-unknown}" in
+    absolute) echo "error: --existing-worktree requires an exact absolute path, got '$EXISTING_WORKTREE_ARG'" >&2 ;;
+    newline) echo "error: --existing-worktree path must not contain a newline" >&2 ;;
+    missing) echo "error: adopted worktree does not exist as a directory: $EXISTING_WORKTREE_ARG" >&2 ;;
+    resolve) echo "error: adopted worktree cannot be resolved exactly: $EXISTING_WORKTREE_ARG" >&2 ;;
+    nonphysical) echo "error: --existing-worktree must use the exact physical worktree path '$FM_ADOPTED_IDENTITY_DETAIL', not '$EXISTING_WORKTREE_ARG'" >&2 ;;
+    project-root) echo "error: requested project is not its exact Git checkout root: $PROJ_ABS" >&2 ;;
+    isolated) echo "error: --existing-worktree did not yield an isolated worktree (resolved '$EXISTING_WORKTREE_ARG'; worktree root '${FM_ADOPTED_IDENTITY_DETAIL:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout" >&2 ;;
+    common-directory) echo "error: adopted worktree does not belong to the requested project's Git common directory" >&2 ;;
+    inventory) echo "error: requested project's registered worktree inventory cannot be read" >&2 ;;
+    registration) echo "error: adopted path must occur exactly once in the requested project's registered Git worktree inventory (found ${FM_ADOPTED_IDENTITY_DETAIL:-unknown})" >&2 ;;
+    named-branch) echo "error: --existing-worktree requires a named current branch; detached HEAD cannot satisfy the adopted-branch contract" >&2 ;;
+    head) echo "error: adopted worktree has no resolvable HEAD commit" >&2 ;;
+    *) echo "error: adopted worktree identity is ambiguous; refusing adoption" >&2 ;;
+  esac
 }
 
 prepare_existing_worktree_adoption() {
-  local requested=$EXISTING_WORKTREE_ARG project_top project_top_real
-  local project_common worktree_common registered=0 item listed listed_real
+  local requested=$EXISTING_WORKTREE_ARG
   local meta meta_id claim claim_real own project branch prior_meta=0
-  local adopted_brief_tmp status_file_q expected_path_q expected_branch_q expected_head_q
+  local adopted_brief_tmp status_file_q expected_path_q expected_branch_q expected_head_q brief_path
 
-  case "$requested" in
-    /*) ;;
-    *) echo "error: --existing-worktree requires an exact absolute path, got '$requested'" >&2; return 1 ;;
-  esac
-  case "$requested" in
-    *$'\n'*|*$'\r'*) echo "error: --existing-worktree path must not contain a newline" >&2; return 1 ;;
-  esac
-  [ -d "$requested" ] || { echo "error: adopted worktree does not exist as a directory: $requested" >&2; return 1; }
-  ADOPTED_WORKTREE_PATH=$(cd -- "$requested" 2>/dev/null && pwd -P) || {
-    echo "error: adopted worktree cannot be resolved exactly: $requested" >&2
+  if ! fm_adopted_worktree_snapshot "$requested" "$PROJ_ABS_REAL"; then
+    report_adopted_snapshot_refusal
     return 1
-  }
-  [ "$requested" = "$ADOPTED_WORKTREE_PATH" ] || {
-    echo "error: --existing-worktree must use the exact physical worktree path '$ADOPTED_WORKTREE_PATH', not '$requested'" >&2
-    return 1
-  }
+  fi
+  ADOPTED_WORKTREE_PATH=$FM_ADOPTED_IDENTITY_WORKTREE
+  ADOPTED_WORKTREE_BRANCH=$FM_ADOPTED_IDENTITY_BRANCH
+  ADOPTED_WORKTREE_HEAD=$FM_ADOPTED_IDENTITY_HEAD
   WT=$ADOPTED_WORKTREE_PATH
-  project_top=$(git -C "$PROJ_ABS" rev-parse --show-toplevel 2>/dev/null || true)
-  project_top_real=$(cd -- "$project_top" 2>/dev/null && pwd -P) || project_top_real=
-  [ "$project_top_real" = "$PROJ_ABS_REAL" ] || {
-    echo "error: requested project is not its exact Git checkout root: $PROJ_ABS" >&2
-    return 1
-  }
-  validate_spawn_worktree "--existing-worktree" "$requested"
-  project_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
-  worktree_common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
-  project_common=$(cd -- "$project_common" 2>/dev/null && pwd -P) || project_common=
-  worktree_common=$(cd -- "$worktree_common" 2>/dev/null && pwd -P) || worktree_common=
-  [ -n "$project_common" ] && [ "$project_common" = "$worktree_common" ] || {
-    echo "error: adopted worktree does not belong to the requested project's Git common directory" >&2
-    return 1
-  }
-  git -C "$PROJ_ABS" worktree list --porcelain -z >/dev/null 2>&1 || {
-    echo "error: requested project's registered worktree inventory cannot be read" >&2
-    return 1
-  }
-  while IFS= read -r -d '' item; do
-    case "$item" in
-      worktree\ *)
-        listed=${item#worktree }
-        listed_real=$(cd -- "$listed" 2>/dev/null && pwd -P) || listed_real=$listed
-        [ "$listed_real" != "$WT" ] || registered=$((registered + 1))
-        ;;
-    esac
-  done < <(git -C "$PROJ_ABS" worktree list --porcelain -z)
-  [ "$registered" -eq 1 ] || {
-    echo "error: adopted path must occur exactly once in the requested project's registered Git worktree inventory (found $registered)" >&2
-    return 1
-  }
-  ADOPTED_WORKTREE_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  [ -n "$ADOPTED_WORKTREE_BRANCH" ] || {
-    echo "error: --existing-worktree requires a named current branch; detached HEAD cannot satisfy the adopted-branch contract" >&2
-    return 1
-  }
-  ADOPTED_WORKTREE_HEAD=$(git -C "$WT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
-  [ -n "$ADOPTED_WORKTREE_HEAD" ] || {
-    echo "error: adopted worktree has no resolvable HEAD commit" >&2
-    return 1
-  }
 
   mkdir -p "$STATE" || return 1
   ADOPTION_LOCK="$STATE/.existing-worktree-adoption.lock"
@@ -1601,12 +1588,23 @@ prepare_existing_worktree_adoption() {
       return 1
     fi
   done
+  ADOPTED_PRIOR_META=$prior_meta
 
   status_file_q=$(shell_quote "$STATE/$ID.status")
   expected_path_q=$(shell_quote "$ADOPTED_WORKTREE_PATH")
   expected_branch_q=$(shell_quote "$ADOPTED_WORKTREE_BRANCH")
   expected_head_q=$(shell_quote "$ADOPTED_WORKTREE_HEAD")
-  adopted_brief_tmp=$(mktemp "$STATE/.${ID}.adopted-brief.XXXXXXXX") || return 1
+  brief_path="$STATE/$ID.adopted-brief.md"
+  if [ "$prior_meta" -eq 1 ] && { [ -e "$brief_path" ] || [ -L "$brief_path" ]; }; then
+    [ -f "$brief_path" ] && [ ! -L "$brief_path" ] || {
+      echo "error: existing adopted setup addendum for task $ID is not one regular file; recovery refused" >&2
+      return 1
+    }
+    ADOPTED_BRIEF_PREVIOUS_TMP=$(umask 077; mktemp "$STATE/.${ID}.adopted-brief.previous.XXXXXXXX") || return 1
+    cp -- "$brief_path" "$ADOPTED_BRIEF_PREVIOUS_TMP" || return 1
+    ADOPTED_BRIEF_PREVIOUS_PRESENT=1
+  fi
+  adopted_brief_tmp=$(umask 077; mktemp "$STATE/.${ID}.adopted-brief.XXXXXXXX") || return 1
   {
     printf '%s\n' '# Adopted worktree setup override'
     printf '%s\n' 'This launch adopts a pre-existing worktree and branch. This section supersedes only original Setup text that describes a disposable, detached, clean worktree or tells you to create or switch branches. Every other task, rule, status, and definition-of-done instruction below still applies.'
@@ -1628,9 +1626,9 @@ prepare_existing_worktree_adoption() {
     cat "$BRIEF"
   } > "$adopted_brief_tmp" || { rm -f -- "$adopted_brief_tmp"; return 1; }
   chmod 0600 "$adopted_brief_tmp" || { rm -f -- "$adopted_brief_tmp"; return 1; }
-  mv -f -- "$adopted_brief_tmp" "$STATE/$ID.adopted-brief.md" || return 1
-  [ "$prior_meta" -eq 1 ] || ADOPTED_BRIEF_ABORT_CLEANUP=1
-  BRIEF="$STATE/$ID.adopted-brief.md"
+  mv -f -- "$adopted_brief_tmp" "$brief_path" || return 1
+  ADOPTED_BRIEF_ABORT_CLEANUP=1
+  BRIEF=$brief_path
   BRIEF_REAL="$BRIEF"
   verify_adopted_identity "adoption preflight"
 }
@@ -1738,7 +1736,10 @@ case "$BACKEND" in
     # stays $T (the name form), which is safe now that rename is disabled.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$TASK_CWD") || exit 1
     WT_TARGET="$WID"
-    [ "$EXISTING_WORKTREE_SET" -eq 0 ] || ADOPTED_ENDPOINT_ABORT_CLEANUP=1
+    if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
+      ADOPTED_ENDPOINT_ID=$WID
+      ADOPTED_ENDPOINT_ABORT_CLEANUP=1
+    fi
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -2434,7 +2435,7 @@ META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 META_PUBLISH_PATH="$STATE/$ID.meta"
 if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
-  ADOPTED_META_TMP="$STATE/.${ID}.meta.tmp.$$"
+  ADOPTED_META_TMP=$(umask 077; mktemp "$STATE/.${ID}.meta.XXXXXXXX") || exit 1
   META_PUBLISH_PATH=$ADOPTED_META_TMP
 fi
 {
@@ -2456,6 +2457,12 @@ fi
   fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   # Default-off writes no traceparent= line (meta stays byte-identical).
+  # Adoption publishes the intended carrier in the same atomic record as the
+  # rest of its recovery identity; a later send refusal keeps that complete
+  # record for the retry, which reuses the same carrier.
+  if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
+    [ -z "$SPAWN_TRACEPARENT" ] || echo "traceparent=$SPAWN_TRACEPARENT"
+  fi
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
@@ -2483,15 +2490,29 @@ fi
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
+  if [ "$EXISTING_WORKTREE_SET" -eq 1 ] && [ "$ADOPTED_PRIOR_META" -eq 1 ]; then
+    while IFS= read -r prior_line || [ -n "$prior_line" ]; do
+      case "$prior_line" in
+        window=*|endpoint_task_id=*|worktree=*|project=*|harness=*|kind=*|mode=*|yolo=*|tasktmp=*|model=*|effort=*|\
+        worktree_ownership=*|adopted_branch=*|adopted_head=*|busy_gen=*|traceparent=*|backend=*|\
+        herdr_session=*|herdr_workspace_id=*|herdr_tab_id=*|herdr_pane_id=*|\
+        zellij_session=*|zellij_tab_id=*|zellij_pane_id=*|orca_worktree_id=*|terminal=*|\
+        cmux_workspace_id=*|cmux_surface_id=*|home=*|projects=*) ;;
+        *) printf '%s\n' "$prior_line" ;;
+      esac
+    done < "$STATE/$ID.meta"
+  fi
 } > "$META_PUBLISH_PATH"
 if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
+  verify_adopted_identity "metadata publication" || exit 1
   mv -f -- "$ADOPTED_META_TMP" "$STATE/$ID.meta"
   ADOPTED_META_TMP=
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
-  ADOPTED_ENDPOINT_ABORT_CLEANUP=0
   ADOPTED_BRIEF_ABORT_CLEANUP=0
+  [ -z "$ADOPTED_BRIEF_PREVIOUS_TMP" ] || rm -f -- "$ADOPTED_BRIEF_PREVIOUS_TMP"
+  ADOPTED_BRIEF_PREVIOUS_TMP=
   ADOPTION_LOCK_HELD=0
   fm_lock_release "$ADOPTION_LOCK" || true
 fi
@@ -2547,12 +2568,16 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # entirely when trace context is off.
 if [ -n "$SPAWN_TRACEPARENT" ]; then
   if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
-    if ! echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"; then
+    if [ "$EXISTING_WORKTREE_SET" -eq 0 ] \
+       && ! echo "traceparent=$SPAWN_TRACEPARENT" >> "$STATE/$ID.meta"; then
       LAUNCH="unset TRACEPARENT; $LAUNCH"
     fi
   else
     TRACE_SEND_STATUS=$?
-    if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
+    if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
+      echo "error: trace-context input could not be delivered for adopted task $ID; endpoint cleanup will preserve a retryable durable claim" >&2
+      exit 1
+    elif [ "$TRACE_SEND_STATUS" -eq 2 ]; then
       echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
       exit 1
     fi
@@ -2599,6 +2624,8 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
     fi
   fi
 fi
+
+[ "$EXISTING_WORKTREE_SET" -eq 0 ] || ADOPTED_ENDPOINT_ABORT_CLEANUP=0
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

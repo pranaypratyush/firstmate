@@ -180,6 +180,25 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+### Adopted-worktree endpoint placement
+
+Exact adopted-worktree CWD placement and stable-window-id abort cleanup were verified on 2026-08-07 with tmux 3.7b on Linux.
+The real-socket guard waits until the pane foreground is structurally a shell without interrupting startup, uses shell-neutral command payloads, creates a task window in a path containing a space, verifies the physical pane CWD, deliberately renames the window, removes it by the creation-time `@<id>`, and proves an independent control window remains.
+
+```sh
+tmux -V
+bin/fm-test-run.sh tests/fm-backend-tmux-smoke.test.sh
+```
+
+Observed bounded output:
+
+```text
+tmux 3.7b
+ok - real tmux: adopted task creation reports exact cwd and stable-id cleanup survives a lost name
+ok - real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+```
+
 ## Herdr
 
 The compatibility floor is protocol 14.

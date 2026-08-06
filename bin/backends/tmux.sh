@@ -137,6 +137,20 @@ fm_backend_tmux_kill() {  # <target>
   tmux kill-window -t "=$session:=$window" 2>/dev/null || true
 }
 
+# fm_backend_tmux_kill_window_id: remove one exact window by the stable id
+# returned from fm_backend_tmux_create_task. This is the abort-cleanup path for
+# a task whose name could not be pinned; it never falls back to a session/name
+# selector and returns the real tmux status so its caller can surface failure.
+fm_backend_tmux_kill_window_id() {  # <window-id>
+  local window_id=${1:-}
+  case "$window_id" in
+    @|@*[!0-9]*) return 1 ;;
+    @*) ;;
+    *) return 1 ;;
+  esac
+  tmux kill-window -t "$window_id"
+}
+
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
 # tmux's own `#{pane_current_command}`, already resolved from the pty's
 # foreground process group (verified empirically with real tmux 3.6a: a

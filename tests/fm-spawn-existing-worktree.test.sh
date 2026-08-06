@@ -9,6 +9,7 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-existing-worktree)
+REAL_GIT=$(command -v git)
 fm_git_identity fmtest fmtest@example.invalid
 
 make_fakebin() {
@@ -23,7 +24,30 @@ case "$*" in
 esac
 case "${1:-}" in
   display-message) printf '%s\n' firstmate ;;
-  new-window) printf '%s\n' @adopted ;;
+  list-windows)
+    [ -z "${FM_ADOPT_WINDOW_STATE:-}" ] || [ ! -s "$FM_ADOPT_WINDOW_STATE" ] || cat "$FM_ADOPT_WINDOW_STATE"
+    ;;
+  new-window)
+    window=
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -n ]; then window=${2:-}; break; fi
+      shift
+    done
+    [ -z "${FM_ADOPT_WINDOW_STATE:-}" ] || printf '%s\n' "$window" > "$FM_ADOPT_WINDOW_STATE"
+    printf '%s\n' @123
+    ;;
+  kill-window)
+    [ -z "${FM_ADOPT_WINDOW_STATE:-}" ] || : > "$FM_ADOPT_WINDOW_STATE"
+    ;;
+  send-keys)
+    if [ -n "${FM_ADOPT_SEND_COUNT:-}" ]; then
+      count=0
+      [ ! -s "$FM_ADOPT_SEND_COUNT" ] || count=$(cat "$FM_ADOPT_SEND_COUNT")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_ADOPT_SEND_COUNT"
+      [ "$count" != "${FM_ADOPT_FAIL_SEND_AT:-0}" ] || exit 1
+    fi
+    ;;
   *) : ;;
 esac
 exit 0
@@ -50,10 +74,14 @@ setup_case() {  # <name> <task-id> <ship|scout>
   WT="$CASE/adopted-wt"
   TLOG="$CASE/tmux.log"
   TREELOG="$CASE/treehouse.log"
+  WINDOW_STATE="$CASE/window.state"
+  SEND_COUNT="$CASE/send.count"
   FAKEBIN=$(make_fakebin "$CASE/fakes")
   mkdir -p "$HOME_DIR/data/$id" "$HOME_DIR/state" "$HOME_DIR/config" "$HOME_DIR/projects"
   : > "$TLOG"
   : > "$TREELOG"
+  : > "$WINDOW_STATE"
+  : > "$SEND_COUNT"
   git init -q -b main "$PROJ"
   printf '%s\n' baseline > "$PROJ/base.txt"
   git -C "$PROJ" add base.txt
@@ -81,6 +109,10 @@ run_spawn() {  # <id> <ship|scout> <existing-path> [extra args...]
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' FM_FAKE_PANE_PATH="$WT" \
     FM_ADOPT_TMUX_LOG="$TLOG" FM_ADOPT_TREEHOUSE_LOG="$TREELOG" \
+    FM_ADOPT_WINDOW_STATE="$WINDOW_STATE" FM_ADOPT_SEND_COUNT="$SEND_COUNT" \
+    FM_ADOPT_FAIL_SEND_AT="${FM_ADOPT_FAIL_SEND_AT:-0}" \
+    FM_ADOPT_GIT_COUNT="${FM_ADOPT_GIT_COUNT:-}" FM_ADOPT_GIT_MUTATE_AT="${FM_ADOPT_GIT_MUTATE_AT:-0}" \
+    FM_ADOPT_MUTATE_WT="${FM_ADOPT_MUTATE_WT:-}" FM_ADOPT_REAL_GIT="$REAL_GIT" \
     PATH="$FAKEBIN:$PATH" \
     "$SPAWN" "${args[@]}" "$@" 2>&1
 }
@@ -239,26 +271,44 @@ test_endpoint_cwd_mismatch_is_cleaned_without_meta() {
     FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_SPAWN_NO_GUARD=1 TMUX='fake,1,0' \
     FM_FAKE_PANE_PATH="$PROJ" FM_ADOPT_TMUX_LOG="$TLOG" FM_ADOPT_TREEHOUSE_LOG="$TREELOG" \
+    FM_ADOPT_WINDOW_STATE="$WINDOW_STATE" FM_ADOPT_SEND_COUNT="$SEND_COUNT" \
     PATH="$FAKEBIN:$PATH" "$SPAWN" "$id" "$PROJ" --harness codex --backend tmux \
     --existing-worktree "$WT" --mode local-only --yolo off 2>&1)
   status=$?
   expect_code 1 "$status" "endpoint cwd mismatch should refuse"
   assert_contains "$out" 'endpoint did not start in the exact worktree' "cwd mismatch refusal lacked exact evidence"
-  assert_grep 'tmux kill-window ' "$TLOG" "failed adopted endpoint was not cleaned up"
+  assert_grep 'tmux kill-window -t @123' "$TLOG" "failed adopted endpoint was not cleaned up by stable id"
   assert_absent "$HOME_DIR/state/$id.meta" "cwd mismatch published task metadata"
   assert_absent "$HOME_DIR/state/$id.adopted-brief.md" "cwd mismatch retained a new adoption addendum"
   pass "fm-spawn cleans a mismatched endpoint and publishes no durable adoption claim"
 }
 
 test_recovery_reuses_claim_and_recaptures_head() {
-  local id=adopt-recovery-l2 out status new_head
+  local id=adopt-recovery-l2 out status new_head meta_before brief_before
   setup_case recovery "$id" ship
   run_spawn "$id" ship "$WT" >/dev/null
   printf '%s\n' recovered-progress > "$WT/progress.txt"
   git -C "$WT" add progress.txt
   git -C "$WT" commit -q -m progress
   new_head=$(git -C "$WT" rev-parse HEAD)
+  {
+    printf '%s\n' 'pr=https://example.invalid/pull/42'
+    printf '%s\n' "pr_head=$(git -C "$WT" rev-parse HEAD)"
+    printf '%s\n' 'x_request=relay-42'
+  } >> "$HOME_DIR/state/$id.meta"
+  meta_before="$CASE/meta.before"
+  brief_before="$CASE/brief.before"
+  cp "$HOME_DIR/state/$id.meta" "$meta_before"
+  cp "$HOME_DIR/state/$id.adopted-brief.md" "$brief_before"
   : > "$TLOG"
+
+  out=$(run_spawn "$id" ship "$WT"); status=$?
+  expect_code 1 "$status" "recovery should refuse while the prior endpoint still exists"
+  assert_contains "$out" 'already exists' "live-window recovery refusal was not explicit"
+  cmp -s "$meta_before" "$HOME_DIR/state/$id.meta" || fail "failed recovery changed durable metadata"
+  cmp -s "$brief_before" "$HOME_DIR/state/$id.adopted-brief.md" || fail "failed recovery desynchronized the adopted addendum"
+
+  : > "$WINDOW_STATE"
 
   out=$(run_spawn "$id" ship "$WT")
   status=$?
@@ -266,6 +316,10 @@ test_recovery_reuses_claim_and_recaptures_head() {
   assert_contains "$out" "spawned $id" "adopted recovery did not report success"
   assert_grep "adopted_head=$new_head" "$HOME_DIR/state/$id.meta" "recovery did not record the relaunch intake HEAD"
   assert_grep "expected_head='$new_head'" "$HOME_DIR/state/$id.adopted-brief.md" "recovery addendum did not verify the relaunch HEAD"
+  assert_grep 'pr=https://example.invalid/pull/42' "$HOME_DIR/state/$id.meta" "recovery discarded the durable PR URL"
+  assert_grep "pr_head=$new_head" "$HOME_DIR/state/$id.meta" "recovery discarded the durable PR head"
+  assert_grep 'x_request=relay-42' "$HOME_DIR/state/$id.meta" "recovery discarded durable Relay linkage"
+  [ "$(grep -c '^pr=' "$HOME_DIR/state/$id.meta")" -eq 1 ] || fail "recovery duplicated the durable PR field"
   assert_no_grep 'treehouse ' "$TREELOG" "adopted recovery allocated another worktree"
 
   git -C "$WT" checkout -q -b "wrong/$id"
@@ -275,6 +329,60 @@ test_recovery_reuses_claim_and_recaptures_head() {
   assert_contains "$out" 'does not prove the same adopted worktree, project, and branch' "branch-drift recovery refusal lacked ownership evidence"
   assert_no_endpoint_created
   pass "fm-spawn recovery reuses its durable adopted claim, recaptures HEAD, and refuses branch drift"
+}
+
+test_identity_change_before_publication_refuses_atomically() {
+  local id=adopt-identity-race-m3 out status git_count old_head
+  setup_case identity-race "$id" ship
+  git_count="$CASE/git-worktree-list.count"
+  old_head=$(git -C "$WT" rev-parse HEAD)
+  cat > "$FAKEBIN/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if printf '%s\n' "$*" | grep -q 'worktree list'; then
+  count=0
+  [ -z "${FM_ADOPT_GIT_COUNT:-}" ] || [ ! -s "$FM_ADOPT_GIT_COUNT" ] || count=$(cat "$FM_ADOPT_GIT_COUNT")
+  count=$((count + 1))
+  [ -z "${FM_ADOPT_GIT_COUNT:-}" ] || printf '%s\n' "$count" > "$FM_ADOPT_GIT_COUNT"
+  if [ "$count" = "${FM_ADOPT_GIT_MUTATE_AT:-0}" ]; then
+    "$FM_ADOPT_REAL_GIT" -C "$FM_ADOPT_MUTATE_WT" commit -q --allow-empty -m external-race
+  fi
+fi
+exec "$FM_ADOPT_REAL_GIT" "$@"
+SH
+  chmod +x "$FAKEBIN/git"
+
+  out=$(FM_ADOPT_GIT_COUNT="$git_count" FM_ADOPT_GIT_MUTATE_AT=4 FM_ADOPT_MUTATE_WT="$WT" \
+    run_spawn "$id" ship "$WT")
+  status=$?
+  expect_code 1 "$status" "identity change immediately before publication should refuse"
+  assert_contains "$out" 'identity changed during metadata publication' "publication refusal did not name the final identity gate"
+  [ "$(git -C "$WT" rev-parse HEAD)" != "$old_head" ] || fail "identity-race fixture did not advance HEAD"
+  assert_absent "$HOME_DIR/state/$id.meta" "identity mismatch published adopted metadata"
+  assert_absent "$HOME_DIR/state/$id.adopted-brief.md" "identity mismatch retained an unmatched addendum"
+  assert_grep 'tmux kill-window -t @123' "$TLOG" "identity mismatch did not remove the endpoint by stable id"
+  pass "fm-spawn revalidates complete adopted identity immediately before atomic metadata publication"
+}
+
+test_post_publication_send_failures_are_retryable() {
+  local fail_at id out status
+  for fail_at in 1 2 3; do
+    id="adopt-send-fail-${fail_at}-n4"
+    setup_case "send-fail-$fail_at" "$id" ship
+    out=$(FM_ADOPT_FAIL_SEND_AT="$fail_at" run_spawn "$id" ship "$WT")
+    status=$?
+    expect_code 1 "$status" "post-publication send $fail_at should fail the first spawn"
+    assert_present "$HOME_DIR/state/$id.meta" "send failure $fail_at lost the durable recovery claim"
+    assert_present "$HOME_DIR/state/$id.adopted-brief.md" "send failure $fail_at lost its aligned addendum"
+    [ ! -s "$WINDOW_STATE" ] || fail "send failure $fail_at left an endpoint that would collide with retry"
+    assert_grep 'tmux kill-window -t @123' "$TLOG" "send failure $fail_at was not cleaned by stable id"
+    : > "$SEND_COUNT"
+    out=$(run_spawn "$id" ship "$WT")
+    status=$?
+    expect_code 0 "$status" "send failure $fail_at did not permit a same-id retry"
+    assert_contains "$out" "spawned $id" "send failure $fail_at retry did not launch"
+  done
+  pass "fm-spawn keeps post-publication failures durable and collision-free for same-id retry"
 }
 
 test_teardown_retires_task_without_returning_adopted_worktree() {
@@ -294,6 +402,7 @@ test_teardown_retires_task_without_returning_adopted_worktree() {
     FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_TEARDOWN_GUARD_DONE=1 \
     FM_ADOPT_TMUX_LOG="$TLOG" FM_ADOPT_TREEHOUSE_LOG="$TREELOG" \
+    FM_ADOPT_WINDOW_STATE="$WINDOW_STATE" FM_ADOPT_SEND_COUNT="$SEND_COUNT" \
     PATH="$FAKEBIN:$PATH" "$TEARDOWN" "$id" 2>&1)
   status=$?
   expect_code 0 "$status" "landed adopted ship teardown should complete"
@@ -308,12 +417,48 @@ test_teardown_retires_task_without_returning_adopted_worktree() {
   pass "fm-teardown retires landed adopted task state and endpoint without reclaiming the worktree"
 }
 
+test_teardown_does_not_reap_external_worktree_processes() {
+  local id=adopt-external-process-p5 out status external_pid origin
+  setup_case external-process "$id" ship
+  origin="$CASE/origin.git"
+  git init -q --bare "$origin"
+  git -C "$PROJ" remote add origin "$origin"
+  git -C "$PROJ" push -q origin main
+  git -C "$WT" push -q -u origin "recovered/$id"
+  run_spawn "$id" ship "$WT" >/dev/null
+  (cd "$WT" && sleep 60) &
+  external_pid=$!
+  cat > "$FAKEBIN/lsof" <<SH
+#!/usr/bin/env bash
+printf 'p%s\nfcwd\nn%s\n' '$external_pid' '$WT'
+SH
+  chmod +x "$FAKEBIN/lsof"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_TEARDOWN_GUARD_DONE=1 \
+    FM_ADOPT_TMUX_LOG="$TLOG" FM_ADOPT_TREEHOUSE_LOG="$TREELOG" \
+    FM_ADOPT_WINDOW_STATE="$WINDOW_STATE" PATH="$FAKEBIN:$PATH" "$TEARDOWN" "$id" 2>&1)
+  status=$?
+  expect_code 0 "$status" "adopted teardown should ignore external worktree-rooted processes"
+  if ! kill -0 "$external_pid" 2>/dev/null; then
+    fail "adopted teardown killed an external process rooted in the leased worktree"
+  fi
+  kill "$external_pid" 2>/dev/null || true
+  wait "$external_pid" 2>/dev/null || true
+  assert_present "$WT" "external-process teardown removed the adopted worktree"
+  pass "fm-teardown never scans or reaps arbitrary processes by adopted-worktree cwd"
+}
+
 test_safe_ship_adoption_preserves_git_state
 test_safe_scout_adoption_has_non_discard_contract
 test_input_and_ownership_refusals_precede_endpoint
 test_incompatible_modes_refuse_before_endpoint
 test_endpoint_cwd_mismatch_is_cleaned_without_meta
 test_recovery_reuses_claim_and_recaptures_head
+test_identity_change_before_publication_refuses_atomically
+test_post_publication_send_failures_are_retryable
 test_teardown_retires_task_without_returning_adopted_worktree
+test_teardown_does_not_reap_external_worktree_processes
 
 echo "# all existing-worktree adoption tests passed"
