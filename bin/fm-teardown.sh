@@ -37,6 +37,16 @@
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
+# A ship/scout with worktree_ownership=adopted keeps an externally pre-leased
+# worktree. Teardown applies the same report, dirty-worktree, and landed-work
+# gates, concludes task-owned validation, reaps task processes, closes the exact
+# endpoint, and retires ordinary task state, but never detaches or deletes the
+# branch, removes worktree files, returns/prunes/resets the worktree, or calls a
+# worktree-provider removal operation. The marker is accepted only once and only
+# with one adopted_branch= and adopted_head= on the supported tmux ordinary-task
+# contract; any other value or shape refuses before cleanup mutation. Forced
+# recursive secondmate retirement preserves adopted child worktrees under the
+# same rule while still removing their endpoints and child-home task records.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -371,6 +381,100 @@ else
 fi
 [ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
 
+# Worktree ownership is an explicit cleanup authority. Legacy metadata has no
+# marker and remains an allocated Firstmate worktree. The only non-legacy value
+# is adopted; malformed or duplicate values refuse before any cleanup mutation.
+require_worktree_ownership() {  # <meta>
+  local meta=$1 count value
+  count=$(grep -c '^worktree_ownership=' "$meta" 2>/dev/null || true)
+  case "$count" in
+    0) printf '%s\n' allocated ;;
+    1)
+      value=$(grep '^worktree_ownership=' "$meta" | cut -d= -f2-)
+      [ "$value" = adopted ] || {
+        echo "error: unsupported worktree_ownership='$value' in $meta; ownership is uncertain, preserving task state" >&2
+        return 1
+      }
+      printf '%s\n' adopted
+      ;;
+    *)
+      echo "error: duplicate worktree_ownership fields in $meta; ownership is uncertain, preserving task state" >&2
+      return 1
+      ;;
+  esac
+}
+
+validate_adopted_worktree_metadata() {  # <meta> <kind> <backend>
+  local meta=$1 kind=$2 backend=$3 branch_count head_count branch head
+  local wt project wt_real project_real wt_top project_top wt_common project_common
+  local registered=0 item listed listed_real
+  [ "$kind" = ship ] || [ "$kind" = scout ] || {
+    echo "error: adopted worktree ownership is valid only for ordinary ship or scout tasks in $meta" >&2
+    return 1
+  }
+  [ "$backend" = tmux ] || {
+    echo "error: adopted worktree ownership is unsupported for backend=$backend in $meta; preserving task state" >&2
+    return 1
+  }
+  branch_count=$(grep -c '^adopted_branch=' "$meta" 2>/dev/null || true)
+  head_count=$(grep -c '^adopted_head=' "$meta" 2>/dev/null || true)
+  branch=$(grep '^adopted_branch=' "$meta" 2>/dev/null | cut -d= -f2-)
+  head=$(grep '^adopted_head=' "$meta" 2>/dev/null | cut -d= -f2-)
+  if ! { [ "$branch_count" = 1 ] && [ -n "$branch" ] \
+    && [ "$head_count" = 1 ] \
+    && printf '%s\n' "$head" | grep -Eq '^[0-9a-fA-F]{40,64}$'; }; then
+    echo "error: adopted worktree metadata in $meta lacks one exact branch and HEAD identity; preserving task state" >&2
+    return 1
+  fi
+  wt=$(fm_meta_get "$meta" worktree)
+  project=$(fm_meta_get "$meta" project)
+  # A vanished adopted worktree can still have its endpoint/state retired under
+  # explicit --force. When it exists, prove the complete project relationship
+  # before process cleanup or any other path-scoped action.
+  [ -e "$wt" ] || return 0
+  [ -d "$project" ] || {
+    echo "error: adopted worktree project is unavailable for $meta; ownership cannot be verified" >&2
+    return 1
+  }
+  wt_real=$(cd -- "$wt" 2>/dev/null && pwd -P) || wt_real=
+  project_real=$(cd -- "$project" 2>/dev/null && pwd -P) || project_real=
+  wt_top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null || true)
+  project_top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null || true)
+  wt_top=$(cd -- "$wt_top" 2>/dev/null && pwd -P) || wt_top=
+  project_top=$(cd -- "$project_top" 2>/dev/null && pwd -P) || project_top=
+  [ "$wt" = "$wt_real" ] && [ "$project" = "$project_real" ] \
+    && [ "$wt_real" = "$wt_top" ] && [ "$project_real" = "$project_top" ] \
+    && [ "$wt_real" != "$project_real" ] || {
+    echo "error: adopted worktree path or project root in $meta is no longer exact; preserving task state" >&2
+    return 1
+  }
+  wt_common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  wt_common=$(cd -- "$wt_common" 2>/dev/null && pwd -P) || wt_common=
+  project_common=$(cd -- "$project_common" 2>/dev/null && pwd -P) || project_common=
+  [ -n "$wt_common" ] && [ "$wt_common" = "$project_common" ] || {
+    echo "error: adopted worktree in $meta no longer belongs to its recorded project; preserving task state" >&2
+    return 1
+  }
+  while IFS= read -r -d '' item; do
+    case "$item" in
+      worktree\ *)
+        listed=${item#worktree }
+        listed_real=$(cd -- "$listed" 2>/dev/null && pwd -P) || listed_real=$listed
+        [ "$listed_real" != "$wt_real" ] || registered=$((registered + 1))
+        ;;
+    esac
+  done < <(git -C "$project" worktree list --porcelain -z)
+  [ "$registered" -eq 1 ] || {
+    echo "error: adopted worktree in $meta is not exactly registered with its project; preserving task state" >&2
+    return 1
+  }
+  [ "$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "$branch" ] || {
+    echo "error: adopted worktree branch no longer matches the intake identity in $meta; preserving task state" >&2
+    return 1
+  }
+}
+
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
@@ -381,6 +485,14 @@ WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
+KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
+[ -n "$KIND" ] || KIND=ship
+MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
+[ -n "$MODE" ] || MODE=no-mistakes
+WORKTREE_OWNERSHIP=$(require_worktree_ownership "$META") || exit 1
+if [ "$WORKTREE_OWNERSHIP" = adopted ]; then
+  validate_adopted_worktree_metadata "$META" "$KIND" "$BACKEND" || exit 1
+fi
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
 fi
@@ -396,10 +508,6 @@ fi
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
 
-KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
-[ -n "$KIND" ] || KIND=ship
-MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
-[ -n "$MODE" ] || MODE=no-mistakes
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -1826,7 +1934,7 @@ preflight_firstmate_home_process_event_tree() {
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
+  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_ownership
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -1838,11 +1946,17 @@ validate_firstmate_home_children_removal() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
+    child_ownership=$(require_worktree_ownership "$child_meta") || return 1
+    if [ "$child_ownership" = adopted ]; then
+      validate_adopted_worktree_metadata "$child_meta" "$child_kind" "$child_backend" || return 1
+    fi
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
       validate_firstmate_home_children_removal "$child_home" || return 1
+    elif [ "$child_ownership" = adopted ]; then
+      :
     elif [ "$child_backend" = orca ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
@@ -1994,7 +2108,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_ownership
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -2005,6 +2119,10 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
+    child_ownership=$(require_worktree_ownership "$child_meta") || return 1
+    if [ "$child_ownership" = adopted ]; then
+      validate_adopted_worktree_metadata "$child_meta" "$child_kind" "$child_backend" || return 1
+    fi
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
     else
@@ -2043,6 +2161,8 @@ cleanup_firstmate_home_children() {
         cleanup_firstmate_home_children "$child_home" || return $?
         remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return $?
       fi
+    elif [ "$child_ownership" = adopted ]; then
+      :
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
@@ -2080,7 +2200,8 @@ cleanup_firstmate_home_children() {
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
-      "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current"
+      "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
+      "$sub_state/$child_id.adopted-brief.md"
   done
 }
 
@@ -2177,6 +2298,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
+if [ "$WORKTREE_OWNERSHIP" = adopted ] && [ "$FORCE" != "--force" ] \
+   && ! inspectable_git_worktree "$WT"; then
+  echo "REFUSED: adopted worktree for task $ID is not inspectable at ${WT:-<missing>}." >&2
+  echo "Cannot run landed-work checks; restore the exact path or use --force only with explicit discard approval." >&2
+  exit 1
+fi
+
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
@@ -2220,7 +2348,12 @@ if [ "$BACKEND" = herdr ]; then
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
+if [ "$WORKTREE_OWNERSHIP" = adopted ]; then
+  # The endpoint and Firstmate state are ours to retire, but the pre-leased
+  # worktree is not. Do not detach, delete its branch, remove files, return it
+  # to Treehouse, or invoke any other worktree-provider lifecycle operation.
+  :
+elif [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
@@ -2353,6 +2486,7 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" \
+  "$STATE/$ID.adopted-brief.md" \
   "$STATE/.$ID.open-decisions-cursor"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true

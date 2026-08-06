@@ -31,6 +31,7 @@ Do not sweep another home's endpoints or infer ownership from a matching window 
 
 Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.
 Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.
+When the task metadata records `worktree_ownership=adopted`, relaunch it through `bin/fm-spawn.sh --existing-worktree <exact recorded worktree path>` with its recorded project, kind, harness, model, effort, backend, mode, and yolo inputs; the spawn path revalidates the durable claim and current named branch, captures the relaunch HEAD in its generated setup addendum, and refuses any allocation-owning or worktree-writing mode.
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
