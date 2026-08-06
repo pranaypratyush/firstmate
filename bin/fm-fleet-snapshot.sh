@@ -32,7 +32,9 @@
 #     endpoint.exists is the cheap backend endpoint-presence read.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
-#   scout_reports[]: present data/<id>/report.md pointers.
+#   scout_reports[]: present data/<id>/report.md pointers plus bounded leading
+#     context for current or completed structured work. Context reads are capped
+#     per report and across the snapshot; other report pointers remain present.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
 #     (orphan structured in-flight ids with no state/<id>.meta, and unstructured
@@ -94,6 +96,9 @@ FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
+FM_SNAPSHOT_REPORT_SUMMARIES=${FM_SNAPSHOT_REPORT_SUMMARIES:-40}
+FM_SNAPSHOT_REPORT_SUMMARY_BYTES=${FM_SNAPSHOT_REPORT_SUMMARY_BYTES:-4096}
+FM_SNAPSHOT_REPORT_SUMMARY_CHARS=${FM_SNAPSHOT_REPORT_SUMMARY_CHARS:-800}
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -124,6 +129,9 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_LINES "$FM_SNAPSHOT_REGISTRY_LINES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_RECORDS "$FM_SNAPSHOT_REGISTRY_RECORDS"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_REPORT_SUMMARIES "$FM_SNAPSHOT_REPORT_SUMMARIES"
+validate_positive_bound FM_SNAPSHOT_REPORT_SUMMARY_BYTES "$FM_SNAPSHOT_REPORT_SUMMARY_BYTES"
+validate_positive_bound FM_SNAPSHOT_REPORT_SUMMARY_CHARS "$FM_SNAPSHOT_REPORT_SUMMARY_CHARS"
 
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
@@ -635,7 +643,7 @@ main_inventory_json() {  # <backlog-json> <tasks-json>
 # validated parent read needs.
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
-secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
+secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-json>
   jq -n \
     --arg generated "$SNAPSHOT_NOW" \
     --arg home "$FM_HOME" \
@@ -644,10 +652,15 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
     --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
     --argjson backlog "$1" \
-    --argjson tasks "$2" '
+    --argjson tasks "$2" \
+    --argjson reports "$3" '
     def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
+    def report_context($id):
+      ([ $reports[]? | select(.id == $id) | .summary_excerpt // empty ][0]) // null;
+    def report_truncated($id):
+      ([ $reports[]? | select(.id == $id) | .summary_truncated ][0]) // false;
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
@@ -660,12 +673,14 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
     | ([ $queued_all[]
          | select(.captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
-            reason:(.hold_reason | trunc(160)),source:"backlog"} ]) as $captain_holds_all
+            reason:(.hold_reason | trunc(160)),context:((.body_excerpt // report_context(.id)) | if . == null then null else trunc(800) end),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(.state == "done" and .structured and .kind != "captain")
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
             pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
-            local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
+            local_note:((.local_note // null) | if . == null then null else trunc(120) end),
+            context:((.body_excerpt // report_context(.id)) | if . == null then null else trunc(800) end),
+            context_truncated:report_truncated(.id),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
     | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
     | ([ $owned_in_flight[]
@@ -703,7 +718,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
          | $tasks[]
          | select(.id == $work.id and .current_state.state == "working")
          | {id,kind,state:.current_state.state,source:.current_state.source,
-            doing:((.current_state.detail // "") | trunc(120))} ]) as $active_all
+            objective:(($work.title // .id) | trunc(160)),
+            doing:((.current_state.detail // "") | trunc(160)),
+            milestone:((.hints.last_event_text // "") | trunc(200)),
+            context:(($work.body_excerpt // report_context(.id)) | if . == null then null else trunc(800) end)} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
@@ -713,7 +731,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
             blocked_by:((.unresolved_blocker_ids | join(",")) | if . == "" then null else trunc(120) end),
             blocked_by_ids:(.blocked_by_ids | map(trunc(120))),
             unresolved_blocker_ids:(.unresolved_blocker_ids | map(trunc(120))),
-            reason:((.hold_reason // .blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
+            reason:((.hold_reason // .blocked_reason // "blocked") | trunc(120)),
+            context:((.body_excerpt // report_context(.id)) | if . == null then null else trunc(800) end),source:"backlog"} ]
        + [ $owned_in_flight[] as $work
            | $tasks[]
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
@@ -759,9 +778,12 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json>
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
-          kind:((.kind // null) | if . == null then null else trunc(40) end)}][:$queued_n]),
+          kind:((.kind // null) | if . == null then null else trunc(40) end),
+          context:((.body_excerpt // report_context(.id)) | if . == null then null else trunc(800) end)}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
-        endpoints:([$tasks[] | {id,state:.current_state.state,source:.current_state.source,
+        endpoints:([$tasks[] | . as $task | {id,state:.current_state.state,source:.current_state.source,
+          objective:(([ $owned_in_flight[] | select(.id == $task.id) | .title ][0] // .id) | trunc(160)),
+          milestone:((.hints.last_event_text // "") | trunc(200)),
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
         counts:{
           active_children:($active_all | length),
@@ -1330,31 +1352,53 @@ secondmate_landed_from_current_json() {  # <secondmate-current-json>
     | .records |= sort_by([(.completion.date // ""), .id]) | .records |= reverse'
 }
 
-scout_report_lines() {
-  local report id
+scout_report_lines() {  # <backlog-json> <tasks-json>
+  local report id relevant_ids summarized=0 content bytes truncated excerpt
   if [ ! -d "$DATA" ]; then
     jq -n '[]'
     return 0
   fi
+  relevant_ids=$(jq -n -r --argjson backlog "$1" --argjson tasks "$2" '
+    ([ $backlog.records[]?
+       | select(.structured and (.state == "in_flight" or .state == "done"))
+       | .id ] + [ $tasks[].id ]) | unique[]')
   LC_ALL=C find "$DATA" -mindepth 2 -maxdepth 2 -type f -name report.md -print \
     | sort \
     | while IFS= read -r report; do
       id=$(basename "$(dirname "$report")")
-      jq -n --arg id "$id" --arg path "$report" '{id:$id,path:$path}'
+      excerpt=
+      truncated=false
+      if [ "$summarized" -lt "$FM_SNAPSHOT_REPORT_SUMMARIES" ] \
+         && printf '%s\n' "$relevant_ids" | grep -Fqx -- "$id"; then
+        content=$(LC_ALL=C head -c "$((FM_SNAPSHOT_REPORT_SUMMARY_BYTES + 1))" "$report" 2>/dev/null || true)
+        bytes=$(printf '%s' "$content" | LC_ALL=C wc -c | tr -d ' ')
+        if [ "$bytes" -gt "$FM_SNAPSHOT_REPORT_SUMMARY_BYTES" ]; then
+          truncated=true
+          content=$(printf '%s' "$content" | LC_ALL=C head -c "$FM_SNAPSHOT_REPORT_SUMMARY_BYTES")
+        fi
+        excerpt=$(printf '%s' "$content" | jq -R -s -r \
+          --argjson chars "$FM_SNAPSHOT_REPORT_SUMMARY_CHARS" \
+          'gsub("[[:space:]]+"; " ") | gsub("^ | $"; "") | .[:$chars]')
+        summarized=$((summarized + 1))
+      fi
+      jq -n --arg id "$id" --arg path "$report" --arg excerpt "$excerpt" \
+        --argjson truncated "$truncated" \
+        '{id:$id,path:$path,summary_excerpt:($excerpt | if . == "" then null else . end),summary_truncated:$truncated}'
     done \
     | jq -s 'sort_by(.id)'
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
+SCOUT_REPORTS_JSON=$(scout_report_lines "$BACKLOG_JSON" "$TASKS_JSON") \
+  || { echo "fm-fleet-snapshot: scout report summary failed" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
-  secondmate_home_summary_json "$BACKLOG_JSON" "$TASKS_JSON" \
+  secondmate_home_summary_json "$BACKLOG_JSON" "$TASKS_JSON" "$SCOUT_REPORTS_JSON" \
     || { echo "fm-fleet-snapshot: secondmate home summary failed" >&2; exit 1; }
   exit 0
 fi
 
-SCOUT_REPORTS_JSON=$(scout_report_lines)
 MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
 SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \

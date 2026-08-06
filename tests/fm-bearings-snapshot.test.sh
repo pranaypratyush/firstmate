@@ -1889,6 +1889,93 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+# Triggering regression: a terse captain hold must carry enough bounded context to
+# identify the reviewed implementation, prior findings, fix disposition, and the
+# two distinct actions (review changes, then decide whether to merge).
+test_captain_call_carries_executable_review_and_merge_context() {
+  local home fakebin json
+  home=$(make_home captain-call-context)
+  : > "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] nm-codex-appserver-q8 - Codex app-server queue isolation implementation (repo: firstmate) (kind: captain) (hold: manual re-review and landing decision) (hold-kind: captain)
+  Prior review found cross-thread wake leakage and missing restart coverage; both are fixed. Remaining gap: no Windows evidence. Next: captain reviews the fixes, then separately decides whether to merge.
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .decisions_open[] | select(.id == "nm-codex-appserver-q8")
+    | .object == "Codex app-server queue isolation implementation"
+      and .requested_action == "manual re-review and landing decision"
+      and (.evidence | contains("cross-thread wake leakage"))
+      and (.evidence | contains("both are fixed"))
+      and (.evidence | contains("no Windows evidence"))
+      and (.evidence | contains("reviews the fixes, then separately decides whether to merge"))
+      and .action_owner == "captain"
+  ' >/dev/null || fail "Captain Call lacked executable review and merge context: $json"
+  pass "Captain Call carries the implementation, findings, caveat, and distinct review/merge actions"
+}
+
+# Triggering regression: four completed salvage scouts need their different
+# dispositions, while the live integrator keeps its objective and last structured
+# milestone even when the harness cannot provide current state.
+test_salvage_dispositions_and_unknown_integrator_milestone_surface() {
+  local home fakebin json id
+  home=$(make_home salvage-context)
+  : > "$home/data/secondmates.md"
+  mkdir -p "$home/projects/nsm-integrator"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] nsm-integrator - Integrate surviving NSM salvage into the canonical state model (repo: firstmate) (kind: ship) (since 2026-07-24)
+  Use each scout disposition to retain unique recovery behavior, omit superseded paths, and close the remaining restart evidence gap.
+
+## Queued
+
+## Done
+- [x] nsm-salvage-lock - NSM lock salvage analysis data/nsm-salvage-lock/report.md (repo: firstmate) (kind: scout) (reported 2026-07-23)
+- [x] nsm-salvage-watch - NSM watcher salvage analysis data/nsm-salvage-watch/report.md (repo: firstmate) (kind: scout) (reported 2026-07-23)
+- [x] nsm-salvage-restart - NSM restart salvage analysis data/nsm-salvage-restart/report.md (repo: firstmate) (kind: scout) (reported 2026-07-23)
+- [x] nsm-salvage-routing - NSM routing salvage analysis data/nsm-salvage-routing/report.md (repo: firstmate) (kind: scout) (reported 2026-07-23)
+EOF
+  for id in lock watch restart routing; do
+    mkdir -p "$home/data/nsm-salvage-$id"
+  done
+  printf '# Lock salvage\nDisposition: unique lease-recovery guard should be retained. Why now: the integrator needs it to prevent double ownership. Next: nsm-integrator ports the guard.\n' > "$home/data/nsm-salvage-lock/report.md"
+  printf '# Watcher salvage\nDisposition: watcher polling behavior is already superseded by the durable wake queue. Why now: copying it would revive duplicate polling. Next: nsm-integrator omits this path.\n' > "$home/data/nsm-salvage-watch/report.md"
+  printf '# Restart salvage\nDisposition: restart recovery looks unique, but crash-window evidence is missing. Why now: landing without proof risks lost wakeups. Next: nsm-integrator adds the missing restart test.\n' > "$home/data/nsm-salvage-restart/report.md"
+  printf '# Routing salvage\nDisposition: route normalization is already present upstream; only the malformed-route fixture is useful. Why now: the integrator should keep the test, not duplicate behavior. Next: nsm-integrator ports only the fixture.\n' > "$home/data/nsm-salvage-routing/report.md"
+  fm_write_meta "$home/state/nsm-integrator.meta" \
+    "backend=cmux" \
+    "window=workspace:missing-surface" \
+    "worktree=$home/projects/nsm-integrator" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  printf 'working: mapped all four scout dispositions and started the restart regression\n' > "$home/state/nsm-integrator.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.landed | length) == 4
+      and (.landed | any(.id == "nsm-salvage-lock" and (.outcome | contains("unique lease-recovery guard")) and (.outcome | contains("nsm-integrator ports"))))
+      and (.landed | any(.id == "nsm-salvage-watch" and (.outcome | contains("already superseded")) and (.outcome | contains("omits this path"))))
+      and (.landed | any(.id == "nsm-salvage-restart" and (.outcome | contains("evidence is missing")) and (.outcome | contains("adds the missing restart test"))))
+      and (.landed | any(.id == "nsm-salvage-routing" and (.outcome | contains("already present upstream")) and (.outcome | contains("ports only the fixture"))))
+      and (.in_flight | any(.id == "nsm-integrator"
+        and .state == "unknown"
+        and .objective == "Integrate surviving NSM salvage into the canonical state model"
+        and (.milestone | contains("mapped all four scout dispositions"))
+        and (.state_caveat | length) > 0
+        and (.context | contains("retain unique recovery behavior"))
+        and .owner == "nsm-integrator"))
+  ' >/dev/null || fail "salvage dispositions or unavailable-state milestone were compressed away: $json"
+  pass "salvage dispositions and the unknown integrator's last structured milestone remain understandable"
+}
+
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
@@ -1919,6 +2006,8 @@ test_main_unstructured_current_is_disclosed_with_structured_sibling
 test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
+test_captain_call_carries_executable_review_and_merge_context
+test_salvage_dispositions_and_unknown_integrator_milestone_surface
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface

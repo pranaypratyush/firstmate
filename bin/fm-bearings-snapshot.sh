@@ -55,7 +55,9 @@
 #   --all-pr-repos   query every discovered repository under --include-prs
 #   -h,--help        usage
 #
-# Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
+# Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, and no
+# renderer-side report reads. Causal context comes only from the canonical
+# snapshot's bounded backlog and report-summary fields.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -105,10 +107,12 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
 Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
-  secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
-  decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
-  gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
+Default fields: schema, home, generated, prs,
+  in_flight{id,kind,state,objective,doing,milestone,state_caveat,context,owner},
+  secondmates{id,state,objective,doing,milestone,state_caveat,provenance,freshness,age_seconds,contradiction,reason,owner},
+  decisions_open{id,key,verb,object,requested_action,evidence,owner},
+  landed{id,what,outcome,caveat,artifact,owner},
+  gates{id,title,context,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
@@ -301,19 +305,30 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def report_context($source; $id):
+    ([ $source.scout_reports[]? | select(.id == $id) | .summary_excerpt // empty ][0]) // null;
+  def report_truncated($source; $id):
+    ([ $source.scout_reports[]? | select(.id == $id) | .summary_truncated ][0]) // false;
+  def joined_context($body; $report):
+    ([ $body, $report ] | map(select(. != null and . != "")) | join(" ")
+     | if . == "" then null else trunc(800) end);
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
        | $groups[]
        | select(length > $i)
        | .[$i]][:$n];
-  ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
+  . as $source
+  | ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
   | (($fl | index("bodies")) != null) as $f_bodies
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
   | ([ .backlog.records[] | select(.state == "done" and .structured and .kind != "captain")
-       | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
+       | {id, title, pr_url, report_path, local_note, completion,
+          context:joined_context(.body_excerpt; report_context($source; .id)),
+          context_truncated:report_truncated($source; .id),
+          home:"(main)", home_id:"(main)"} ]) as $main_done
   | ((.secondmate_landed.records) // []) as $mate_done
   | ($main_done + $mate_done) as $all_landed_rows
   | ([ $all_landed_rows | group_by(.home_id)[]
@@ -348,13 +363,15 @@ MODEL=$(printf '%s' "$SNAP" | jq \
              else .current.state end)
          } ]) as $secondmate_views
   | ([ if .secondmate_current.registry.available == false then
-         {id:"(registry)",state:"unknown",doing:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
+         {id:"(registry)",state:"unknown",objective:"Registered secondmate inventory",doing:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
+          milestone:"",state_caveat:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
           provenance:(.secondmate_current.registry.provenance // "registered-table"),
           freshness:(.secondmate_current.registry.freshness.status // "unavailable"),
-          age_seconds:null,contradiction:false,reason:(.secondmate_current.registry.reason // "Registered secondmate table unavailable")}
+          age_seconds:null,contradiction:false,reason:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),owner:"(main)"}
        else empty end ]
      + [ $secondmate_views[]
        | {id,state:.bearings_state,
+          objective:([.endpoints[]? | .objective // empty] | unique | join("; ") | trunc(180)),
           doing:((if .bearings_state == "active_child_work" then
                     ([.active_children[] | .id + ": " + (.doing // .state)] | join("; "))
                   elif .bearings_state == "captain_decision" then
@@ -363,33 +380,51 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                     ([.bearings_holds[] | .id + ": " + (.reason // "held")] | join("; "))
                   elif .bearings_state == "no_active_work" then "No active child work"
                   else (.current.reason // "Current home state unavailable") end) | trunc(120)),
+          milestone:([.endpoints[]? | .milestone // empty | select(. != "")] | join("; ") | trunc(240)),
+          state_caveat:(if .bearings_state == "unknown" then (.current.reason // "Current home state unavailable") else null end),
           provenance:.provenance.selected,freshness:.freshness.status,
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
-          reason:(.current.reason // "-")} ]) as $secondmates_all
+          reason:(.current.reason // "-"),owner:.id} ]) as $secondmates_all
   | ([ .tasks[]
        | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
        | select(.backlog.current_role != "held" or .current_state.state == "working")
        | {id, kind,
         state: .current_state.state,
+        objective:((.backlog.title // .id) | trunc(180)),
         doing: ((.current_state.detail // "") as $d
-                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
+                | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(180)),
+        milestone:((.hints.last_event_text // "") | trunc(240)),
+        state_caveat:(if .current_state.state == "unknown" then ((.current_state.detail // "Current harness state unavailable") | trunc(180)) else null end),
+        context:joined_context(.backlog.body_excerpt; report_context($source; .id)),
+        owner:.id
       } ]
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")
          | {id,kind:"secondmate",state:.bearings_state,
-            doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
+            objective:([.active_children[] | .objective // .id] | join("; ") | trunc(180)),
+            doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(180)),
+            milestone:([.active_children[] | .milestone // empty | select(. != "")] | join("; ") | trunc(240)),
+            state_caveat:null,
+            context:([.active_children[] | .context // empty | select(. != "")] | join("; ") | trunc(800)),
+            owner:.id} ]) as $in_flight_all
   | ([ .backlog.records[]
          | select(.structured and .captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",
-            summary:((.title + ": " + .hold_reason) | trunc(90)),owner:"(main)"} ]
+            object:(.title | trunc(180)),requested_action:(.hold_reason | trunc(180)),
+            evidence:(joined_context(.body_excerpt; report_context($source; .id)) | trunc(800)),
+            summary:((.title + ": " + .hold_reason) | trunc(180)),owner:"(main)",action_owner:"captain"} ]
      + [ (.secondmate_current.records // [])[] as $m | $m.decisions_open[]?
          | select(.source == "backlog" and .verb == "captain-hold")
          | {id:($m.id + "/" + .id),key,verb,
-            summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90)),owner:$m.id} ]) as $decisions_all
+            object:((.summary // .id) | trunc(180)),
+            requested_action:((.reason // "captain decision pending") | trunc(180)),
+            evidence:((.context // null) | trunc(800)),
+            summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(180)),owner:$m.id,action_owner:"captain"} ]) as $decisions_all
   | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
+          context:null,
           blocked_by:"-",
           reason:"main inventory",
           owner:"(main)"}]
@@ -402,14 +437,14 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.captain_actionable != true)
          | select(($all_queued == 1)
                   or (((.body_excerpt // "") | test("SUPERSEDED|NOT REQUIRED|NOT-REQUIRED|DEFERRED"; "i")) | not))
-         | {id, title:(.title | trunc(60)),
+         | {id, title:(.title | trunc(120)),context:((.body_excerpt // null) | trunc(800)),
             blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
             reason:((.hold_reason // .blocked_reason // "-") | trunc(40)),owner:"(main)"} ]
      + [ (.secondmate_current.records // [])[] as $m
          | select($m.provenance.selected == "structured-home")
          | $m.queued[]?
          | select(.captain_actionable != true)
-         | {id,title:(.title | trunc(60)),
+         | {id,title:(.title | trunc(120)),context:((.context // null) | trunc(800)),
             blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
             reason:((.hold_reason // .blocked_reason // "-") | trunc(40)),owner:$m.id} ]) as $gates_all
   | ([ .scout_reports[]
@@ -426,7 +461,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
-      landed: ($done | map({id, what:(.title | trunc(70)),
+      landed: ($done | map({id, what:(.title | trunc(180)),
+                            outcome:((.context // .title) | trunc(800)),
+                            caveat:(if .context == null then "No bounded completion context was recorded"
+                                    elif .context_truncated == true then "Bounded completion context was truncated"
+                                    else null end),
                             artifact:(.pr_url // .report_path // .local_note // "-"),owner:.home_id})),
       gates: (if $all_queued == 1 then $gates_all else $gates_all[:$gates_n] end),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),

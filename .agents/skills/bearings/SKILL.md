@@ -46,6 +46,9 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
 
 2. **Compose the four-section chat digest from the fresh snapshot.**
    The gather step is deterministic; your judgment is scoped to ranking the command's facts by what matters right now and writing scannable captain-facing prose.
+   Build every nonempty item as one concise causal capsule: name the concrete object, state what happened or remains uncertain, say why that fact matters now, and name the next action and its owner.
+   Use only the snapshot's explicit objective, milestone, caveat, evidence, outcome, context, blocker, and owner fields for that capsule.
+   Treat a missing causal field as a disclosed evidence gap, never as permission to compress the item to its title or invent the missing link.
    The chat response uses the four complete sections in the chat-response contract below, in the same order, each always present.
    Plain mode stops here and writes no report artifact.
 
@@ -57,10 +60,10 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
    This is the only write allowed by the skill.
    The detailed report includes:
    - **Title** - `# Bearings - <day> <YYYY-MM-DD>` (use "Morning status" only when the captain specifically asks for a morning brief), followed by two or three sentences framing where things stand.
-   - **Captain's Call** - every open decision summarized with its options from the structured decision record, plus each PR ready to merge and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
-   - **Recently Landed** - the bounded current recent-completions baseline from structured state across the main fleet and every registered secondmate home, rendered in full on every run.
-   - **Underway** - each live direct report making progress, with its current state, and the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
-   - **Charted Next** - queued or gated work, including any main-inventory integrity warning, with each item's blocker, date, or integrity reason.
+   - **Captain's Call** - every open decision with the concrete implementation or choice, the bounded evidence or findings that produced the request, and one explicit action classified as review the changes, decide whether to merge, or provide a missing choice, plus each PR ready to merge and each needed credential or login, every PR with the full `https://...` URL, never a bare `#number`.
+   - **Recently Landed** - the bounded current recent-completions baseline from structured state across the main fleet and every registered secondmate home, with each useful outcome, material caveat or evidence gap, and any named downstream consumer or follow-up owner.
+   - **Underway** - each live direct report making progress, with its objective, last trustworthy structured milestone, current caveat, and immediate next action, plus the plans or main pickup pointers worth reopening (`data/<id>/report.md` files, `.lavish/*.html` boards).
+   - **Charted Next** - queued or gated work, including any main-inventory integrity warning, with the reason it is queued and the blocker, date, or integrity condition that moves it forward.
    After writing the file, return the concise four-section chat digest and include the report path or link without adding a fifth section.
    For a richer review surface, optionally offer a Lavish board with `lavish-axi` when the report has enough structure to deserve one, but only after the required digest is ready.
 
@@ -86,11 +89,12 @@ Rules that keep the contract unambiguous:
 - The four buckets are mutually exclusive, so every item is forced into exactly one: needs-your-action is Captain's Call, done is Recently Landed, self-progressing is Underway, and not-yet-started work or an action-free fleet-integrity warning is Charted Next.
 - The strict boundary keeps action-free items OUT of Captain's Call: a working or validating task, a queued item blocked on another task or a date, landed work, a completed scout's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to one of the other three sections, never Captain's Call.
 - A secondmate's own row appears Underway only for `active_child_work`; `externally_held` belongs in Charted Next, and `unknown` belongs there as an unavailable-state gate unless its reason requires the captain's action.
+- An unavailable live harness state is a caveat attached to the snapshot's last trustworthy structured milestone and consequence, never the whole item.
 - Do not suppress separately projected decisions, landed records, or gates from a `partial-structured` home merely because that secondmate's own row is `unknown`.
 - Include the required direct address to the captain inside one item or empty-state sentence.
 - Every PR appears as the full `https://...` URL; a shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same digest.
 - The chat follows `AGENTS.md` section 9 and carries one scannable line per item.
-- Detailed decisions, plans, full gate reasons, and evidence belong in the file only when file mode is explicit, so plain chat stays concise and file-mode chat stays materially shorter than that file.
+- Keep the evidence needed to make each action or disposition understandable in the chat capsule; reserve supporting detail, longer plans, and full gate reasons for explicit file mode.
 - In file mode, include the report path or link inside the four-section digest without adding another heading.
 
 ## Tone and content rules
