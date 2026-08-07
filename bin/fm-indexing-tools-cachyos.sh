@@ -25,10 +25,22 @@
 #   --lazy-mcp-generator PATH      Defaults to DIR/structure_generator.
 #   --benchmark-query Q=PATH       Repeat exactly five or more times for benchmark=yes.
 #   --max-index-seconds N          Hard scratch/canonical indexing bound (default 900).
+#   --command-timeout-seconds N    Hard status/search/stop/query bound (default 30).
+#   --max-micro-batch-seconds N    Hard 100-chunk cold/warm bound (default 300).
+#   --max-embed-request-seconds N  Hard per-request embed bound (default 30).
+#   --max-search-ms N               Warm semantic-search median bound (default 2000).
+#   --max-incremental-seconds N     Scratch incremental-convergence bound (default 10).
 #   --mcp-timeout-seconds N        Hard direct stdio health bound (default 15).
 #   --max-ram-percent N            Maximum observed scratch-index RAM delta (default 25).
+#   --max-swap-growth-mib N        Maximum benchmark swap growth (default 0).
+#   --max-temperature-celsius N    Maximum observed sensor temperature (default 90).
+#   --max-load-per-cpu-percent N   Maximum one-minute load per CPU (default 100).
+#   --max-watcher-idle-cpu-percent N  Maximum scratch watcher idle CPU (default 5).
 #   --min-free-ram-mib N           Pre-mutation MemAvailable floor (default 1024).
 #   --min-free-disk-mib N          Pre-mutation project/install free-space floor (default 2048).
+# Environment:
+#   XDG_RUNTIME_DIR                 Preferred owner-owned mode-0700 directory for the run lock.
+#                                   When unset, HOME/.fm-indexing-tools-cachyos-locks is used at mode 0700.
 #
 # Pinned provenance:
 #   grepai v0.35.0 and CodeGraph v1.5.0 use official GitHub release assets
@@ -50,8 +62,11 @@ readonly CODEGRAPH_VERSION=1.5.0
 readonly SERENA_VERSION=1.6.1
 readonly OLLAMA_UPSTREAM_VERSION=0.32.6
 readonly MODEL_BASE=nomic-embed-text
+readonly MODEL_EXPECTED_DIGEST=0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f
 readonly MODEL_EXPECTED_DIMENSIONS=768
-readonly MODEL_EXPECTED_BYTES=274000000
+readonly MODEL_EXPECTED_BYTES=274302450
+readonly MODEL_EXPECTED_QUANTIZATION=F16
+readonly OLLAMA_ENDPOINT=http://127.0.0.1:11434
 readonly GREPAI_MAX_ASSET_BYTES=20000000
 readonly CODEGRAPH_MAX_ASSET_BYTES=100000000
 
@@ -83,6 +98,12 @@ valid_uint() {
   case "$2" in
     ''|*[!0-9]*) die "$1 must be a positive integer (got '$2')" ;;
     0) die "$1 must be greater than zero" ;;
+  esac
+}
+
+valid_nonnegative_uint() {
+  case "$2" in
+    ''|*[!0-9]*) die "$1 must be a non-negative integer (got '$2')" ;;
   esac
 }
 
@@ -173,8 +194,17 @@ LAZY_MCP_DIR=
 LAZY_MCP_GENERATOR=
 MODEL=nomic-embed-text:latest
 MAX_INDEX_SECONDS=900
+COMMAND_TIMEOUT_SECONDS=30
+MAX_MICRO_BATCH_SECONDS=300
+MAX_EMBED_REQUEST_SECONDS=30
+MAX_SEARCH_MS=2000
+MAX_INCREMENTAL_SECONDS=10
 MCP_TIMEOUT_SECONDS=15
 MAX_RAM_PERCENT=25
+MAX_SWAP_GROWTH_MIB=0
+MAX_TEMPERATURE_CELSIUS=90
+MAX_LOAD_PER_CPU_PERCENT=100
+MAX_WATCHER_IDLE_CPU_PERCENT=5
 MIN_FREE_RAM_MIB=1024
 MIN_FREE_DISK_MIB=2048
 INSTALL_ROOT=${XDG_DATA_HOME:-$HOME/.local/share}/firstmate-indexing-tools
@@ -212,8 +242,17 @@ while [ "$#" -gt 0 ]; do
     --install-root) need_value "$@"; INSTALL_ROOT=$2; shift 2 ;;
     --bin-dir) need_value "$@"; BIN_DIR=$2; shift 2 ;;
     --max-index-seconds) need_value "$@"; MAX_INDEX_SECONDS=$2; shift 2 ;;
+    --command-timeout-seconds) need_value "$@"; COMMAND_TIMEOUT_SECONDS=$2; shift 2 ;;
+    --max-micro-batch-seconds) need_value "$@"; MAX_MICRO_BATCH_SECONDS=$2; shift 2 ;;
+    --max-embed-request-seconds) need_value "$@"; MAX_EMBED_REQUEST_SECONDS=$2; shift 2 ;;
+    --max-search-ms) need_value "$@"; MAX_SEARCH_MS=$2; shift 2 ;;
+    --max-incremental-seconds) need_value "$@"; MAX_INCREMENTAL_SECONDS=$2; shift 2 ;;
     --mcp-timeout-seconds) need_value "$@"; MCP_TIMEOUT_SECONDS=$2; shift 2 ;;
     --max-ram-percent) need_value "$@"; MAX_RAM_PERCENT=$2; shift 2 ;;
+    --max-swap-growth-mib) need_value "$@"; MAX_SWAP_GROWTH_MIB=$2; shift 2 ;;
+    --max-temperature-celsius) need_value "$@"; MAX_TEMPERATURE_CELSIUS=$2; shift 2 ;;
+    --max-load-per-cpu-percent) need_value "$@"; MAX_LOAD_PER_CPU_PERCENT=$2; shift 2 ;;
+    --max-watcher-idle-cpu-percent) need_value "$@"; MAX_WATCHER_IDLE_CPU_PERCENT=$2; shift 2 ;;
     --min-free-ram-mib) need_value "$@"; MIN_FREE_RAM_MIB=$2; shift 2 ;;
     --min-free-disk-mib) need_value "$@"; MIN_FREE_DISK_MIB=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -246,12 +285,8 @@ case "$ACTION" in plan|apply|health) ;; *) die "--action must be plan, apply, or
 case "$OLLAMA_OWNER" in arch|upstream) ;; *) die "--ollama-owner must be arch or upstream" ;; esac
 case "$OLLAMA_ACCEL" in cpu|cuda|rocm|vulkan) ;; *) die "unsupported --ollama-accel '$OLLAMA_ACCEL'" ;; esac
 case "$MODEL" in
-  nomic-embed-text) MODEL=nomic-embed-text:latest ;;
-  nomic-embed-text:*)
-    model_tag=${MODEL#*:}
-    case "$model_tag" in ''|*[!A-Za-z0-9._-]*) die "--model tag contains unsupported characters: '$model_tag'" ;; esac
-    ;;
-  *) die "--model must stay within local nomic-embed-text tags" ;;
+  nomic-embed-text|nomic-embed-text:latest) MODEL=nomic-embed-text:latest ;;
+  *) die "--model must be the pinned nomic-embed-text:latest manifest" ;;
 esac
 valid_yes_no --pull-model "$PULL_MODEL"
 valid_yes_no --start-ollama "$START_OLLAMA"
@@ -267,8 +302,17 @@ case "$MCP_SCOPE" in print|user) ;; *) die "--mcp-scope must be print or user" ;
 case "$IGNORE_POLICY" in defaults|existing) ;; *) die "--ignore-policy must be defaults or existing" ;; esac
 case "$STATE_POLICY" in local-ignored|existing) ;; *) die "--state-policy must be local-ignored or existing" ;; esac
 valid_uint --max-index-seconds "$MAX_INDEX_SECONDS"
+valid_uint --command-timeout-seconds "$COMMAND_TIMEOUT_SECONDS"
+valid_uint --max-micro-batch-seconds "$MAX_MICRO_BATCH_SECONDS"
+valid_uint --max-embed-request-seconds "$MAX_EMBED_REQUEST_SECONDS"
+valid_uint --max-search-ms "$MAX_SEARCH_MS"
+valid_uint --max-incremental-seconds "$MAX_INCREMENTAL_SECONDS"
 valid_uint --mcp-timeout-seconds "$MCP_TIMEOUT_SECONDS"
 valid_uint --max-ram-percent "$MAX_RAM_PERCENT"
+valid_nonnegative_uint --max-swap-growth-mib "$MAX_SWAP_GROWTH_MIB"
+valid_uint --max-temperature-celsius "$MAX_TEMPERATURE_CELSIUS"
+valid_uint --max-load-per-cpu-percent "$MAX_LOAD_PER_CPU_PERCENT"
+valid_nonnegative_uint --max-watcher-idle-cpu-percent "$MAX_WATCHER_IDLE_CPU_PERCENT"
 valid_uint --min-free-ram-mib "$MIN_FREE_RAM_MIB"
 valid_uint --min-free-disk-mib "$MIN_FREE_DISK_MIB"
 [ "$MAX_RAM_PERCENT" -le 100 ] || die "--max-ram-percent must be at most 100"
@@ -326,7 +370,7 @@ if [ "$OLLAMA_OWNER" = upstream ] && [ "$OLLAMA_ACCEL" != cpu ]; then
   die "this kit validates upstream-owned Ollama only in CPU mode; use the Arch owner for an explicitly supported split accelerator package"
 fi
 
-for prerequisite in awk curl df find findmnt flock git grep iconv jq mktemp pacman realpath sed setsid sha256sum stat tar timeout; do
+for prerequisite in awk curl df find findmnt flock git grep iconv jq ln mktemp pacman ps realpath sed setsid sha256sum sort ss stat systemctl tar timeout; do
   command -v "$prerequisite" >/dev/null 2>&1 || die "missing prerequisite '$prerequisite'; install it before rerunning"
 done
 
@@ -360,15 +404,54 @@ if [ "$ACTION" != plan ]; then
   path_has_dir "$BIN_DIR" || die "--bin-dir '$BIN_DIR' is not on PATH; add it before mutation so ownership checks are deterministic"
 fi
 
-LOCK_ROOT=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}
-exec 9>"$LOCK_ROOT/fm-indexing-tools-cachyos.lock"
-flock -n 9 || die "another indexing recovery run holds $LOCK_ROOT/fm-indexing-tools-cachyos.lock"
+if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+  LOCK_ROOT=$XDG_RUNTIME_DIR
+  LOCK_FILE_NAME=fm-indexing-tools-cachyos.lock
+else
+  case "$HOME" in /*) ;; *) die "HOME must be absolute when XDG_RUNTIME_DIR is unset: $HOME" ;; esac
+  [ -d "$HOME" ] && [ ! -L "$HOME" ] || die "HOME must be a real directory when XDG_RUNTIME_DIR is unset: $HOME"
+  home_owner=$(stat -c %u -- "$HOME") || die "could not inspect HOME ownership: $HOME"
+  [ "$home_owner" -eq "$EUID" ] || die "HOME owner $home_owner does not match effective user $EUID: $HOME"
+  LOCK_ROOT=$HOME/.fm-indexing-tools-cachyos-locks
+  LOCK_FILE_NAME=recovery.lock
+  if [ ! -e "$LOCK_ROOT" ]; then
+    (umask 077; mkdir -- "$LOCK_ROOT") 2>/dev/null || [ -d "$LOCK_ROOT" ] \
+      || die "could not create owner-private fallback lock directory: $LOCK_ROOT"
+  fi
+fi
+case "$LOCK_ROOT" in
+  /*) ;;
+  *) die "XDG_RUNTIME_DIR must be an absolute path: $LOCK_ROOT" ;;
+esac
+case "$LOCK_ROOT" in *$'\n'*|*$'\t'*) die "XDG_RUNTIME_DIR paths containing tabs or newlines are unsupported" ;; esac
+[ -d "$LOCK_ROOT" ] && [ ! -L "$LOCK_ROOT" ] || die "XDG_RUNTIME_DIR must be a real directory, not a symlink: $LOCK_ROOT"
+lock_root_owner=$(stat -c %u -- "$LOCK_ROOT") || die "could not inspect XDG_RUNTIME_DIR ownership: $LOCK_ROOT"
+lock_root_mode=$(stat -c %a -- "$LOCK_ROOT") || die "could not inspect XDG_RUNTIME_DIR mode: $LOCK_ROOT"
+[ "$lock_root_owner" -eq "$EUID" ] || die "XDG_RUNTIME_DIR owner $lock_root_owner does not match effective user $EUID: $LOCK_ROOT"
+[ "$lock_root_mode" = 700 ] || die "XDG_RUNTIME_DIR must have mode 0700, observed $lock_root_mode: $LOCK_ROOT"
+
+LOCK_FILE="$LOCK_ROOT/$LOCK_FILE_NAME"
+[ ! -L "$LOCK_FILE" ] || die "recovery lock path is an unsafe symlink: $LOCK_FILE"
+if [ ! -e "$LOCK_FILE" ]; then
+  (umask 077; set -o noclobber; : > "$LOCK_FILE") 2>/dev/null || [ -e "$LOCK_FILE" ] \
+    || die "could not create the private recovery lock: $LOCK_FILE"
+fi
+[ ! -L "$LOCK_FILE" ] && [ -f "$LOCK_FILE" ] || die "recovery lock path is not a safe regular file: $LOCK_FILE"
+lock_file_owner=$(stat -c %u -- "$LOCK_FILE") || die "could not inspect recovery lock ownership: $LOCK_FILE"
+lock_file_mode=$(stat -c %a -- "$LOCK_FILE") || die "could not inspect recovery lock mode: $LOCK_FILE"
+[ "$lock_file_owner" -eq "$EUID" ] || die "recovery lock owner $lock_file_owner does not match effective user $EUID: $LOCK_FILE"
+[ "$lock_file_mode" = 600 ] || die "recovery lock must have mode 0600, observed $lock_file_mode: $LOCK_FILE"
+exec 9<>"$LOCK_FILE"
+flock -n 9 || die "another indexing recovery run holds $LOCK_FILE"
 
 MEMINFO=${FM_INDEX_MEMINFO:-/proc/meminfo}
 LOADAVG=${FM_INDEX_LOADAVG:-/proc/loadavg}
 mem_total_kib=$(awk '/^MemTotal:/ {print $2; exit}' "$MEMINFO")
 mem_available_kib=$(awk '/^MemAvailable:/ {print $2; exit}' "$MEMINFO")
-[ -n "$mem_total_kib" ] && [ -n "$mem_available_kib" ] || die "could not read RAM observations from $MEMINFO"
+swap_total_kib=$(awk '/^SwapTotal:/ {print $2; exit}' "$MEMINFO")
+swap_free_kib=$(awk '/^SwapFree:/ {print $2; exit}' "$MEMINFO")
+[ -n "$mem_total_kib" ] && [ -n "$mem_available_kib" ] && [ -n "$swap_total_kib" ] && [ -n "$swap_free_kib" ] \
+  || die "could not read RAM/swap observations from $MEMINFO"
 project_free_kib=$(df -Pk "$PROJECT" | awk 'NR==2 {print $4}')
 install_parent=$(nearest_existing_parent "$(dirname "$INSTALL_ROOT")")
 install_free_kib=$(df -Pk "$install_parent" | awk 'NR==2 {print $4}')
@@ -385,8 +468,60 @@ LAZY_TRANSACTION_ACTIVE=0
 LAZY_BACKUPS=()
 LAZY_TARGETS=()
 LAZY_CREATED_DIRS=()
+PLANNED_STATE_NAMES=()
+PLANNED_STATE_PATHS=()
+declare -A INITIALIZER_COMPLETE=()
+watch_command_pid=
+watch_command_starttime=
+watch_command_pgid=
+
+process_starttime() {
+  local pid=$1 line fields
+  local -a stat_fields=()
+  [ -r "/proc/$pid/stat" ] || return 1
+  IFS= read -r line < "/proc/$pid/stat" || return 1
+  fields=${line##*) }
+  # After removing PID and comm, starttime (field 22) is field 20.
+  read -r -a stat_fields <<< "$fields"
+  [ "${#stat_fields[@]}" -ge 20 ] || return 1
+  printf '%s\n' "${stat_fields[19]}"
+}
+
+record_watch_command() {
+  watch_command_pid=$1
+  watch_command_starttime=$(process_starttime "$watch_command_pid") \
+    || die "could not generation-bind scratch watch command PID $watch_command_pid"
+  watch_command_pgid=$(ps -o pgid= -p "$watch_command_pid" 2>/dev/null | tr -d ' ')
+  [ "$watch_command_pgid" = "$watch_command_pid" ] \
+    || die "scratch watch command did not enter its required private process group"
+}
+
+clear_watch_command() {
+  watch_command_pid=
+  watch_command_starttime=
+  watch_command_pgid=
+}
+
+terminate_watch_command() {
+  local current_starttime='' current_pgid='' member
+  local -a group_members=()
+  [ -n "$watch_command_pid" ] || return 0
+  current_starttime=$(process_starttime "$watch_command_pid" 2>/dev/null || true)
+  current_pgid=$(ps -o pgid= -p "$watch_command_pid" 2>/dev/null | tr -d ' ')
+  if [ -n "$current_starttime" ] && [ "$current_starttime" = "$watch_command_starttime" ] \
+    && [ "$current_pgid" = "$watch_command_pgid" ] && [ "$watch_command_pgid" = "$watch_command_pid" ]; then
+    mapfile -t group_members < <(ps -eo pid=,pgid= | awk -v pgid="$watch_command_pgid" '$2 == pgid {print $1}')
+    for member in "${group_members[@]}"; do
+      kill -TERM "$member" 2>/dev/null || true
+    done
+    wait "$watch_command_pid" 2>/dev/null || true
+  fi
+  clear_watch_command
+}
+
 cleanup() {
-  local path index restore_tmp
+  local exit_status=$? path index restore_tmp name state_path
+  trap - EXIT INT TERM
   if [ "$LAZY_TRANSACTION_ACTIVE" -eq 1 ]; then
     for ((index = 0; index < ${#LAZY_BACKUPS[@]}; index++)); do
       path=${LAZY_TARGETS[$index]}
@@ -397,15 +532,21 @@ cleanup() {
       rm -rf -- "$path" 2>/dev/null || true
     done
   fi
-  if [ -n "${watch_command_pid:-}" ] && kill -0 "$watch_command_pid" 2>/dev/null; then
-    kill -TERM -- "-$watch_command_pid" 2>/dev/null || kill "$watch_command_pid" 2>/dev/null || true
-    wait "$watch_command_pid" 2>/dev/null || true
-  fi
+  terminate_watch_command
   if [ "${SCRATCH_WATCH_STARTED:-0}" -eq 1 ] && [ -d "${SCRATCH_DIR:-}" ] && [ -x "${GREPAI_BIN:-}" ]; then
-    (cd "$SCRATCH_DIR" && "$GREPAI_BIN" watch --stop >/dev/null 2>&1) || true
+    (cd "$SCRATCH_DIR" && timeout --kill-after=5s "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" watch --stop >/dev/null 2>&1) || true
   fi
   if [ "${PROJECT_WATCH_STARTED:-0}" -eq 1 ] && [ -x "${GREPAI_BIN:-}" ]; then
-    (cd "$PROJECT" && "$GREPAI_BIN" watch --stop >/dev/null 2>&1) || true
+    (cd "$PROJECT" && timeout --kill-after=5s "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" watch --stop >/dev/null 2>&1) || true
+  fi
+  if [ "$exit_status" -ne 0 ]; then
+    for ((index = 0; index < ${#PLANNED_STATE_NAMES[@]}; index++)); do
+      name=${PLANNED_STATE_NAMES[$index]}
+      state_path=${PLANNED_STATE_PATHS[$index]}
+      if [ -e "$state_path" ] && [ -z "${INITIALIZER_COMPLETE[$name]:-}" ]; then
+        append_manifest "partial_project_state=$state_path initializer=$name operator_review_required=yes"
+      fi
+    done
   fi
   if [ "${MODEL_LOADED_BY_RUN:-0}" -eq 1 ] && command -v ollama >/dev/null 2>&1; then
     ollama stop "$MODEL" >/dev/null 2>&1 || true
@@ -416,8 +557,10 @@ cleanup() {
   for path in "${cleanup_files[@]}"; do
     [ -e "$path" ] && rm -rf -- "$path"
   done
+  return "$exit_status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 is_supported_extension() {
   case "$1" in
@@ -431,6 +574,28 @@ is_default_ignored_path() {
     */.git/*|*/.grepai/*|*/node_modules/*|*/vendor/*|*/bin/*|*/dist/*|*/__pycache__/*|*/.venv/*|*/venv/*|*/.idea/*|*/.vscode/*|*/target/*|*/.zig-cache/*|*/zig-out/*|*/qdrant_storage/*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+validate_local_exclude_path() {
+  local exclude_parent exclude_owner parent_owner
+  GIT_EXCLUDE_FILE=
+  [ "$STATE_POLICY" = local-ignored ] || return 0
+  [ "$INIT_COMPONENTS" != none ] || return 0
+  GIT_EXCLUDE_FILE=$(git -C "$PROJECT" rev-parse --git-path info/exclude) \
+    || die "Git could not resolve the canonical local exclude for $PROJECT"
+  case "$GIT_EXCLUDE_FILE" in /*) ;; *) GIT_EXCLUDE_FILE=$PROJECT/$GIT_EXCLUDE_FILE ;; esac
+  exclude_parent=$(dirname "$GIT_EXCLUDE_FILE")
+  [ -d "$exclude_parent" ] && [ ! -L "$exclude_parent" ] \
+    || die "Git info directory must be a real directory: $exclude_parent"
+  parent_owner=$(stat -c %u -- "$exclude_parent" 2>/dev/null || true)
+  [ "$parent_owner" = "$EUID" ] || die "Git info directory must be owner-owned: $exclude_parent"
+  if [ -e "$GIT_EXCLUDE_FILE" ] || [ -L "$GIT_EXCLUDE_FILE" ]; then
+    [ ! -L "$GIT_EXCLUDE_FILE" ] \
+      || die "Git info/exclude must be an owner-owned regular file: $GIT_EXCLUDE_FILE"
+    exclude_owner=$(stat -c %u -- "$GIT_EXCLUDE_FILE" 2>/dev/null || true)
+    [ -f "$GIT_EXCLUDE_FILE" ] && [ "$exclude_owner" = "$EUID" ] \
+      || die "Git info/exclude must be an owner-owned regular file: $GIT_EXCLUDE_FILE"
+  fi
 }
 
 candidate_count=0
@@ -448,6 +613,12 @@ while IFS= read -r -d '' rel; do
   ext=${lower##*.}
   [ "$ext" != "$lower" ] || continue
   is_supported_extension "$ext" || continue
+  [ ! -L "$PROJECT/$rel" ] \
+    || die "tracked source is not a regular in-worktree file and will not be read: $rel (symbolic link)"
+  if [ ! -f "$PROJECT/$rel" ]; then
+    file_type=$(stat -c %F -- "$PROJECT/$rel" 2>/dev/null || true)
+    die "tracked source is not a regular in-worktree file and will not be read: $rel ($file_type)"
+  fi
   size=$(stat -c %s "$PROJECT/$rel" 2>/dev/null || printf 0)
   if [ "$size" -gt 1048576 ]; then
     oversize_count=$((oversize_count + 1))
@@ -495,13 +666,71 @@ for state_dir in .grepai .codegraph .serena; do
   fi
 done
 
+grepai_config_scalar() {
+  local key=$1 file=$2
+  awk -v key="$key" '
+    BEGIN { pattern = "^[[:space:]]*" key "[[:space:]]*:" }
+    $0 ~ pattern {
+      count++
+      value = $0
+      sub(pattern, "", value)
+      sub(/[[:space:]]+#.*$/, "", value)
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      if ((substr(value, 1, 1) == "\"" && substr(value, length(value), 1) == "\"") ||
+          (substr(value, 1, 1) == "\047" && substr(value, length(value), 1) == "\047")) {
+        value = substr(value, 2, length(value) - 2)
+      }
+    }
+    END {
+      if (count != 1 || value == "") exit 1
+      print value
+    }
+  ' "$file"
+}
+
+validate_grepai_config() {
+  local root=$1 context=$2 config grepai_provider grepai_model grepai_backend grepai_endpoint grepai_endpoint_port
+  config=$root/.grepai/config.yaml
+  [ -f "$config" ] && [ ! -L "$config" ] || die "$context grepai state has no regular config.yaml: $root/.grepai"
+  grepai_provider=$(grepai_config_scalar provider "$config") \
+    || die "$context grepai config must contain exactly one active non-empty provider scalar"
+  grepai_model=$(grepai_config_scalar model "$config") \
+    || die "$context grepai config must contain exactly one active non-empty model scalar"
+  grepai_backend=$(grepai_config_scalar backend "$config") \
+    || die "$context grepai config must contain exactly one active non-empty backend scalar"
+  grepai_endpoint=$(grepai_config_scalar endpoint "$config") \
+    || die "$context grepai config must contain exactly one active non-empty endpoint scalar"
+  [ "$grepai_provider" = ollama ] || die "$context grepai provider is '$grepai_provider', expected local Ollama"
+  [ "$grepai_model" = "$MODEL" ] || die "$context grepai model is '$grepai_model', expected '$MODEL'"
+  [ "$grepai_backend" = gob ] || die "$context grepai backend is '$grepai_backend', expected local GOB"
+  case "$grepai_endpoint" in
+    http://127.0.0.1:*) grepai_endpoint_port=${grepai_endpoint#http://127.0.0.1:} ;;
+    http://localhost:*) grepai_endpoint_port=${grepai_endpoint#http://localhost:} ;;
+    *) die "$context grepai endpoint is not an explicit loopback Ollama URL: $grepai_endpoint" ;;
+  esac
+  case "$grepai_endpoint_port" in
+    ''|*[!0-9]*) die "$context grepai endpoint is not an explicit loopback Ollama URL: $grepai_endpoint" ;;
+  esac
+  [ "$grepai_endpoint_port" -ge 1 ] && [ "$grepai_endpoint_port" -le 65535 ] \
+    || die "$context grepai endpoint has an invalid loopback port: $grepai_endpoint"
+}
+
+write_and_validate_fresh_grepai_endpoint() {
+  local root=$1 config active_endpoint_count
+  config=$root/.grepai/config.yaml
+  [ -f "$config" ] && [ ! -L "$config" ] || die "fresh grepai init did not create a regular config.yaml: $config"
+  active_endpoint_count=$(awk '/^[[:space:]]*endpoint[[:space:]]*:/ {count++} END {print count+0}' "$config")
+  case "$active_endpoint_count" in
+    0) printf 'endpoint: %s\n' "$OLLAMA_ENDPOINT" >> "$config" ;;
+    1) ;;
+    *) die "fresh grepai config contains ambiguous duplicate endpoint fields: $config" ;;
+  esac
+  validate_grepai_config "$root" fresh
+}
+
 if [ -d "$PROJECT/.grepai" ]; then
-  [ -f "$PROJECT/.grepai/config.yaml" ] || die "existing grepai state has no config.yaml: $PROJECT/.grepai"
-  grep -Eq 'provider:[[:space:]]*ollama|provider[[:space:]]*=[[:space:]]*ollama' "$PROJECT/.grepai/config.yaml" || die "existing grepai config is not clearly Ollama-owned: $PROJECT/.grepai/config.yaml"
-  grep -F "$MODEL_BASE" "$PROJECT/.grepai/config.yaml" >/dev/null || die "existing grepai config does not name $MODEL_BASE"
-  grep -Eq 'backend:[[:space:]]*gob|backend[[:space:]]*=[[:space:]]*gob' "$PROJECT/.grepai/config.yaml" || die "existing grepai config is not clearly GOB-backed: $PROJECT/.grepai/config.yaml"
-  grepai_endpoint=$(sed -n 's/^[[:space:]]*endpoint:[[:space:]]*//p' "$PROJECT/.grepai/config.yaml" | head -n 1)
-  case "$grepai_endpoint" in ''|http://127.0.0.1:*|http://localhost:*) ;; *) die "existing grepai endpoint is not loopback-only: $grepai_endpoint" ;; esac
+  validate_grepai_config "$PROJECT" existing
 fi
 if [ -d "$PROJECT/.codegraph" ] && [ ! -f "$PROJECT/.codegraph/codegraph.db" ]; then
   die "existing CodeGraph state has no codegraph.db; choose repair or rebuild outside this non-destructive run"
@@ -532,35 +761,31 @@ dirty_count=$(git -C "$PROJECT" status --porcelain=v1 | wc -l | tr -d ' ')
 if [ "$ACTION" = apply ] && [ "$dirty_count" -gt 0 ] && { [ "$BENCHMARK" = yes ] || [ "$INIT_COMPONENTS" != none ]; }; then
   die "project has $dirty_count dirty entries; commit/stash by operator choice or use a clean worktree so the HEAD benchmark matches canonical indexing"
 fi
+validate_local_exclude_path
 load_observation=$(cat "$LOADAVG" 2>/dev/null || printf unavailable)
+cpu_threads=$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)
+case "$cpu_threads" in ''|*[!0-9]*|0) die "could not determine online CPU threads" ;; esac
 note "platform os=$os_id arch=$machine_arch project=$PROJECT"
-note "resources cpu_threads=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf unknown) ram_total_mib=$((mem_total_kib / 1024)) ram_available_mib=$((mem_available_kib / 1024)) project_free_mib=$((project_free_kib / 1024)) install_free_mib=$((install_free_kib / 1024)) load='$load_observation'"
+note "resources cpu_threads=$cpu_threads ram_total_mib=$((mem_total_kib / 1024)) ram_available_mib=$((mem_available_kib / 1024)) swap_total_mib=$((swap_total_kib / 1024)) swap_free_mib=$((swap_free_kib / 1024)) project_free_mib=$((project_free_kib / 1024)) install_free_mib=$((install_free_kib / 1024)) load='$load_observation'"
 note "grepai_candidates files=$candidate_count bytes=$candidate_bytes over_1mib=$oversize_count ignore_policy=$IGNORE_POLICY"
 note "project_state dirty_entries=$dirty_count grepai=$([ -d "$PROJECT/.grepai" ] && printf present || printf absent) codegraph=$([ -d "$PROJECT/.codegraph" ] && printf present || printf absent) serena=$([ -d "$PROJECT/.serena" ] && printf present || printf absent)"
 note "decisions ollama_owner=$OLLAMA_OWNER accel=$OLLAMA_ACCEL model=$MODEL pull=$PULL_MODEL start=$START_OLLAMA persist=$PERSIST_OLLAMA install=$INSTALL_TOOLS init=$INIT_COMPONENTS benchmark=$BENCHMARK mcp=$MCP_CLIENT/$MCP_SCOPE watcher=no destructive_rollback=no telemetry=off"
 
-check_accelerator() {
-  case "$OLLAMA_ACCEL" in
-    cpu) return 0 ;;
-    cuda)
-      command -v nvidia-smi >/dev/null 2>&1 || die "CUDA selected but nvidia-smi is unavailable"
-      ;;
-    rocm)
-      command -v rocminfo >/dev/null 2>&1 || die "ROCm selected but rocminfo is unavailable"
-      ;;
-    vulkan)
-      command -v vulkaninfo >/dev/null 2>&1 || die "Vulkan selected but vulkaninfo is unavailable"
-      ;;
-  esac
-}
-check_accelerator
-
 arch_ollama_package=
 case "$OLLAMA_ACCEL" in
   cpu) arch_ollama_package=ollama ;;
-  cuda) arch_ollama_package=ollama-cuda ;;
-  rocm) arch_ollama_package=ollama-rocm ;;
-  vulkan) arch_ollama_package=ollama-vulkan ;;
+  cuda)
+    arch_ollama_package=ollama-cuda
+    command -v nvidia-smi >/dev/null 2>&1 || die "CUDA selected but nvidia-smi is unavailable"
+    ;;
+  rocm)
+    arch_ollama_package=ollama-rocm
+    command -v rocminfo >/dev/null 2>&1 || die "ROCm selected but rocminfo is unavailable"
+    ;;
+  vulkan)
+    arch_ollama_package=ollama-vulkan
+    command -v vulkaninfo >/dev/null 2>&1 || die "Vulkan selected but vulkaninfo is unavailable"
+    ;;
 esac
 
 ollama_path=$(command_path ollama)
@@ -582,15 +807,15 @@ fi
 
 service_active_before=no
 service_enabled_before=no
-if command -v systemctl >/dev/null 2>&1; then
-  systemctl is-active --quiet ollama && service_active_before=yes || true
-  systemctl is-enabled --quiet ollama && service_enabled_before=yes || true
-  fragment=$(systemctl show -p FragmentPath --value ollama 2>/dev/null || true)
-  if [ -n "$fragment" ]; then
-    if pacman -Qo "$fragment" >/dev/null 2>&1; then observed_service_owner=arch; else observed_service_owner=upstream; fi
-    [ "$observed_service_owner" = "$OLLAMA_OWNER" ] || die "Ollama service owner conflict: '$fragment' is $observed_service_owner-owned but the binary owner choice is $OLLAMA_OWNER"
-    note "ollama_service fragment=$fragment owner=$observed_service_owner active_before=$service_active_before enabled_before=$service_enabled_before"
-  fi
+systemctl is-active --quiet ollama && service_active_before=yes || true
+systemctl is-enabled --quiet ollama && service_enabled_before=yes || true
+fragment=$(systemctl show -p FragmentPath --value ollama 2>/dev/null || true)
+if [ -n "$fragment" ]; then
+  if pacman -Qo "$fragment" >/dev/null 2>&1; then observed_service_owner=arch; else observed_service_owner=upstream; fi
+  [ "$observed_service_owner" = "$OLLAMA_OWNER" ] || die "Ollama service owner conflict: '$fragment' is $observed_service_owner-owned but the binary owner choice is $OLLAMA_OWNER"
+  note "ollama_service fragment=$fragment owner=$observed_service_owner active_before=$service_active_before enabled_before=$service_enabled_before"
+elif [ "$START_OLLAMA" = yes ] && [ -n "$ollama_path" ]; then
+  die "systemctl cannot resolve the existing Ollama service unit required by --start-ollama yes"
 fi
 
 if [ "$INSTALL_TOOLS" = yes ] && [ "$OLLAMA_OWNER" = arch ] && [ -z "$ollama_path" ]; then
@@ -614,10 +839,9 @@ case "${OLLAMA_HOST:-}" in
   *) die "OLLAMA_HOST must be loopback-only for this recovery kit (got '$OLLAMA_HOST')" ;;
 esac
 
-if command -v ss >/dev/null 2>&1; then
-  nonlocal_listener=$(ss -ltnH 2>/dev/null | awk '$4 ~ /:11434$/ && $4 !~ /^(127\.0\.0\.1|\[::1\]|localhost):/ {print $4; exit}')
-  [ -z "$nonlocal_listener" ] || die "port 11434 is exposed beyond loopback at $nonlocal_listener"
-fi
+listener_snapshot=$(ss -ltnH 2>/dev/null) || die "ss could not inventory TCP listeners; refusing to continue"
+nonlocal_listener=$(printf '%s\n' "$listener_snapshot" | awk '$4 ~ /:11434$/ && $4 !~ /^(127\.0\.0\.1|\[::1\]|localhost):/ {print $4; exit}')
+[ -z "$nonlocal_listener" ] || die "port 11434 is exposed beyond loopback at $nonlocal_listener"
 
 GREPAI_DEST="$INSTALL_ROOT/grepai/v$GREPAI_VERSION/grepai"
 CODEGRAPH_DEST="$INSTALL_ROOT/codegraph/v$CODEGRAPH_VERSION/bin/codegraph"
@@ -634,8 +858,14 @@ if [ "$INSTALL_TOOLS" = no ]; then
 fi
 
 check_tool_conflict() {
-  local name=$1 observed=$2 expected_link=$3 expected_dest=$4 version=$5 version_command=$6
+  local name=$1 observed=$2 expected_link=$3 expected_dest=$4 version=$5 version_arg=$6 destination_owner
   if [ "$INSTALL_TOOLS" = yes ]; then
+    if [ -e "$expected_dest" ] || [ -L "$expected_dest" ]; then
+      destination_owner=$(stat -c %u -- "$expected_dest" 2>/dev/null || true)
+      [ ! -L "$expected_dest" ] && [ -f "$expected_dest" ] && [ -x "$expected_dest" ] \
+        && [ "$destination_owner" = "$EUID" ] \
+        || die "$name managed destination is not a proven owner-managed regular executable: $expected_dest"
+    fi
     [ ! -L "$expected_link" ] || [ -e "$expected_link" ] || die "$name ownership conflict: $expected_link is a broken symlink"
     if [ -e "$expected_link" ]; then
       link_target=$(canonical_path "$expected_link")
@@ -649,12 +879,12 @@ check_tool_conflict() {
   if [ "$INSTALL_TOOLS" = yes ]; then
     [ "$observed" = "$expected_dest" ] || die "$name PATH shadowing: '$observed' wins instead of managed '$expected_dest'"
   fi
-  observed_version=$(version_token "$(eval "$version_command" 2>/dev/null || true)")
+  observed_version=$(version_token "$("$observed" "$version_arg" 2>/dev/null || true)")
   [ "$observed_version" = "$version" ] || die "$name version conflict: observed '${observed_version:-unknown}', required '$version'"
 }
 
-check_tool_conflict grepai "$GREPAI_BIN" "$BIN_DIR/grepai" "$GREPAI_DEST" "$GREPAI_VERSION" '"$GREPAI_BIN" version'
-check_tool_conflict codegraph "$CODEGRAPH_BIN" "$BIN_DIR/codegraph" "$CODEGRAPH_DEST" "$CODEGRAPH_VERSION" '"$CODEGRAPH_BIN" --version'
+check_tool_conflict grepai "$GREPAI_BIN" "$BIN_DIR/grepai" "$GREPAI_DEST" "$GREPAI_VERSION" version
+check_tool_conflict codegraph "$CODEGRAPH_BIN" "$BIN_DIR/codegraph" "$CODEGRAPH_DEST" "$CODEGRAPH_VERSION" --version
 if [ -n "$SERENA_BIN" ]; then
   observed_serena_version=$(version_token "$("$SERENA_BIN" --version 2>/dev/null || true)")
   [ "$observed_serena_version" = "$SERENA_VERSION" ] || die "Serena version conflict: observed '${observed_serena_version:-unknown}', required '$SERENA_VERSION'"
@@ -667,6 +897,69 @@ elif [ "$INSTALL_TOOLS" = yes ] && { [ -e "$BIN_DIR/serena" ] || [ -L "$BIN_DIR/
   die "Serena ownership conflict: $BIN_DIR/serena exists but is not executable"
 fi
 
+codegraph_status_is_healthy() {
+  jq -e '
+    .initialized == true
+    and ((.journalMode // "") | ascii_downcase) == "wal"
+    and .worktreeMismatch == null
+    and .index.state == "complete"
+    and .index.pendingRefs == 0
+    and .index.reindexRecommended == false
+    and ([.pendingChanges[]] | add // 0) == 0
+  ' >/dev/null
+}
+
+bounded_command() {
+  local label=$1 seconds=$2 status
+  shift 2
+  timeout --kill-after=5s "$seconds" "$@" && return 0
+  status=$?
+  case "$status" in
+    124|137) die "$label exceeded its ${seconds}s hard timeout" ;;
+    *) return "$status" ;;
+  esac
+}
+
+SERENA_HEALTH_CHECKED=0
+SERENA_HEALTH_EVIDENCE=
+run_serena_health() {
+  local context=$1 sandbox
+  [ "$SERENA_HEALTH_CHECKED" -eq 0 ] || return 0
+  sandbox=$(mktemp -d "${TMPDIR:-/tmp}/fm-serena-health.XXXXXX")
+  cleanup_files+=("$sandbox")
+  mkdir -p "$sandbox/home" "$sandbox/cache" "$sandbox/state" "$sandbox/serena"
+  HOME="$sandbox/home" XDG_CACHE_HOME="$sandbox/cache" XDG_STATE_HOME="$sandbox/state" \
+    SERENA_HOME="$sandbox/serena" SERENA_USAGE_REPORTING=false \
+    bounded_command "$context Serena health-check" "$MAX_INDEX_SECONDS" "$SERENA_BIN" project health-check "$PROJECT" >/dev/null \
+    || die "$context serena index is unhealthy; choose repair or rebuild outside this non-destructive run"
+  SERENA_HEALTH_CHECKED=1
+  SERENA_HEALTH_EVIDENCE="serena_health_artifacts=sandboxed removed_at_exit=yes"
+  if [ -n "${ROLLBACK_MANIFEST:-}" ] && [ -e "$ROLLBACK_MANIFEST" ]; then
+    append_manifest "$SERENA_HEALTH_EVIDENCE"
+  fi
+  return 0
+}
+
+if [ "$ACTION" != plan ] && [ "$ALLOW_LANGUAGE_DOWNLOADS" = no ] \
+  && { contains_component serena || [ -d "$PROJECT/.serena" ]; }; then
+  die "cannot prove Serena dependency resolution is network-free for the selected languages; use --action plan, or pass --allow-language-downloads yes after approving Serena-managed downloads"
+fi
+
+if [ "$ACTION" != plan ]; then
+  if [ -d "$PROJECT/.grepai" ]; then
+    (cd "$PROJECT" && bounded_command "existing grepai status" "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" status --no-ui) >/dev/null \
+      || die "existing grepai index is unhealthy; choose repair or rebuild outside this non-destructive run"
+  fi
+  if [ -d "$PROJECT/.codegraph" ]; then
+    CODEGRAPH_TELEMETRY=0 DO_NOT_TRACK=1 bounded_command "existing CodeGraph status" "$COMMAND_TIMEOUT_SECONDS" "$CODEGRAPH_BIN" status --json "$PROJECT" \
+      | codegraph_status_is_healthy \
+      || die "existing codegraph index is unhealthy, stale, non-WAL, or mismatched"
+  fi
+  if [ -d "$PROJECT/.serena" ]; then
+    run_serena_health existing
+  fi
+fi
+
 GREPAI_MCP_BIN=${GREPAI_BIN:-$BIN_DIR/grepai}
 CODEGRAPH_MCP_BIN=${CODEGRAPH_BIN:-$BIN_DIR/codegraph}
 SERENA_MCP_BIN=${SERENA_BIN:-$BIN_DIR/serena}
@@ -677,43 +970,101 @@ json_command() {
 
 build_mcp_entries() {
   grepai_entry=$(json_command "$GREPAI_MCP_BIN" "$(jq -nc --arg project "$PROJECT" '["mcp-serve",$project]')" '{}')
-  codegraph_entry=$(json_command "$CODEGRAPH_MCP_BIN" '["serve","--mcp"]' '{"CODEGRAPH_NO_DAEMON":"1","CODEGRAPH_TELEMETRY":"0","DO_NOT_TRACK":"1"}')
+  codegraph_entry=$(json_command "$CODEGRAPH_MCP_BIN" "$(jq -nc --arg project "$PROJECT" '["serve","--mcp","--path",$project]')" '{"CODEGRAPH_NO_DAEMON":"1","CODEGRAPH_TELEMETRY":"0","DO_NOT_TRACK":"1"}')
   serena_entry=$(json_command "$SERENA_MCP_BIN" "$(jq -nc --arg project "$PROJECT" '["start-mcp-server","--project",$project,"--context=codex","--enable-web-dashboard","false","--open-web-dashboard","false"]')" "$(jq -nc --arg home "$SERENA_HOME_DIR" '{SERENA_HOME:$home,SERENA_USAGE_REPORTING:"false"}')")
   mcp_entries=$(jq -nc --argjson grepai "$grepai_entry" --argjson codegraph "$codegraph_entry" --argjson serena "$serena_entry" '{grepai:$grepai,codegraph:$codegraph,serena:$serena}')
 }
 build_mcp_entries
 
-if [ "$MCP_CLIENT" = lazy-mcp ] && [ "$MCP_SCOPE" = user ]; then
-  [ -f "$LAZY_MCP_DIR/config.json" ] && [ -f "$LAZY_MCP_DIR/gen_config.json" ] && [ -d "$LAZY_MCP_DIR/hierarchy" ] || die "lazy-mcp directory must contain config.json, gen_config.json, and hierarchy/"
-  lazy_generator=${LAZY_MCP_GENERATOR:-$LAZY_MCP_DIR/structure_generator}
-  [ -x "$lazy_generator" ] || die "lazy-mcp generator is not executable: $lazy_generator"
-  lazy_proxy_type=$(jq -r '.mcpProxy.type // empty' "$LAZY_MCP_DIR/config.json")
-  lazy_proxy_addr=$(jq -r '.mcpProxy.addr // empty' "$LAZY_MCP_DIR/config.json")
-  if [ "$lazy_proxy_type" != stdio ]; then
-    case "$lazy_proxy_addr" in 127.0.0.1:*|localhost:*) ;; *) die "lazy-mcp HTTP proxy addr '$lazy_proxy_addr' is not loopback-only" ;; esac
+validate_lazy_mcp_state() {
+  local file name desired existing runtime_entry generator_entry proxy_type proxy_addr
+  LAZY_RUNTIME_CONFIG="$LAZY_MCP_DIR/config.json"
+  LAZY_GENERATOR_CONFIG="$LAZY_MCP_DIR/gen_config.json"
+  LAZY_HIERARCHY="$LAZY_MCP_DIR/hierarchy"
+  LAZY_GENERATOR=${LAZY_MCP_GENERATOR:-$LAZY_MCP_DIR/structure_generator}
+  LAZY_CHANGES_NEEDED=0
+  [ -f "$LAZY_RUNTIME_CONFIG" ] && [ -f "$LAZY_GENERATOR_CONFIG" ] && [ -d "$LAZY_HIERARCHY" ] \
+    && [ -f "$LAZY_HIERARCHY/root.json" ] && [ -x "$LAZY_GENERATOR" ] \
+    || die "lazy-mcp directory must contain config.json, gen_config.json, hierarchy/root.json, and an executable structure_generator"
+  for file in "$LAZY_RUNTIME_CONFIG" "$LAZY_GENERATOR_CONFIG" "$LAZY_HIERARCHY/root.json"; do
+    [ ! -L "$file" ] || die "lazy-mcp refuses symlink-managed config or hierarchy files: $file"
+  done
+  proxy_type=$(jq -r '.mcpProxy.type // empty' "$LAZY_RUNTIME_CONFIG")
+  proxy_addr=$(jq -r '.mcpProxy.addr // empty' "$LAZY_RUNTIME_CONFIG")
+  if [ "$proxy_type" != stdio ]; then
+    case "$proxy_addr" in 127.0.0.1:*|localhost:*) ;; *) die "lazy-mcp HTTP proxy addr '$proxy_addr' is not loopback-only" ;; esac
   fi
-  for lazy_file in "$LAZY_MCP_DIR/config.json" "$LAZY_MCP_DIR/gen_config.json"; do
-    jq -e '.mcpServers | type == "object"' "$lazy_file" >/dev/null || die "lazy-mcp config has no object mcpServers: $lazy_file"
-    for lazy_name in grepai codegraph serena; do
-      desired=$(printf '%s' "$mcp_entries" | jq -c --arg name "$lazy_name" '.[$name]')
-      existing=$(jq -c --arg name "$lazy_name" '.mcpServers[$name] // empty' "$lazy_file")
+  for file in "$LAZY_RUNTIME_CONFIG" "$LAZY_GENERATOR_CONFIG"; do
+    jq -e '.mcpServers | type == "object"' "$file" >/dev/null || die "lazy-mcp config has no object mcpServers: $file"
+    for name in grepai codegraph serena; do
+      desired=$(printf '%s' "$mcp_entries" | jq -c --arg name "$name" '.[$name]')
+      existing=$(jq -c --arg name "$name" '.mcpServers[$name] // empty' "$file")
       if [ -n "$existing" ] && [ "$(printf '%s' "$existing" | jq -S .)" != "$(printf '%s' "$desired" | jq -S .)" ]; then
-        die "lazy-mcp entry '$lazy_name' conflicts in $lazy_file; existing state was not changed"
+        die "lazy-mcp entry '$name' conflicts in $file; existing state was not changed"
       fi
+      [ -n "$existing" ] || LAZY_CHANGES_NEEDED=1
     done
   done
-  for lazy_name in grepai codegraph serena; do
-    runtime_entry=$(jq -c --arg name "$lazy_name" '.mcpServers[$name] // empty' "$LAZY_MCP_DIR/config.json")
-    generator_entry=$(jq -c --arg name "$lazy_name" '.mcpServers[$name] // empty' "$LAZY_MCP_DIR/gen_config.json")
-    if [ -d "$LAZY_MCP_DIR/hierarchy/$lazy_name" ] && { [ -z "$runtime_entry" ] || [ -z "$generator_entry" ]; }; then
-      die "lazy-mcp hierarchy category '$lazy_name' exists without matching entries in both configs"
-    fi
-    if [ -d "$LAZY_MCP_DIR/hierarchy/$lazy_name" ]; then
-      [ -f "$LAZY_MCP_DIR/hierarchy/$lazy_name/$lazy_name.json" ] || die "lazy-mcp hierarchy category '$lazy_name' has no overview file"
-      jq -e --arg name "$lazy_name" '.overview | type == "string" and contains($name)' "$LAZY_MCP_DIR/hierarchy/$lazy_name/$lazy_name.json" >/dev/null \
-        || die "lazy-mcp hierarchy category '$lazy_name' has an invalid overview"
+  for name in grepai codegraph serena; do
+    runtime_entry=$(jq -c --arg name "$name" '.mcpServers[$name] // empty' "$LAZY_RUNTIME_CONFIG")
+    generator_entry=$(jq -c --arg name "$name" '.mcpServers[$name] // empty' "$LAZY_GENERATOR_CONFIG")
+    if [ -d "$LAZY_HIERARCHY/$name" ]; then
+      [ -n "$runtime_entry" ] && [ -n "$generator_entry" ] || die "lazy-mcp hierarchy category '$name' exists without matching entries in both configs"
+      [ -f "$LAZY_HIERARCHY/$name/$name.json" ] || die "lazy-mcp hierarchy category '$name' has no overview file"
+      jq -e --arg name "$name" '.overview | type == "string" and contains($name)' "$LAZY_HIERARCHY/$name/$name.json" >/dev/null \
+        || die "lazy-mcp hierarchy category '$name' has an invalid overview"
+    else
+      LAZY_CHANGES_NEEDED=1
     fi
   done
+}
+
+if [ "$MCP_CLIENT" = lazy-mcp ] && [ "$MCP_SCOPE" = user ]; then
+  validate_lazy_mcp_state
+fi
+
+# An already-running local Ollama stack is compatibility-checked before the
+# rollback manifest, package installs, local excludes, or index state can change.
+if [ "$ACTION" != plan ] && [ -n "$ollama_path" ] \
+  && curl --silent --show-error --fail --noproxy '*' --max-time 3 "$OLLAMA_ENDPOINT/api/version" >/dev/null 2>&1; then
+  preflight_binary_version=$(version_token "$("$ollama_path" --version 2>/dev/null || true)")
+  preflight_api_version=$(curl --silent --show-error --fail --noproxy '*' --max-time 3 "$OLLAMA_ENDPOINT/api/version" | jq -r '.version // empty')
+  [ -n "$preflight_binary_version" ] && [ "$preflight_binary_version" = "$preflight_api_version" ] \
+    || die "Ollama binary/API version mismatch: binary='${preflight_binary_version:-unknown}' API='${preflight_api_version:-unknown}'"
+  preflight_model_record=$(curl --silent --show-error --fail --noproxy '*' --max-time 5 "$OLLAMA_ENDPOINT/api/tags" \
+    | jq -c --arg model "$MODEL" '.models[]? | select(.name == $model or .model == $model)' | head -n 1)
+  if [ -n "$preflight_model_record" ]; then
+    preflight_digest=$(printf '%s' "$preflight_model_record" | jq -r '.digest // empty')
+    preflight_size=$(printf '%s' "$preflight_model_record" | jq -r '.size // 0')
+    [ "$preflight_digest" = "$MODEL_EXPECTED_DIGEST" ] \
+      || die "model digest '$preflight_digest' does not match pinned digest '$MODEL_EXPECTED_DIGEST' for '$MODEL'"
+    [ "$preflight_size" -eq "$MODEL_EXPECTED_BYTES" ] \
+      || die "model size '$preflight_size' does not match pinned size '$MODEL_EXPECTED_BYTES' for '$MODEL'"
+    preflight_show_body=$(jq -nc --arg model "$MODEL" '{model:$model,verbose:false}')
+    preflight_metadata=$(curl --silent --show-error --fail --noproxy '*' --max-time 5 \
+      -H 'Content-Type: application/json' -d "$preflight_show_body" "$OLLAMA_ENDPOINT/api/show") \
+      || die "Ollama /api/show metadata preflight failed for '$MODEL'"
+    preflight_quantization=$(printf '%s' "$preflight_metadata" | jq -r '.details.quantization_level // empty')
+    preflight_dimensions=$(printf '%s' "$preflight_metadata" | jq -r '.model_info["nomic-bert.embedding_length"] // .details.embedding_length // 0')
+    [ "$preflight_quantization" = "$MODEL_EXPECTED_QUANTIZATION" ] \
+      || die "model quantization '$preflight_quantization' does not match pinned '$MODEL_EXPECTED_QUANTIZATION'"
+    [ "$preflight_dimensions" -eq "$MODEL_EXPECTED_DIMENSIONS" ] \
+      || die "model metadata dimensions '$preflight_dimensions' do not match pinned '$MODEL_EXPECTED_DIMENSIONS'"
+    preflight_model_running=no
+    if "$ollama_path" ps 2>/dev/null | awk -v model="$MODEL" '$1 == model {found=1} END {exit !found}'; then preflight_model_running=yes; fi
+    preflight_probe_body=$(jq -nc --arg model "$MODEL" '{model:$model,input:["fn local_index_health_probe() -> usize { 768 }"],truncate:false,keep_alive:"5m"}')
+    preflight_probe_response=$(bounded_command "Ollama embedding preflight" "$MAX_EMBED_REQUEST_SECONDS" curl --silent --show-error --fail --noproxy '*' \
+      --max-time "$MAX_EMBED_REQUEST_SECONDS" -H 'Content-Type: application/json' -d "$preflight_probe_body" "$OLLAMA_ENDPOINT/api/embed") \
+      || die "Ollama /api/embed compatibility preflight failed"
+    preflight_vector_length=$(printf '%s' "$preflight_probe_response" | jq -r '.embeddings[0] | length')
+    [ "$preflight_vector_length" -eq "$MODEL_EXPECTED_DIMENSIONS" ] \
+      || die "Ollama returned vector length $preflight_vector_length, expected $MODEL_EXPECTED_DIMENSIONS"
+    [ "$preflight_model_running" = yes ] || MODEL_LOADED_BY_RUN=1
+  elif [ "$PULL_MODEL" = no ]; then
+    die "model '$MODEL' is absent and --pull-model no forbids the approximately 274 MB download"
+  fi
+elif [ "$ACTION" != plan ] && [ -n "$ollama_path" ] && [ "$START_OLLAMA" = no ]; then
+  die "Ollama loopback API is unavailable and --start-ollama no forbids starting it"
 fi
 
 if [ "$ACTION" = plan ]; then
@@ -733,24 +1084,60 @@ if [ -n "$ROLLBACK_MANIFEST" ]; then
   [ -f "$ROLLBACK_MANIFEST" ] && [ -w "$ROLLBACK_MANIFEST" ] || die "rollback manifest is not a writable regular file: $ROLLBACK_MANIFEST"
   append_manifest "run=$(date -u +%Y-%m-%dT%H:%M:%SZ) action=$ACTION project=$PROJECT"
   append_manifest "pins=grepai:v$GREPAI_VERSION,codegraph:v$CODEGRAPH_VERSION,serena:$SERENA_VERSION model=$MODEL"
+  [ -z "$SERENA_HEALTH_EVIDENCE" ] || append_manifest "$SERENA_HEALTH_EVIDENCE"
 fi
+
+plan_project_initializer() {
+  local name=$1 state_path=$2
+  PLANNED_STATE_NAMES+=("$name")
+  PLANNED_STATE_PATHS+=("$state_path")
+  append_manifest "planned_project_state=$state_path initializer=$name"
+}
+
+complete_project_initializer() {
+  INITIALIZER_COMPLETE["$1"]=1
+}
 
 ensure_local_ignores() {
   [ "$STATE_POLICY" = local-ignored ] || return 0
   [ "$INIT_COMPONENTS" != none ] || return 0
-  local exclude_file git_dir entry
-  git_dir=$(git -C "$PROJECT" rev-parse --git-dir)
-  case "$git_dir" in /*) ;; *) git_dir="$PROJECT/$git_dir" ;; esac
-  exclude_file="$git_dir/info/exclude"
-  mkdir -p "$(dirname "$exclude_file")"
-  touch "$exclude_file"
+  local exclude_file exclude_parent exclude_owner handle_dir handle original_identity current_identity entry
+  validate_local_exclude_path
+  exclude_file=$GIT_EXCLUDE_FILE
+  exclude_parent=$(dirname "$exclude_file")
+  [ -d "$exclude_parent" ] && [ ! -L "$exclude_parent" ] \
+    || die "Git info directory must be a real directory: $exclude_parent"
+  if [ ! -e "$exclude_file" ] && [ ! -L "$exclude_file" ]; then
+    (umask 077; set -o noclobber; : > "$exclude_file") 2>/dev/null || [ -e "$exclude_file" ] \
+      || die "could not create Git info/exclude safely: $exclude_file"
+  fi
+  [ ! -L "$exclude_file" ] || die "Git info/exclude must be an owner-owned regular file: $exclude_file"
+  exclude_owner=$(stat -c %u -- "$exclude_file" 2>/dev/null || true)
+  [ -f "$exclude_file" ] && [ "$exclude_owner" = "$EUID" ] \
+    || die "Git info/exclude must be an owner-owned regular file: $exclude_file"
+  handle_dir=$(mktemp -d "$exclude_parent/.fm-indexing-exclude.XXXXXX")
+  cleanup_files+=("$handle_dir")
+  handle=$handle_dir/exclude
+  ln -P -- "$exclude_file" "$handle" \
+    || die "could not acquire a no-follow hard-link handle for Git info/exclude: $exclude_file"
+  [ ! -L "$handle" ] && [ -f "$handle" ] \
+    || die "Git info/exclude changed topology while it was being opened: $exclude_file"
+  original_identity=$(stat -c '%d:%i' -- "$handle")
+  [ ! -L "$exclude_file" ] || die "Git info/exclude changed while its safe handle was acquired: $exclude_file"
+  current_identity=$(stat -c '%d:%i' -- "$exclude_file" 2>/dev/null || true)
+  [ "$current_identity" = "$original_identity" ] \
+    || die "Git info/exclude changed while its safe handle was acquired: $exclude_file"
   for entry in .grepai/ .codegraph/ .serena/; do
-    if ! grep -Fxq "$entry" "$exclude_file"; then
-      printf '%s\n' "$entry" >> "$exclude_file"
+    if ! grep -Fxq "$entry" "$handle"; then
+      printf '%s\n' "$entry" >> "$handle"
       append_manifest "created_git_exclude_entry=$exclude_file:$entry"
       note "added local Git exclude $entry"
     fi
   done
+  [ ! -L "$exclude_file" ] || die "Git info/exclude changed during its no-follow update: $exclude_file"
+  current_identity=$(stat -c '%d:%i' -- "$exclude_file" 2>/dev/null || true)
+  [ "$current_identity" = "$original_identity" ] \
+    || die "Git info/exclude changed during its no-follow update: $exclude_file"
 }
 
 download_verified() {
@@ -762,7 +1149,10 @@ download_verified() {
 }
 
 install_grepai() {
-  if [ -x "$GREPAI_DEST" ]; then
+  if [ -e "$GREPAI_DEST" ] || [ -L "$GREPAI_DEST" ]; then
+    [ ! -L "$GREPAI_DEST" ] && [ -f "$GREPAI_DEST" ] && [ -x "$GREPAI_DEST" ] \
+      && [ "$(stat -c %u -- "$GREPAI_DEST")" = "$EUID" ] \
+      || die "grepai managed destination is not a proven owner-managed regular executable: $GREPAI_DEST"
     installed=$(version_token "$("$GREPAI_DEST" version 2>/dev/null || true)")
     [ "$installed" = "$GREPAI_VERSION" ] || die "managed grepai destination exists with version '${installed:-unknown}': $GREPAI_DEST"
   else
@@ -847,18 +1237,11 @@ install_serena() {
 }
 
 install_arch_ollama() {
-  local package
-  case "$OLLAMA_ACCEL" in
-    cpu) package=ollama ;;
-    cuda) package=ollama-cuda ;;
-    rocm) package=ollama-rocm ;;
-    vulkan) package=ollama-vulkan ;;
-  esac
-  repo_version=$(pacman -Si "$package" 2>/dev/null | sed -n 's/^Version[[:space:]]*:[[:space:]]*//p' | head -n 1)
-  [ -n "$repo_version" ] || die "Arch repository package '$package' is unavailable for $machine_arch; perform a deliberate full system upgrade or choose a supported state"
-  note "Arch repository discovered $package=$repo_version"
-  run_privileged pacman -S --needed "$package"
-  append_manifest "installed_arch_package=$package:$repo_version"
+  repo_version=$(pacman -Si "$arch_ollama_package" 2>/dev/null | sed -n 's/^Version[[:space:]]*:[[:space:]]*//p' | head -n 1)
+  [ -n "$repo_version" ] || die "Arch repository package '$arch_ollama_package' is unavailable for $machine_arch; perform a deliberate full system upgrade or choose a supported state"
+  note "Arch repository discovered $arch_ollama_package=$repo_version"
+  run_privileged pacman -S --needed "$arch_ollama_package"
+  append_manifest "installed_arch_package=$arch_ollama_package:$repo_version"
 }
 
 if [ "$ACTION" = apply ]; then
@@ -886,7 +1269,7 @@ SERENA_BIN=${SERENA_BIN:-$(command_path serena)}
 
 api_healthy=no
 persistence_changed=0
-if curl --silent --show-error --fail --noproxy '*' --max-time 3 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
+if curl --silent --show-error --fail --noproxy '*' --max-time 3 "$OLLAMA_ENDPOINT/api/version" >/dev/null 2>&1; then
   api_healthy=yes
 fi
 if [ "$api_healthy" = no ]; then
@@ -902,13 +1285,13 @@ if [ "$api_healthy" = no ]; then
     append_manifest "temporarily_started_service=ollama prior_active=$service_active_before prior_enabled=$service_enabled_before stop_at_exit=yes"
   fi
   for _ in $(seq 1 20); do
-    if curl --silent --show-error --fail --noproxy '*' --max-time 2 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then api_healthy=yes; break; fi
+    if curl --silent --show-error --fail --noproxy '*' --max-time 2 "$OLLAMA_ENDPOINT/api/version" >/dev/null 2>&1; then api_healthy=yes; break; fi
     sleep 1
   done
   [ "$api_healthy" = yes ] || die "Ollama service started but the loopback API did not become healthy within 20 seconds"
 fi
 runtime_ollama_version=$(version_token "$("$ollama_path" --version 2>/dev/null || true)")
-api_ollama_version=$(curl --silent --show-error --fail --noproxy '*' --max-time 3 http://127.0.0.1:11434/api/version | jq -r '.version // empty')
+api_ollama_version=$(curl --silent --show-error --fail --noproxy '*' --max-time 3 "$OLLAMA_ENDPOINT/api/version" | jq -r '.version // empty')
 [ -n "$runtime_ollama_version" ] && [ "$runtime_ollama_version" = "$api_ollama_version" ] || die "Ollama binary/API version mismatch: binary='${runtime_ollama_version:-unknown}' API='${api_ollama_version:-unknown}'"
 if [ "$ACTION" = apply ] && [ "$PERSIST_OLLAMA" = yes ] && [ "$service_enabled_before" = no ] && [ "$persistence_changed" -eq 0 ]; then
   run_privileged systemctl enable ollama
@@ -916,7 +1299,7 @@ if [ "$ACTION" = apply ] && [ "$PERSIST_OLLAMA" = yes ] && [ "$service_enabled_b
 fi
 
 model_present() {
-  curl --silent --show-error --fail --noproxy '*' --max-time 5 http://127.0.0.1:11434/api/tags \
+  curl --silent --show-error --fail --noproxy '*' --max-time 5 "$OLLAMA_ENDPOINT/api/tags" \
     | jq -e --arg model "$MODEL" '.models[]? | select(.name == $model or .model == $model)' >/dev/null
 }
 
@@ -928,13 +1311,22 @@ if ! model_present; then
   append_manifest "pulled_model=$MODEL removal_requires_explicit_approval=yes"
 fi
 
-model_record=$(curl --silent --show-error --fail --noproxy '*' --max-time 5 http://127.0.0.1:11434/api/tags | jq -c --arg model "$MODEL" '.models[]? | select(.name == $model or .model == $model)' | head -n 1)
+model_record=$(curl --silent --show-error --fail --noproxy '*' --max-time 5 "$OLLAMA_ENDPOINT/api/tags" | jq -c --arg model "$MODEL" '.models[]? | select(.name == $model or .model == $model)' | head -n 1)
 [ -n "$model_record" ] || die "model '$MODEL' disappeared after pull/inspection"
 model_digest=$(printf '%s' "$model_record" | jq -r '.digest // empty')
 model_size=$(printf '%s' "$model_record" | jq -r '.size // 0')
 [ -n "$model_digest" ] || die "Ollama did not report a digest for '$MODEL'"
 case "$model_size" in ''|*[!0-9]*) die "Ollama reported an invalid model size for '$MODEL'" ;; esac
-[ "$model_size" -ge 200000000 ] && [ "$model_size" -le 400000000 ] || die "unexpected model size $model_size for '$MODEL'; inspect the discovered digest before continuing"
+[ "$model_digest" = "$MODEL_EXPECTED_DIGEST" ] || die "model digest '$model_digest' does not match pinned digest '$MODEL_EXPECTED_DIGEST' for '$MODEL'"
+[ "$model_size" -eq "$MODEL_EXPECTED_BYTES" ] || die "model size '$model_size' does not match pinned size '$MODEL_EXPECTED_BYTES' for '$MODEL'"
+model_show_body=$(jq -nc --arg model "$MODEL" '{model:$model,verbose:false}')
+model_metadata=$(curl --silent --show-error --fail --noproxy '*' --max-time 5 \
+  -H 'Content-Type: application/json' -d "$model_show_body" "$OLLAMA_ENDPOINT/api/show") \
+  || die "Ollama /api/show metadata probe failed for '$MODEL'"
+model_quantization=$(printf '%s' "$model_metadata" | jq -r '.details.quantization_level // empty')
+model_metadata_dimensions=$(printf '%s' "$model_metadata" | jq -r '.model_info["nomic-bert.embedding_length"] // .details.embedding_length // 0')
+[ "$model_quantization" = "$MODEL_EXPECTED_QUANTIZATION" ] || die "model quantization '$model_quantization' does not match pinned '$MODEL_EXPECTED_QUANTIZATION'"
+[ "$model_metadata_dimensions" -eq "$MODEL_EXPECTED_DIMENSIONS" ] || die "model metadata dimensions '$model_metadata_dimensions' do not match pinned '$MODEL_EXPECTED_DIMENSIONS'"
 append_manifest "observed_model=$MODEL digest=$model_digest size=$model_size"
 
 model_running_before=no
@@ -942,7 +1334,9 @@ if "$ollama_path" ps 2>/dev/null | awk -v model="$MODEL" '$1 == model {found=1} 
   model_running_before=yes
 fi
 probe_body=$(jq -nc --arg model "$MODEL" '{model:$model,input:["fn local_index_health_probe() -> usize { 768 }"],truncate:false,keep_alive:"5m"}')
-probe_response=$(curl --silent --show-error --fail --noproxy '*' --max-time 120 -H 'Content-Type: application/json' -d "$probe_body" http://127.0.0.1:11434/api/embed) || die "Ollama /api/embed health probe failed or exceeded 120 seconds"
+probe_response=$(bounded_command "Ollama embedding health" "$MAX_EMBED_REQUEST_SECONDS" curl --silent --show-error --fail --noproxy '*' \
+  --max-time "$MAX_EMBED_REQUEST_SECONDS" -H 'Content-Type: application/json' -d "$probe_body" "$OLLAMA_ENDPOINT/api/embed") \
+  || die "Ollama /api/embed health probe failed"
 vector_length=$(printf '%s' "$probe_response" | jq -r '.embeddings[0] | length')
 [ "$vector_length" -eq "$MODEL_EXPECTED_DIMENSIONS" ] || die "Ollama returned vector length $vector_length, expected $MODEL_EXPECTED_DIMENSIONS"
 [ "$model_running_before" = yes ] || MODEL_LOADED_BY_RUN=1
@@ -953,56 +1347,234 @@ if [ "$OLLAMA_ACCEL" = cpu ]; then
 else
   printf '%s\n' "$processor_line" | grep -E '[0-9]+% GPU|GPU' >/dev/null || die "$OLLAMA_ACCEL selected but ollama ps did not report GPU placement: $processor_line"
 fi
-note "ollama_health digest=$model_digest size=$model_size dimensions=$vector_length total_duration=$(printf '%s' "$probe_response" | jq -r '.total_duration // "unknown"') prompt_eval_count=$(printf '%s' "$probe_response" | jq -r '.prompt_eval_count // "unknown"') placement='$processor_line'"
+note "ollama_health digest=$model_digest size=$model_size quantization=$model_quantization dimensions=$vector_length total_duration=$(printf '%s' "$probe_response" | jq -r '.total_duration // "unknown"') prompt_eval_count=$(printf '%s' "$probe_response" | jq -r '.prompt_eval_count // "unknown"') placement='$processor_line'"
+
+now_millis() {
+  date +%s%3N
+}
+
+process_is_live() {
+  local state
+  state=$(ps -o stat= -p "$1" 2>/dev/null | awk '{print $1}')
+  case "$state" in ''|Z*) return 1 ;; *) return 0 ;; esac
+}
+
+observe_temperature_millicelsius() {
+  local root=${FM_INDEX_THERMAL_ROOT:-/sys} file value maximum=
+  while IFS= read -r file; do
+    value=$(cat "$file" 2>/dev/null || true)
+    case "$value" in ''|*[!0-9]*) continue ;; esac
+    [ "$value" -gt 0 ] && [ "$value" -lt 200000 ] || continue
+    [ -n "$maximum" ] && [ "$value" -le "$maximum" ] || maximum=$value
+  done < <(find "$root/class/thermal" "$root/class/hwmon" -type f \( -name temp -o -name 'temp*_input' \) 2>/dev/null | sort)
+  printf '%s\n' "${maximum:-unavailable}"
+}
+
+sample_benchmark_resources() {
+  local available swap_free load_milli temperature rss pid
+  available=$(awk '/^MemAvailable:/ {print $2; exit}' "$MEMINFO")
+  swap_free=$(awk '/^SwapFree:/ {print $2; exit}' "$MEMINFO")
+  load_milli=$(awk 'NR == 1 {printf "%.0f", $1 * 1000}' "$LOADAVG")
+  temperature=$(observe_temperature_millicelsius)
+  [ "$available" -ge "$BENCH_MIN_MEM_KIB" ] || BENCH_MIN_MEM_KIB=$available
+  [ "$swap_free" -ge "$BENCH_MIN_SWAP_FREE_KIB" ] || BENCH_MIN_SWAP_FREE_KIB=$swap_free
+  [ "$load_milli" -le "$BENCH_MAX_LOAD_MILLI" ] || BENCH_MAX_LOAD_MILLI=$load_milli
+  if [ "$temperature" != unavailable ]; then
+    [ "$BENCH_MAX_TEMP_MILLIC" != unavailable ] && [ "$temperature" -le "$BENCH_MAX_TEMP_MILLIC" ] || BENCH_MAX_TEMP_MILLIC=$temperature
+  fi
+  pid=${FM_INDEX_OLLAMA_PID:-}
+  if [ -z "$pid" ] && command -v systemctl >/dev/null 2>&1; then
+    pid=$(systemctl show -p MainPID --value ollama 2>/dev/null || true)
+  fi
+  case "$pid" in ''|0|*[!0-9]*) return 0 ;; esac
+  rss=$(awk '/^VmRSS:/ {print $2; exit}' "/proc/$pid/status" 2>/dev/null || true)
+  case "$rss" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$rss" -le "$BENCH_MAX_OLLAMA_RSS_KIB" ] || BENCH_MAX_OLLAMA_RSS_KIB=$rss
+}
+
+prepare_micro_batch() {
+  local scratch=$1 micro_dir=$2
+  local paths=$micro_dir/paths rel index=0
+  awk -F '\t' '
+    function emit() { print $2; selected[$2] = 1; total++ }
+    $1 == "rs" && rust < 60 { emit(); rust++; next }
+    ($1 == "ts" || $1 == "tsx" || $1 == "js" || $1 == "jsx") && frontend < 20 { emit(); frontend++; next }
+    $1 == "py" && python < 10 { emit(); python++; next }
+    ($1 == "json" || $1 == "yaml" || $1 == "yml" || $1 == "toml" || $1 == "md") && config < 10 { emit(); config++; next }
+    { fallback[++fallback_count] = $2 }
+    END {
+      for (i = 1; i <= fallback_count && total < 100; i++) {
+        if (!selected[fallback[i]]) { print fallback[i]; selected[fallback[i]] = 1; total++ }
+      }
+    }
+  ' "$candidate_file" > "$paths"
+  [ "$(wc -l < "$paths" | tr -d ' ')" -eq 100 ] || die "the cold/warm benchmark requires at least 100 eligible real files after ignores"
+  while IFS= read -r rel; do
+    index=$((index + 1))
+    awk '
+      { for (i = 1; i <= NF && count < 512; i++) { if (count++) printf " "; printf "%s", $i } }
+      END { print "" }
+    ' "$scratch/$rel" > "$micro_dir/chunk-$index.txt"
+    [ -s "$micro_dir/chunk-$index.txt" ] || die "benchmark candidate produced an empty real chunk: $rel"
+  done < "$paths"
+}
+
+run_micro_batch() {
+  local micro_dir=$1 start deadline pass chunk request_start request_end response dimensions prompt_tokens=0
+  local remaining_millis request_budget_seconds
+  local pass_start pass_end cold_ms=0 warm1_ms=0 warm2_ms=0 warm3_ms=0 request_count median_ms p95_ms
+  start=$(now_millis)
+  deadline=$((start + MAX_MICRO_BATCH_SECONDS * 1000))
+  : > "$micro_dir/durations"
+  for pass in cold warm1 warm2 warm3; do
+    pass_start=$(now_millis)
+    for chunk in "$micro_dir"/chunk-*.txt; do
+      [ "$(now_millis)" -lt "$deadline" ] || die "100-chunk cold/warm benchmark exceeded the ${MAX_MICRO_BATCH_SECONDS}s hard bound"
+      probe_body=$(jq -Rs --arg model "$MODEL" '{model:$model,input:[.],truncate:false,keep_alive:"5m"}' < "$chunk")
+      request_start=$(now_millis)
+      remaining_millis=$((deadline - request_start))
+      request_budget_seconds=$(((remaining_millis + 999) / 1000))
+      [ "$request_budget_seconds" -le "$MAX_EMBED_REQUEST_SECONDS" ] || request_budget_seconds=$MAX_EMBED_REQUEST_SECONDS
+      [ "$request_budget_seconds" -gt 0 ] || die "100-chunk cold/warm benchmark exceeded the ${MAX_MICRO_BATCH_SECONDS}s hard bound"
+      response=$(bounded_command "micro-batch embed request" "$request_budget_seconds" curl --silent --show-error --fail --noproxy '*' \
+        --max-time "$request_budget_seconds" -H 'Content-Type: application/json' -d "$probe_body" "$OLLAMA_ENDPOINT/api/embed") \
+        || die "Ollama micro-batch embed failed in pass '$pass'"
+      request_end=$(now_millis)
+      printf '%s\n' "$((request_end - request_start))" >> "$micro_dir/durations"
+      dimensions=$(printf '%s' "$response" | jq -r '.embeddings[0] | length')
+      [ "$dimensions" -eq "$MODEL_EXPECTED_DIMENSIONS" ] || die "micro-batch returned vector length $dimensions, expected $MODEL_EXPECTED_DIMENSIONS"
+      prompt_tokens=$((prompt_tokens + $(printf '%s' "$response" | jq -r '.prompt_eval_count // 0')))
+      sample_benchmark_resources
+    done
+    pass_end=$(now_millis)
+    case "$pass" in
+      cold) cold_ms=$((pass_end - pass_start)) ;;
+      warm1) warm1_ms=$((pass_end - pass_start)) ;;
+      warm2) warm2_ms=$((pass_end - pass_start)) ;;
+      warm3) warm3_ms=$((pass_end - pass_start)) ;;
+    esac
+  done
+  sort -n "$micro_dir/durations" > "$micro_dir/durations.sorted"
+  request_count=$(wc -l < "$micro_dir/durations.sorted" | tr -d ' ')
+  median_ms=$(sed -n "$(((request_count + 1) / 2))p" "$micro_dir/durations.sorted")
+  p95_ms=$(sed -n "$(((request_count * 95 + 99) / 100))p" "$micro_dir/durations.sorted")
+  note "micro_batch chunks=100 passes=4 cold_ms=$cold_ms warm_ms=$warm1_ms,$warm2_ms,$warm3_ms request_median_ms=$median_ms request_p95_ms=$p95_ms prompt_tokens=$prompt_tokens wall_ms=$(($(now_millis) - start))"
+}
 
 run_scratch_benchmark() {
-  local scratch start end before_kib after_kib min_kib allowed_delta_kib query expected output hits=0
+  local scratch micro_dir start end allowed_delta_kib query expected output hits=0 query_start query_end
+  local search_count search_median_ms incremental_path marker incremental_start incremental_seconds watcher_status watcher_pid watcher_idle_cpu
   scratch=$(mktemp -d "${TMPDIR:-/tmp}/fm-index-scratch.XXXXXX")
+  micro_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-index-micro.XXXXXX")
   SCRATCH_DIR=$scratch
-  cleanup_files+=("$scratch")
+  cleanup_files+=("$scratch" "$micro_dir")
   git -C "$PROJECT" archive HEAD | tar -x -C "$scratch"
   if [ "$IGNORE_POLICY" = existing ] && [ ! -e "$scratch/.grepaiignore" ]; then
     cp "$PROJECT/.grepaiignore" "$scratch/.grepaiignore"
   fi
-  (cd "$scratch" && "$GREPAI_BIN" init --provider ollama --model "$MODEL" --backend gob --yes >/dev/null)
-  before_kib=$(awk '/^MemAvailable:/ {print $2; exit}' "$MEMINFO")
-  min_kib=$before_kib
+  prepare_micro_batch "$scratch" "$micro_dir"
+  BENCH_MIN_MEM_KIB=$mem_available_kib
+  BENCH_MIN_SWAP_FREE_KIB=$swap_free_kib
+  BENCH_MAX_LOAD_MILLI=0
+  BENCH_MAX_TEMP_MILLIC=unavailable
+  BENCH_MAX_OLLAMA_RSS_KIB=0
+  sample_benchmark_resources
+
+  (cd "$scratch" && bounded_command "scratch grepai init" "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" init --provider ollama --model "$MODEL" --backend gob --yes >/dev/null) \
+    || die "scratch grepai init failed"
+  write_and_validate_fresh_grepai_endpoint "$scratch"
   start=$(date +%s)
-  setsid bash -c 'cd "$1" && exec "$2" watch --background' _ "$scratch" "$GREPAI_BIN" >"$scratch/watch.out" 2>"$scratch/watch.err" &
+  mkfifo "$scratch/watch.start"
+  # The launch gate keeps the exact child alive until its PID generation is
+  # recorded, closing the fast-exit/PID-reuse race seen in the test suite.
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  setsid bash -c 'IFS= read -r _ < "$3"; cd "$1" && exec "$2" watch --background' _ "$scratch" "$GREPAI_BIN" "$scratch/watch.start" \
+    >"$scratch/watch.out" 2>"$scratch/watch.err" &
   SCRATCH_WATCH_STARTED=1
-  watch_command_pid=$!
-  while kill -0 "$watch_command_pid" 2>/dev/null; do
+  record_watch_command "$!"
+  printf 'start\n' > "$scratch/watch.start"
+  rm "$scratch/watch.start"
+  while process_is_live "$watch_command_pid"; do
     now=$(date +%s)
     if [ $((now - start)) -ge "$MAX_INDEX_SECONDS" ]; then
-      kill -TERM -- "-$watch_command_pid" 2>/dev/null || kill "$watch_command_pid" 2>/dev/null || true
-      wait "$watch_command_pid" 2>/dev/null || true
-      (cd "$scratch" && "$GREPAI_BIN" watch --stop >/dev/null 2>&1) || true
+      terminate_watch_command
+      (cd "$scratch" && timeout --kill-after=5s "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" watch --stop >/dev/null 2>&1) || true
       SCRATCH_WATCH_STARTED=0
       die "scratch grepai index exceeded the ${MAX_INDEX_SECONDS}s hard bound"
     fi
-    current_kib=$(awk '/^MemAvailable:/ {print $2; exit}' "$MEMINFO")
-    [ "$current_kib" -lt "$min_kib" ] && min_kib=$current_kib
+    sample_benchmark_resources
     sleep 1
   done
-  wait "$watch_command_pid" || { cat "$scratch/watch.err" >&2; die "scratch grepai indexing failed"; }
+  completed_watch_pid=$watch_command_pid
+  if wait "$completed_watch_pid"; then
+    clear_watch_command
+  else
+    clear_watch_command
+    cat "$scratch/watch.err" >&2
+    die "scratch grepai indexing failed"
+  fi
   end=$(date +%s)
-  after_kib=$(awk '/^MemAvailable:/ {print $2; exit}' "$MEMINFO")
+  watcher_status=$(cd "$scratch" && bounded_command "scratch grepai watcher status" "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" watch --status) \
+    || die "scratch grepai watcher did not report running after initialization"
+  watcher_pid=$(printf '%s\n' "$watcher_status" | sed -n 's/.*PID \([0-9][0-9]*\).*/\1/p' | head -n 1)
+  if [ -z "$watcher_pid" ] || ! kill -0 "$watcher_pid" 2>/dev/null; then
+    die "scratch grepai watcher status did not identify a live PID"
+  fi
   allowed_delta_kib=$((mem_total_kib * MAX_RAM_PERCENT / 100))
-  observed_delta_kib=$((before_kib - min_kib))
-  [ "$observed_delta_kib" -le "$allowed_delta_kib" ] || { (cd "$scratch" && "$GREPAI_BIN" watch --stop >/dev/null 2>&1) || true; die "scratch index used $((observed_delta_kib / 1024)) MiB observed RAM delta, above ${MAX_RAM_PERCENT}% of installed RAM"; }
-  (cd "$scratch" && "$GREPAI_BIN" status --no-ui) >"$scratch/status.out" 2>"$scratch/status.err" || die "scratch grepai status failed"
+  observed_delta_kib=$((mem_available_kib - BENCH_MIN_MEM_KIB))
+  [ "$observed_delta_kib" -le "$allowed_delta_kib" ] || die "scratch benchmark used $((observed_delta_kib / 1024)) MiB observed RAM delta, above ${MAX_RAM_PERCENT}% of installed RAM"
+  (cd "$scratch" && bounded_command "scratch grepai status" "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" status --no-ui) \
+    >"$scratch/status.out" 2>"$scratch/status.err" || die "scratch grepai status failed"
+  : > "$micro_dir/search-durations"
   for benchmark_case in "${BENCHMARK_QUERIES[@]}"; do
     query=${benchmark_case%%=*}
     expected=${benchmark_case#*=}
-    output=$(cd "$scratch" && "$GREPAI_BIN" search "$query" --json --limit 10) || die "scratch grepai query failed: $query"
-    if printf '%s' "$output" | jq -e --arg expected "$expected" 'tostring | contains($expected)' >/dev/null; then
-      hits=$((hits + 1))
-    fi
+    query_start=$(now_millis)
+    output=$(cd "$scratch" && bounded_command "scratch grepai search" "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" search "$query" --json --limit 10) \
+      || die "scratch grepai query failed: $query"
+    query_end=$(now_millis)
+    printf '%s\n' "$((query_end - query_start))" >> "$micro_dir/search-durations"
+    if printf '%s' "$output" | jq -e --arg expected "$expected" 'tostring | contains($expected)' >/dev/null; then hits=$((hits + 1)); fi
+    sample_benchmark_resources
   done
-  (cd "$scratch" && "$GREPAI_BIN" watch --stop >/dev/null 2>&1) || die "scratch grepai watcher could not be stopped"
-  SCRATCH_WATCH_STARTED=0
+  sort -n "$micro_dir/search-durations" > "$micro_dir/search-durations.sorted"
+  search_count=$(wc -l < "$micro_dir/search-durations.sorted" | tr -d ' ')
+  search_median_ms=$(sed -n "$(((search_count + 1) / 2))p" "$micro_dir/search-durations.sorted")
   [ "$hits" -ge 4 ] || die "scratch usefulness gate failed: $hits/${#BENCHMARK_QUERIES[@]} expected areas appeared in the top 10 (need at least 4)"
-  note "grepai_benchmark seconds=$((end - start)) quality_hits=$hits/${#BENCHMARK_QUERIES[@]} observed_ram_delta_mib=$((observed_delta_kib / 1024)) ram_after_mib=$((after_kib / 1024)) scratch_removed_at_exit=yes"
+  [ "$search_median_ms" -le "$MAX_SEARCH_MS" ] || die "warm search median ${search_median_ms}ms exceeds the ${MAX_SEARCH_MS}ms bound"
+
+  incremental_path=$(head -n 1 "$micro_dir/paths")
+  marker="fm_incremental_probe_$$"
+  printf '\n// %s\n' "$marker" >> "$scratch/$incremental_path"
+  incremental_start=$(date +%s)
+  while :; do
+    output=$(cd "$scratch" && bounded_command "scratch incremental grepai search" "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" search "$marker" --json --limit 10 2>/dev/null) \
+      || die "scratch incremental grepai search failed"
+    if printf '%s' "$output" | jq -e --arg expected "$incremental_path" 'tostring | contains($expected)' >/dev/null 2>&1; then break; fi
+    incremental_seconds=$(($(date +%s) - incremental_start))
+    [ "$incremental_seconds" -lt "$MAX_INCREMENTAL_SECONDS" ] || die "scratch incremental convergence exceeded the ${MAX_INCREMENTAL_SECONDS}s bound"
+    sample_benchmark_resources
+    sleep 1
+  done
+  incremental_seconds=$(($(date +%s) - incremental_start))
+  cp "$PROJECT/$incremental_path" "$scratch/$incremental_path"
+
+  sleep 2
+  watcher_idle_cpu=$(ps -o %cpu= -p "$watcher_pid" | awk '{printf "%.0f", $1}')
+  case "$watcher_idle_cpu" in ''|*[!0-9]*) die "could not observe scratch watcher idle CPU for PID $watcher_pid" ;; esac
+  [ "$watcher_idle_cpu" -le "$MAX_WATCHER_IDLE_CPU_PERCENT" ] || die "scratch watcher idle CPU ${watcher_idle_cpu}% exceeds the ${MAX_WATCHER_IDLE_CPU_PERCENT}% bound"
+  sample_benchmark_resources
+  swap_growth_kib=$((swap_free_kib - BENCH_MIN_SWAP_FREE_KIB))
+  [ "$swap_growth_kib" -le $((MAX_SWAP_GROWTH_MIB * 1024)) ] || die "benchmark swap growth $((swap_growth_kib / 1024)) MiB exceeds the ${MAX_SWAP_GROWTH_MIB} MiB bound"
+  [ "$BENCH_MAX_LOAD_MILLI" -le $((cpu_threads * MAX_LOAD_PER_CPU_PERCENT * 10)) ] || die "benchmark one-minute load exceeds ${MAX_LOAD_PER_CPU_PERCENT}% per online CPU"
+  if [ "$BENCH_MAX_TEMP_MILLIC" != unavailable ]; then
+    [ "$BENCH_MAX_TEMP_MILLIC" -le $((MAX_TEMPERATURE_CELSIUS * 1000)) ] || die "benchmark temperature $((BENCH_MAX_TEMP_MILLIC / 1000)) C exceeds the ${MAX_TEMPERATURE_CELSIUS} C bound"
+  fi
+  (cd "$scratch" && bounded_command "scratch grepai watcher stop" "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" watch --stop >/dev/null) \
+    || die "scratch grepai watcher could not be stopped"
+  SCRATCH_WATCH_STARTED=0
+  run_micro_batch "$micro_dir"
+  note "grepai_benchmark seconds=$((end - start)) quality_hits=$hits/${#BENCHMARK_QUERIES[@]} search_median_ms=$search_median_ms incremental_seconds=$incremental_seconds watcher_idle_cpu_percent=$watcher_idle_cpu observed_ram_delta_mib=$((observed_delta_kib / 1024)) ollama_peak_rss_mib=$((BENCH_MAX_OLLAMA_RSS_KIB / 1024)) swap_growth_mib=$((swap_growth_kib / 1024)) temperature_peak_celsius=$([ "$BENCH_MAX_TEMP_MILLIC" = unavailable ] && printf unavailable || printf '%s' "$((BENCH_MAX_TEMP_MILLIC / 1000))") load_peak=$(awk -v milli="$BENCH_MAX_LOAD_MILLI" 'BEGIN {printf "%.2f", milli / 1000}') scratch_removed_at_exit=yes"
 }
 
 if [ "$BENCHMARK" = yes ]; then
@@ -1014,41 +1586,39 @@ fi
 if [ "$ACTION" = apply ]; then
   if contains_component grepai; then
     if [ -d "$PROJECT/.grepai" ]; then
-      (cd "$PROJECT" && "$GREPAI_BIN" status --no-ui) >/dev/null || die "existing grepai index is unhealthy; choose repair or rebuild outside this non-destructive run"
       note "grepai init no-op: existing compatible config preserved"
     else
-      (cd "$PROJECT" && "$GREPAI_BIN" init --provider ollama --model "$MODEL" --backend gob --yes)
-      append_manifest "created_project_state=$PROJECT/.grepai removal_requires_explicit_approval=yes"
+      plan_project_initializer grepai "$PROJECT/.grepai"
+      (cd "$PROJECT" && bounded_command "canonical grepai init" "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" init --provider ollama --model "$MODEL" --backend gob --yes) \
+        || die "canonical grepai init failed"
+      write_and_validate_fresh_grepai_endpoint "$PROJECT"
       PROJECT_WATCH_STARTED=1
       (cd "$PROJECT" && timeout --kill-after=5s "$MAX_INDEX_SECONDS" "$GREPAI_BIN" watch --background)
-      (cd "$PROJECT" && "$GREPAI_BIN" status --no-ui)
-      (cd "$PROJECT" && "$GREPAI_BIN" search "$HEALTH_QUERY" --json --limit 1) | jq -e 'type == "array" or type == "object"' >/dev/null
-      (cd "$PROJECT" && "$GREPAI_BIN" watch --stop)
+      (cd "$PROJECT" && bounded_command "canonical grepai status" "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" status --no-ui)
+      (cd "$PROJECT" && bounded_command "canonical grepai search" "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" search "$HEALTH_QUERY" --json --limit 1) \
+        | jq -e 'type == "array" or type == "object"' >/dev/null
+      (cd "$PROJECT" && bounded_command "canonical grepai watcher stop" "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" watch --stop)
       PROJECT_WATCH_STARTED=0
+      complete_project_initializer grepai
+      append_manifest "created_project_state=$PROJECT/.grepai removal_requires_explicit_approval=yes"
     fi
   fi
   if contains_component codegraph; then
     if [ -d "$PROJECT/.codegraph" ]; then
-      CODEGRAPH_TELEMETRY=0 DO_NOT_TRACK=1 "$CODEGRAPH_BIN" status --json "$PROJECT" | jq -e '
-        .initialized == true
-        and ((.journalMode // "") | ascii_downcase) == "wal"
-        and .worktreeMismatch == null
-        and .index.state == "complete"
-        and .index.pendingRefs == 0
-        and .index.reindexRecommended == false
-        and ([.pendingChanges[]] | add // 0) == 0
-      ' >/dev/null || die "existing CodeGraph index is unhealthy, stale, non-WAL, or mismatched"
       note "CodeGraph init no-op: existing healthy state preserved"
     else
-      CODEGRAPH_TELEMETRY=0 DO_NOT_TRACK=1 "$CODEGRAPH_BIN" init "$PROJECT"
+      plan_project_initializer codegraph "$PROJECT/.codegraph"
+      CODEGRAPH_TELEMETRY=0 DO_NOT_TRACK=1 bounded_command "CodeGraph init" "$COMMAND_TIMEOUT_SECONDS" "$CODEGRAPH_BIN" init "$PROJECT" \
+        || die "CodeGraph init failed"
+      complete_project_initializer codegraph
       append_manifest "created_project_state=$PROJECT/.codegraph removal_requires_explicit_approval=yes"
     fi
   fi
   if contains_component serena; then
     if [ -d "$PROJECT/.serena" ]; then
-      SERENA_HOME="$SERENA_HOME_DIR" SERENA_USAGE_REPORTING=false timeout --kill-after=5s "$MAX_INDEX_SECONDS" "$SERENA_BIN" project health-check "$PROJECT" >/dev/null || die "existing Serena state is unhealthy"
       note "Serena create no-op: existing healthy project state preserved"
     else
+      plan_project_initializer serena "$PROJECT/.serena"
       serena_args=()
       for language in "${SERENA_LANGUAGES[@]}"; do serena_args+=(--language "$language"); done
       if [ "$ALLOW_LANGUAGE_DOWNLOADS" = no ]; then
@@ -1061,34 +1631,30 @@ if [ "$ACTION" = apply ]; then
         done
       fi
       SERENA_HOME="$SERENA_HOME_DIR" SERENA_USAGE_REPORTING=false timeout --kill-after=5s "$MAX_INDEX_SECONDS" "$SERENA_BIN" project create "${serena_args[@]}" --index "$PROJECT"
+      complete_project_initializer serena
       append_manifest "created_project_state=$PROJECT/.serena languages=$(IFS=,; printf '%s' "${SERENA_LANGUAGES[*]}") removal_requires_explicit_approval=yes"
     fi
   fi
 fi
 
 if [ -d "$PROJECT/.grepai" ]; then
-  (cd "$PROJECT" && "$GREPAI_BIN" status --no-ui) >/dev/null || die "grepai index health failed"
-  grepai_query=$(cd "$PROJECT" && "$GREPAI_BIN" search "$HEALTH_QUERY" --json --limit 1) || die "grepai query health failed"
+  (cd "$PROJECT" && bounded_command "grepai health status" "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" status --no-ui) >/dev/null || die "grepai index health failed"
+  grepai_query=$(cd "$PROJECT" && bounded_command "grepai health search" "$COMMAND_TIMEOUT_SECONDS" "$GREPAI_BIN" search "$HEALTH_QUERY" --json --limit 1) \
+    || die "grepai query health failed"
   printf '%s' "$grepai_query" | jq -e 'if type == "array" then length > 0 elif type == "object" then ((.results // []) | length > 0) else false end' >/dev/null || die "grepai health query returned no result: $HEALTH_QUERY"
   note "grepai_health index=healthy watcher=${PROJECT_WATCH_STARTED:-0} query='$HEALTH_QUERY'"
 fi
 if [ -d "$PROJECT/.codegraph" ]; then
-  cg_status=$(CODEGRAPH_TELEMETRY=0 DO_NOT_TRACK=1 "$CODEGRAPH_BIN" status --json "$PROJECT") || die "CodeGraph status failed"
-  printf '%s' "$cg_status" | jq -e '
-    .initialized == true
-    and ((.journalMode // "") | ascii_downcase) == "wal"
-    and .worktreeMismatch == null
-    and .index.state == "complete"
-    and .index.pendingRefs == 0
-    and .index.reindexRecommended == false
-    and ([.pendingChanges[]] | add // 0) == 0
-  ' >/dev/null || die "CodeGraph status is unhealthy, stale, non-WAL, or mismatched"
-  cg_query=$(CODEGRAPH_TELEMETRY=0 DO_NOT_TRACK=1 "$CODEGRAPH_BIN" query --path "$PROJECT" --limit 1 --json "$HEALTH_QUERY") || die "CodeGraph query health failed"
+  cg_status=$(CODEGRAPH_TELEMETRY=0 DO_NOT_TRACK=1 bounded_command "CodeGraph health status" "$COMMAND_TIMEOUT_SECONDS" "$CODEGRAPH_BIN" status --json "$PROJECT") \
+    || die "CodeGraph status failed"
+  printf '%s' "$cg_status" | codegraph_status_is_healthy || die "CodeGraph status is unhealthy, stale, non-WAL, or mismatched"
+  cg_query=$(CODEGRAPH_TELEMETRY=0 DO_NOT_TRACK=1 bounded_command "CodeGraph health query" "$COMMAND_TIMEOUT_SECONDS" "$CODEGRAPH_BIN" query --path "$PROJECT" --limit 1 --json "$HEALTH_QUERY") \
+    || die "CodeGraph query health failed"
   printf '%s' "$cg_query" | jq -e 'if type == "array" then length > 0 elif type == "object" then ((.results // .nodes // []) | length > 0) else false end' >/dev/null || die "CodeGraph health query returned no result: $HEALTH_QUERY"
   note "codegraph_health index=healthy query='$HEALTH_QUERY' telemetry=off"
 fi
 if [ -d "$PROJECT/.serena" ]; then
-  SERENA_HOME="$SERENA_HOME_DIR" SERENA_USAGE_REPORTING=false timeout --kill-after=5s "$MAX_INDEX_SECONDS" "$SERENA_BIN" project health-check "$PROJECT" >/dev/null || die "Serena project health-check failed"
+  run_serena_health canonical || die "Serena project health-check failed"
   note "serena_health languages=$(IFS=,; printf '%s' "${SERENA_LANGUAGES[*]}") symbols=healthy telemetry=off"
 fi
 
@@ -1104,7 +1670,7 @@ mcp_probe() {
   jq -r '.[] | @sh' <<<"$args_json" > "$temp/args"
   (
     cd "$cwd"
-    # shellcheck disable=SC1090
+    # shellcheck disable=SC1090,SC1091 # Generated from validated MCP env JSON.
     . "$temp/env.sh"
     command_args=()
     while IFS= read -r quoted; do eval "command_args+=( $quoted )"; done < "$temp/args"
@@ -1140,33 +1706,13 @@ if [ -d "$PROJECT/.serena" ]; then
 fi
 
 register_lazy_mcp() {
-  local runtime_config generator_config hierarchy generator temp backup_suffix file name desired existing changes_needed=0
-  runtime_config="$LAZY_MCP_DIR/config.json"
-  generator_config="$LAZY_MCP_DIR/gen_config.json"
-  hierarchy="$LAZY_MCP_DIR/hierarchy"
-  generator=${LAZY_MCP_GENERATOR:-$LAZY_MCP_DIR/structure_generator}
-  [ -f "$runtime_config" ] && [ -f "$generator_config" ] && [ -d "$hierarchy" ] && [ -x "$generator" ] || die "lazy-mcp directory must contain config.json, gen_config.json, hierarchy/, and an executable structure_generator"
-  jq -e '.mcpServers | type == "object"' "$runtime_config" >/dev/null || die "lazy-mcp runtime config has no object mcpServers"
-  jq -e '.mcpServers | type == "object"' "$generator_config" >/dev/null || die "lazy-mcp generator config has no object mcpServers"
-  proxy_addr=$(jq -r '.mcpProxy.addr // empty' "$runtime_config")
-  proxy_type=$(jq -r '.mcpProxy.type // empty' "$runtime_config")
-  if [ "$proxy_type" != stdio ]; then
-    case "$proxy_addr" in 127.0.0.1:*|localhost:*) ;; *) die "lazy-mcp HTTP proxy addr '$proxy_addr' is not loopback-only" ;; esac
-  fi
-  for file in "$runtime_config" "$generator_config"; do
-    for name in grepai codegraph serena; do
-      desired=$(printf '%s' "$mcp_entries" | jq -c --arg name "$name" '.[$name]')
-      existing=$(jq -c --arg name "$name" '.mcpServers[$name] // empty' "$file")
-      if [ -n "$existing" ] && [ "$(printf '%s' "$existing" | jq -S .)" != "$(printf '%s' "$desired" | jq -S .)" ]; then
-        die "lazy-mcp entry '$name' conflicts in $file; existing state was not changed"
-      fi
-      [ -n "$existing" ] || changes_needed=1
-    done
-  done
-  for name in grepai codegraph serena; do
-    [ -d "$hierarchy/$name" ] || changes_needed=1
-  done
-  if [ "$changes_needed" -eq 0 ]; then
+  local runtime_config generator_config hierarchy generator temp backup_suffix file name
+  validate_lazy_mcp_state
+  runtime_config=$LAZY_RUNTIME_CONFIG
+  generator_config=$LAZY_GENERATOR_CONFIG
+  hierarchy=$LAZY_HIERARCHY
+  generator=$LAZY_GENERATOR
+  if [ "$LAZY_CHANGES_NEEDED" -eq 0 ]; then
     for name in grepai codegraph serena; do
       jq -e --arg name "$name" '.overview | contains($name)' "$hierarchy/root.json" >/dev/null || die "lazy-mcp root hierarchy omits healthy existing category '$name'"
     done
@@ -1221,7 +1767,7 @@ register_lazy_mcp() {
     if [ -n "$summary" ]; then summary="$summary, "; fi
     summary="$summary$name -> $first_clause"
   done
-  jq -n --arg overview "Root: $server_count servers, $tool_count tools; $summary" '{overview:$overview}' > "$temp/root.json"
+  jq --arg overview "Root: $server_count servers, $tool_count tools; $summary" '.overview = $overview' "$hierarchy/root.json" > "$temp/root.json"
   chmod --reference="$hierarchy/root.json" "$temp/root.json"
   mv "$temp/root.json" "$hierarchy/root.json"
   append_manifest "updated_lazy_hierarchy_root=$hierarchy/root.json"
