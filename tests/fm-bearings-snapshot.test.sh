@@ -226,7 +226,8 @@ test_domain_alpha_stale_parent_event_does_not_become_current_work() {
           and .provenance == "structured-home"
           and .freshness == "fresh"
           and .contradiction == true
-          and (.context | contains("Release approval"))
+          and (.context | ascii_downcase | contains("evidence gap"))
+          and (.context | contains("Release approval") | not)
           and (.next_action | contains("external-legal"))
           and (.advance_when | contains("external-legal"))))
       and (.gates | any(.[]; .id == "legal-release" and .owner == "domain-alpha"))
@@ -1757,7 +1758,8 @@ EOF
         and .blocked_by == "prep,security"))
       and (.secondmates | any(.id == "sshhip" and .state == "unknown"
         and (.reason | contains("unreadable-child"))
-        and (.context | contains("Submit App Store build"))
+        and (.context | contains("child current state unavailable"))
+        and (.context | contains("Submit App Store build") | not)
         and (.next_action | contains("unreadable-child"))
         and (.advance_when | contains("unreadable-child"))))
   ' >/dev/null || fail "end-to-end mixed-domain projection was wrong: $json"
@@ -2553,7 +2555,7 @@ test_legacy_v1_remote_summary_projects_safely() {
   cat > "$sshbin" <<'SH'
 #!/usr/bin/env bash
 cat <<'JSON'
-{"schema":"fm-secondmate-home-summary.v1","generated":"2026-07-11T18:00:00Z","home":"/remote/legacy","valid":true,"reason":null,"invalidity":{"kind":null,"ids":[]},"state":"externally_held","active_children":[],"decisions_open":[],"holds":[{"id":"legacy-gate","title":"Legacy release gate","blocked_by":"external-release","blocked_by_ids":["external-release"],"unresolved_blocker_ids":["external-release"],"reason":"waiting for the legacy release","context":"bounded legacy evidence","source":"backlog"}],"queued":[{"id":"legacy-gate","title":"Legacy release gate","blocked_by":"external-release","blocked_by_ids":["external-release"],"unresolved_blocker_ids":["external-release"],"blocked_reason":"waiting for the legacy release","hold_reason":null,"hold_kind":null,"captain_actionable":false,"repo":"sample","kind":"ship","context":"bounded legacy evidence"}],"landed":[],"endpoints":[],"counts":{"active_children":0,"decisions_open":0,"holds":1,"queued":1,"landed":0,"endpoints":0},"omitted":[]}
+{"schema":"fm-secondmate-home-summary.v1","generated":"2026-07-11T18:00:00Z","home":"/remote/legacy","valid":true,"reason":null,"invalidity":{"kind":null,"ids":[]},"state":"active_child_work","active_children":[{"id":"legacy-child","kind":"ship","state":"working","source":"current-harness","doing":"running the merge-base implementation"}],"decisions_open":[],"holds":[],"queued":[{"id":"legacy-queue","title":"Legacy queued item","blocked_by":null,"blocked_by_ids":[],"unresolved_blocker_ids":[],"blocked_reason":null,"hold_reason":null,"hold_kind":null,"captain_actionable":false,"repo":"sample","kind":"ship"}],"landed":[],"endpoints":[{"id":"legacy-child","state":"working","source":"current-harness","endpoint":{"exists":true,"agent_alive":"alive","target":"remote:legacy-child"}}],"counts":{"active_children":1,"decisions_open":0,"holds":0,"queued":1,"landed":0,"endpoints":1},"omitted":[]}
 JSON
 SH
   chmod +x "$sshbin"
@@ -2562,22 +2564,162 @@ SH
     || fail "legacy v1 peer aborted the canonical snapshot"
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "legacy")
-    | .current.state == "externally_held"
+    | .current.state == "active_child_work"
       and .provenance.selected == "structured-home"
       and .provenance.summary_schema == "fm-secondmate-home-summary.v1"
       and .freshness.status == "fresh"
+      and (.charted_next == null)
+      and (.active_children[] | select(.id == "legacy-child")
+        | (.context_evidence_gap | contains("legacy v1"))
+          and (.next_action_evidence_gap | contains("legacy v1")))
   ' >/dev/null || fail "legacy v1 peer was rejected instead of safely normalized: $canonical"
   json=$(FM_SSH_BIN="$sshbin" run "$home" "$fakebin" --json) \
     || fail "legacy v1 peer aborted Bearings"
   printf '%s' "$json" | jq -e '
-    .secondmates[] | select(.id == "legacy")
-    | .state == "externally_held"
-      and (.context | contains("Legacy release gate"))
-      and (.next_action | contains("legacy-gate"))
-      and (.advance_when | contains("legacy-gate"))
-      and (.caveat | length) > 0
-  ' >/dev/null || fail "legacy v1 peer lacked a safe causal capsule: $json"
-  pass "legacy v1 remote summaries remain compatible through safe projection defaults"
+    (.in_flight[] | select(.id == "legacy")
+      | .state == "active_child_work"
+        and (.context | contains("legacy v1"))
+        and (.context | contains("Legacy queued item") | not)
+        and (.next_action | contains("legacy v1"))
+        and (.caveat | contains("legacy v1")))
+      and (.gates[] | select(.id == "legacy-queue" and .owner == "legacy")
+        | (.context | ascii_downcase | contains("evidence gap"))
+          and (.context | contains("Legacy queued item") | not)
+          and (.caveat | ascii_downcase | contains("evidence gap")))
+  ' >/dev/null || fail "merge-base-shaped legacy v1 peer lacked safe evidence-gap projection: $json"
+  pass "real merge-base-shaped legacy v1 summaries remain compatible through safe projection defaults"
+}
+
+test_hostile_remote_reason_and_documented_caps_are_exact() {
+  local home fakebin sshbin canonical capsule json
+  home=$(make_home hostile-remote-reason)
+  printf '%s\n' '- hostile-reason - fixture (host: hostile-reason-host; root: /remote/root; home: /remote/hostile-reason; scope: fixture; projects: sample; added 2026-07-11)' > "$home/data/secondmates.md"
+  fakebin=$(make_fakebin "$home")
+  sshbin="$fakebin/fake-hostile-reason-ssh"
+  cat > "$sshbin" <<'SH'
+#!/usr/bin/env bash
+long=$(printf '%01200d' 0 | tr 0 r)
+jq -n --arg long "$long" '{
+  schema:"fm-secondmate-home-summary.v2",generated:"2026-07-11T18:00:00Z",home:"/remote/hostile-reason",
+  valid:false,reason:$long,invalidity:{kind:"child_current_unavailable",ids:["child"]},state:"unknown",
+  charted_next:{context:"Current child state is unavailable",context_truncated:false,
+    context_backlog_truncated:false,context_byte_truncated:false,context_character_truncated:false,
+    context_report_count_omitted:false,context_projection_truncated:false,hold_reason_truncated:false,
+    next_action:"Restore current child state for child",next_action_truncated:false,
+    advance_when:"When current child state is available for child",advance_when_truncated:false,
+    caveat:"Structured child state is unavailable"},
+  active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],
+  counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[]}'
+SH
+  chmod +x "$sshbin"
+  canonical=$(PATH="$fakebin:$PATH" FM_SSH_BIN="$sshbin" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "hostile remote reason aborted the canonical snapshot"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "hostile-reason")
+    | (.current.reason | length) == 800
+      and .current.reason_truncated == true
+      and (.charted_next.context | length) <= 800
+      and (.charted_next.next_action | length) <= 320
+      and (.charted_next.advance_when | length) <= 320
+      and (.charted_next.caveat | length) <= 320
+  ' >/dev/null || fail "canonical reason or causal capsule exceeded its exact cap: $canonical"
+  capsule=$(printf '%s' "$canonical" | jq -c '
+    .secondmate_current.records[] | select(.id == "hostile-reason") | .charted_next')
+  json=$(FM_SSH_BIN="$sshbin" run "$home" "$fakebin" --json) \
+    || fail "hostile remote reason aborted Bearings"
+  printf '%s' "$json" | jq -e --argjson capsule "$capsule" '
+    .secondmates[] | select(.id == "hostile-reason")
+    | (.reason | length) == 800
+      and .reason_truncated == true
+      and (.state_caveat | length) <= 180
+      and (.context | length) <= 800
+      and (.next_action | length) <= 320
+      and (.advance_when | length) <= 320
+      and (.caveat | length) <= 320
+      and .context == $capsule.context
+      and .next_action == $capsule.next_action
+      and .advance_when == $capsule.advance_when
+      and .caveat == $capsule.caveat
+  ' >/dev/null || fail "Bearings exposed an unbounded hostile reason or off-by-one cap: $json"
+  pass "hostile reasons are exactly bounded and Bearings projects the canonical causal capsule"
+}
+
+test_secondmate_active_work_and_captain_decision_are_both_visible() {
+  local home fakebin sshbin json
+  home=$(make_home mixed-active-decision)
+  printf '%s\n' '- mixed - fixture (host: mixed-host; root: /remote/root; home: /remote/mixed; scope: fixture; projects: sample; added 2026-07-11)' > "$home/data/secondmates.md"
+  fakebin=$(make_fakebin "$home")
+  sshbin="$fakebin/fake-mixed-ssh"
+  cat > "$sshbin" <<'SH'
+#!/usr/bin/env bash
+jq -n '{
+  schema:"fm-secondmate-home-summary.v2",generated:"2026-07-11T18:00:00Z",home:"/remote/mixed",
+  valid:true,reason:null,invalidity:{kind:null,ids:[]},state:"captain_decision",charted_next:null,
+  active_children:[{id:"live-child",kind:"ship",state:"working",source:"current-harness",
+    objective:"Finish the live implementation",doing:"running focused tests",milestone:"implementation complete",
+    context:"The live implementation is ready for its focused tests",context_evidence_gap:null,
+    context_backlog_truncated:false,context_byte_truncated:false,context_character_truncated:false,
+    context_report_count_omitted:false,context_projection_truncated:false,
+    next_action:"Run the focused tests",next_action_evidence_gap:null,next_action_truncated:false}],
+  decisions_open:[{id:"unrelated-choice",key:"unrelated-choice",verb:"captain-hold",
+    summary:"Choose the unrelated rollout region",reason:"Provide the missing rollout choice",source:"backlog",
+    action_types:["missing-choice"],action_type_missing:false,action_type_invalid:false,
+    context:"The rollout needs a region choice",context_backlog_truncated:false,context_byte_truncated:false,
+    context_character_truncated:false,context_report_count_omitted:false,context_projection_truncated:false}],
+  holds:[],queued:[],landed:[],
+  endpoints:[{id:"live-child",state:"working",source:"current-harness",objective:"Finish the live implementation",
+    milestone:"implementation complete",endpoint:{exists:true,agent_alive:"alive",target:"remote:live-child"}}],
+  counts:{active_children:1,decisions_open:1,holds:0,queued:0,landed:0,endpoints:1},omitted:[]}'
+SH
+  chmod +x "$sshbin"
+  json=$(FM_SSH_BIN="$sshbin" run "$home" "$fakebin" --json) \
+    || fail "mixed live-work and decision summary aborted Bearings"
+  printf '%s' "$json" | jq -e '
+    (.decisions_open[] | select(.id == "mixed/unrelated-choice")
+      | .missing_choice_required == true)
+      and (.in_flight[] | select(.id == "mixed")
+        | .state == "active_child_work"
+          and (.objective | contains("live implementation"))
+          and (.next_action | contains("focused tests")))
+  ' >/dev/null || fail "captain decision hid unrelated live secondmate work: $json"
+  pass "simultaneous secondmate live work and captain decisions remain independently visible"
+}
+
+test_missing_causal_evidence_is_disclosed_not_replaced_by_titles() {
+  local home fakebin json
+  home=$(make_home missing-causal-evidence)
+  : > "$home/data/secondmates.md"
+  mkdir -p "$home/projects/evidence-less"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] evidence-less - A title is not causal evidence (repo: firstmate) (kind: ship)
+
+## Queued
+- [ ] queue-without-context - Another title is not queue rationale (repo: firstmate) (kind: ship)
+
+## Done
+EOF
+  fm_write_meta "$home/state/evidence-less.meta" \
+    "window=firstmate:fm-evidence-less" "worktree=$home/projects/evidence-less" \
+    "project=firstmate" "harness=codex" "kind=ship" "mode=no-mistakes"
+  : > "$home/state/evidence-less.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.in_flight[] | select(.id == "evidence-less")
+      | (.context | ascii_downcase | contains("evidence gap"))
+        and (.context | contains("A title is not causal evidence") | not)
+        and (.context_evidence_gap | length) > 0
+        and (.next_action_evidence_gap | length) > 0
+        and (.caveat | ascii_downcase | contains("evidence gap")))
+      and (.gates[] | select(.id == "queue-without-context")
+        | (.context | ascii_downcase | contains("evidence gap"))
+          and (.context | contains("Another title is not queue rationale") | not)
+          and (.context_evidence_gap | length) > 0
+          and (.caveat | ascii_downcase | contains("evidence gap")))
+  ' >/dev/null || fail "missing causal evidence silently fell back to task titles: $json"
+  pass "Underway and Charted Next disclose missing causal evidence instead of using titles"
 }
 
 test_remote_omission_counts_are_bound_and_disclosed() {
@@ -2735,6 +2877,9 @@ test_remote_no_active_state_cannot_hide_working_child
 test_remote_state_invariants_respect_counts_and_omissions
 test_remote_decision_evidence_is_defensively_bounded
 test_legacy_v1_remote_summary_projects_safely
+test_hostile_remote_reason_and_documented_caps_are_exact
+test_secondmate_active_work_and_captain_decision_are_both_visible
+test_missing_causal_evidence_is_disclosed_not_replaced_by_titles
 test_remote_omission_counts_are_bound_and_disclosed
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
