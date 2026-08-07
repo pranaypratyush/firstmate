@@ -152,7 +152,7 @@ test_empty_fleet_json() {
 }
 
 test_help_names_every_report_context_bound() {
-  local help
+  local help name
   help=$("$SNAPSHOT" --help)
   assert_contains "$help" "FM_SNAPSHOT_REPORT_SUMMARIES (default 40)" \
     "snapshot help omitted the report-count bound"
@@ -160,10 +160,32 @@ test_help_names_every_report_context_bound() {
     "snapshot help omitted the per-report byte bound"
   assert_contains "$help" "FM_SNAPSHOT_REPORT_SUMMARY_CHARS (default 800)" \
     "snapshot help omitted the normalized character bound"
-  assert_contains "$help" "captain-action: review-changes+merge-decision" \
-    "snapshot help omitted structured captain-action syntax"
+  assert_contains "$help" "Captain action: review-changes+merge-decision" \
+    "snapshot help omitted structured decision-body action syntax"
   assert_contains "$help" "Backlog body excerpts are capped at 240 characters" \
     "snapshot help omitted the backlog-body bound"
+  for name in \
+    'FM_SNAPSHOT_SECONDMATES (default 20)' \
+    'FM_SNAPSHOT_SECONDMATE_TIMEOUT (default 8 seconds)' \
+    'FM_SNAPSHOT_SECONDMATE_MAX_BYTES (default 262144)' \
+    'FM_SNAPSHOT_SECONDMATE_CHILDREN (default 20)' \
+    'FM_SNAPSHOT_SECONDMATE_QUEUED (default 20)' \
+    'FM_SNAPSHOT_SECONDMATE_DECISIONS (default 20)' \
+    'FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME (default 10)' \
+    'FM_SNAPSHOT_TERMINAL_LINES (default 8)' \
+    'FM_SNAPSHOT_TERMINAL_BYTES (default 4096)' \
+    'FM_SNAPSHOT_TERMINAL_TIMEOUT (default 2 seconds)' \
+    'FM_SNAPSHOT_PARENT_ACTIVITY_LINES (default 256)' \
+    'FM_SNAPSHOT_PARENT_ACTIVITY_BYTES (default 65536)' \
+    'FM_SNAPSHOT_PARENT_ACTIVITIES (default 20)' \
+    'FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT (default 2 seconds)' \
+    'FM_SNAPSHOT_REGISTRY_LINES (default 256)' \
+    'FM_SNAPSHOT_REGISTRY_BYTES (default 65536)' \
+    'FM_SNAPSHOT_REGISTRY_RECORDS (default 40)' \
+    'FM_SNAPSHOT_REGISTRY_TIMEOUT (default 2 seconds)'
+  do
+    assert_contains "$help" "$name" "snapshot help omitted exact bound: $name"
+  done
   pass "snapshot help names every operator-facing report-context bound"
 }
 

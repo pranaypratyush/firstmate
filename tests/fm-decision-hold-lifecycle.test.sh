@@ -145,12 +145,29 @@ EOF
     "failed completion recorded a false completion attestation"
 
   route_hold=$(run_decisions "$home" hold "$id" route \
-    --title "Choose the sample route" --reason "captain route choice pending" --repo sample) \
+    --title "Choose the sample route" --reason "captain route choice pending" --repo sample \
+    --action review-changes --action merge-decision) \
     || fail "could not register route hold"
   [ "$route_hold" = "$id-decision-route" ] || fail "route hold identity was not deterministic: $route_hold"
+  if run_decisions "$home" hold "$id" invalid-empty \
+    --title "Invalid empty action" --reason "invalid action fixture" --repo sample \
+    --action '' > "$home/invalid-empty.out" 2> "$home/invalid-empty.err"; then
+    fail "decision hold accepted an empty captain action"
+  fi
+  if run_decisions "$home" hold "$id" invalid-duplicate \
+    --title "Invalid duplicate action" --reason "invalid action fixture" --repo sample \
+    --action review-changes --action review-changes > "$home/invalid-duplicate.out" 2> "$home/invalid-duplicate.err"; then
+    fail "decision hold accepted a duplicate captain action"
+  fi
   run_decisions "$home" hold "$id" route \
-    --title "Choose the sample route" --reason "captain route choice pending" --repo sample >/dev/null \
+    --title "Choose the sample route" --reason "captain route choice pending" --repo sample \
+    --action review-changes --action merge-decision >/dev/null \
     || fail "idempotent hold retry failed"
+  if run_decisions "$home" hold "$id" route \
+    --title "Choose the sample route" --reason "captain route choice pending" --repo sample \
+    --action review-changes > "$home/reduced-action-retry.out" 2> "$home/reduced-action-retry.err"; then
+    fail "captain hold accepted a reduced structured action set on retry"
+  fi
   if run_decisions "$home" complete "$id" route access > "$home/partial-complete.out" 2> "$home/partial-complete.err"; then
     fail "completion succeeded while one of two distinct decisions lacked a hold"
   fi
@@ -176,8 +193,15 @@ EOF
   after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
   [ "$before" = "$after" ] || fail "Bearings mutated the authoritative backlog"
   printf '%s' "$json" | jq -e --arg route "$route_hold" --arg access "$access_hold" '
-    (.decisions_open | any(.id == $route and .verb == "captain-hold" and .owner == "(main)"))
-      and (.decisions_open | any(.id == $access and .verb == "captain-hold" and .owner == "(main)"))
+    (.decisions_open | any(.id == $route and .verb == "captain-hold" and .owner == "(main)"
+      and .action_types == ["merge-decision", "review-changes"]
+      and .action_type_evidence_gap == null
+      and .review_changes_required == true
+      and .merge_decision_required == true
+      and .missing_choice_required == false))
+      and (.decisions_open | any(.id == $access and .verb == "captain-hold" and .owner == "(main)"
+        and .action_types == []
+        and (.action_type_evidence_gap | contains("No structured captain action"))))
       and (.gates | any(.id == $route or .id == $access) | not)
   ' >/dev/null || fail "Bearings did not surface structured captain holds: $json"
 
@@ -264,6 +288,8 @@ EOF
   show=$(tasks_in "$home" show "$route_hold" --full)
   assert_contains "$show" "state: done" "resolved hold did not close"
   assert_contains "$show" "Resolution recorded by fm-decision-hold" "resolved hold lost the decision record"
+  assert_contains "$show" "Captain action: merge-decision+review-changes" \
+    "resolved hold lost its structured captain action intent"
   show=$(tasks_in "$home" show sample-route-implementation --full)
   assert_contains "$show" "blocked: no" "recorded decision did not release dependent work"
   json=$(run_bearings "$home") || fail "Bearings failed after decision resolution"

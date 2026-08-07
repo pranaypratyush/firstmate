@@ -108,8 +108,8 @@ Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
 Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 
 Default fields: schema, home, generated, prs,
-  in_flight{id,kind,state,objective,doing,milestone,state_caveat,context,context_backlog_truncated,context_byte_truncated,context_character_truncated,context_report_count_omitted,context_projection_truncated,next_action,next_owner,owner},
-  secondmates{id,state,objective,doing,milestone,state_caveat,context,context_truncated,next_action,next_action_truncated,advance_when,advance_when_truncated,caveat,provenance,freshness,age_seconds,contradiction,reason,owner},
+  in_flight{id,kind,state,objective,doing,milestone,state_caveat,context,context_backlog_truncated,context_byte_truncated,context_character_truncated,context_report_count_omitted,context_projection_truncated,next_action,next_action_truncated,caveat,next_owner,owner},
+  secondmates{id,state,objective,doing,milestone,state_caveat,context,context_truncated,context_backlog_truncated,context_byte_truncated,context_character_truncated,context_report_count_omitted,context_projection_truncated,hold_reason_truncated,next_action,next_action_truncated,advance_when,advance_when_truncated,caveat,provenance,freshness,age_seconds,contradiction,reason,owner},
   decisions_open{id,key,verb,object,requested_action,evidence,evidence_*_truncated,evidence_report_count_omitted,evidence_caveat,action_types,action_type_evidence_gap,review_changes_required,merge_decision_required,missing_choice_required,owner},
   landed{id,what,outcome,outcome_evidence_available,outcome_evidence_gap,context,context_*_truncated,context_report_count_omitted,caveat,next_action,next_owner,artifact,owner},
   gates{id,title,context,context_*_truncated,context_report_count_omitted,blocked_by,reason,advance_when,advance_when_source_truncated,advance_when_truncated,caveat,owner}, reports{id,path}, recorded_prs{id,url},
@@ -136,6 +136,28 @@ Operator-facing bounds:
   FM_BEARINGS_PR_REPOS (default 10)
   FM_BEARINGS_PR_LIMIT (default 20)
   FM_BEARINGS_PR_TIMEOUT (default 20 seconds)
+Upstream causal-source bounds accepted by Bearings:
+  FM_SNAPSHOT_SECONDMATES (default 20)
+  FM_SNAPSHOT_SECONDMATE_TIMEOUT (default 8 seconds)
+  FM_SNAPSHOT_SECONDMATE_MAX_BYTES (default 262144)
+  FM_SNAPSHOT_SECONDMATE_CHILDREN (default 20)
+  FM_SNAPSHOT_SECONDMATE_QUEUED (default 20)
+  FM_SNAPSHOT_SECONDMATE_DECISIONS (default 20)
+  FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME (default 10)
+  FM_SNAPSHOT_TERMINAL_LINES (default 8)
+  FM_SNAPSHOT_TERMINAL_BYTES (default 4096)
+  FM_SNAPSHOT_TERMINAL_TIMEOUT (default 2 seconds)
+  FM_SNAPSHOT_PARENT_ACTIVITY_LINES (default 256)
+  FM_SNAPSHOT_PARENT_ACTIVITY_BYTES (default 65536)
+  FM_SNAPSHOT_PARENT_ACTIVITIES (default 20)
+  FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT (default 2 seconds)
+  FM_SNAPSHOT_REGISTRY_LINES (default 256)
+  FM_SNAPSHOT_REGISTRY_BYTES (default 65536)
+  FM_SNAPSHOT_REGISTRY_RECORDS (default 40)
+  FM_SNAPSHOT_REGISTRY_TIMEOUT (default 2 seconds)
+  FM_SNAPSHOT_REPORT_SUMMARIES (default 40)
+  FM_SNAPSHOT_REPORT_SUMMARY_BYTES (default 4096)
+  FM_SNAPSHOT_REPORT_SUMMARY_CHARS (default 800)
 Canonical backlog body evidence is capped at 240 characters before projection.
 Bearings context and decision evidence are capped at 800 characters; gate
 conditions are capped at 240 characters. Per-item flags and caveats disclose
@@ -334,9 +356,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   def joined_context_projection_truncated($body; $report):
     ([ $body, $report ] | map(select(. != null and . != "")) | join(" ")
      | gsub("\\s+"; " ") | length) > 800;
-  def joined_context($body; $report):
+  def joined_context_raw($body; $report):
     ([ $body, $report ] | map(select(. != null and . != "")) | join(" ")
-     | if . == "" then null else trunc(800) end);
+     | if . == "" then null else gsub("\\s+"; " ") end);
+  def joined_context($body; $report):
+    (joined_context_raw($body; $report) | if . == null then null else trunc(800) end);
   def explicit_next($context; $fallback):
     ([($context // "")
       | capture("(?i)(?:^|[.!?][[:space:]]+)next:[[:space:]]*(?<next>.+)$")?.next][0])
@@ -380,6 +404,42 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       if $context_projection then "gate context projection limit reached" else empty end,
       if $advance_projection then "gate condition projection limit reached" else empty end]
      | if length == 0 then null else join("; ") end);
+  def source_caveat($state; $backlog; $byte; $character; $count; $projection):
+    ([if $state != null and $state != "" then $state else empty end,
+      if $backlog then "backlog body limit reached" else empty end,
+      if $byte then "report byte limit reached" else empty end,
+      if $character then "report character limit reached" else empty end,
+      if $count then "report-count limit reached" else empty end,
+      if $projection then "final projection limit reached" else empty end]
+     | if length == 0 then null else join("; ") end);
+  def in_flight_caveat($state; $backlog; $byte; $character; $count; $projection; $next):
+    ([source_caveat($state;$backlog;$byte;$character;$count;$projection) // empty,
+      if $next then "next-action projection limit reached" else empty end]
+     | if length == 0 then null else join("; ") end);
+  def invalidity_next($invalidity; $id):
+    if $invalidity.kind == "missing_backlog" or $invalidity.kind == "unstructured_current" then
+      "Repair the structured backlog for " + $id
+    elif $invalidity.kind == "orphan_in_flight" then
+      "Restore child metadata for " + (($invalidity.ids // []) | join(", "))
+    elif $invalidity.kind == "unowned_current" then
+      "Reconcile unowned child state for " + (($invalidity.ids // []) | join(", "))
+    elif $invalidity.kind == "terminal_in_flight" then
+      "Move terminal in-flight items to Done or relaunch " + (($invalidity.ids // []) | join(", "))
+    elif $invalidity.kind == "child_current_unavailable" then
+      "Restore current child state for " + (($invalidity.ids // []) | join(", "))
+    else "Restore readable structured state for " + $id end;
+  def invalidity_advance($invalidity; $id):
+    if $invalidity.kind == "missing_backlog" or $invalidity.kind == "unstructured_current" then
+      "When a valid structured backlog is available for " + $id
+    elif $invalidity.kind == "orphan_in_flight" then
+      "When child metadata is available for " + (($invalidity.ids // []) | join(", "))
+    elif $invalidity.kind == "unowned_current" then
+      "When " + (($invalidity.ids // []) | join(", ")) + " are owned by the backlog or retired"
+    elif $invalidity.kind == "terminal_in_flight" then
+      "When backlog and terminal child state agree for " + (($invalidity.ids // []) | join(", "))
+    elif $invalidity.kind == "child_current_unavailable" then
+      "When current child state is available for " + (($invalidity.ids // []) | join(", "))
+    else "When the registered home is structurally readable for " + $id end;
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -422,18 +482,51 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | {id:($m.id + "/" + .id),backend:"secondmate-home",target:(.endpoint.target // "-"),exists:.endpoint.exists,agent:.endpoint.agent_alive} ]) as $unhealthy_all
   | ([ (.secondmate_current.records // [])[]
        | ([.decisions_open[]? | select(.source == "backlog" and .verb == "captain-hold")]) as $captain_holds
-       | ([.holds[]? | select(.source == "backlog")]) as $backlog_holds
        | . + {
            bearings_captain_holds:$captain_holds,
-           bearings_holds:(if .current.state == "captain_decision" then $backlog_holds else .holds end),
+           bearings_holds:.holds,
            bearings_state:(
              if .current.state == "captain_decision" then
                if ($captain_holds | length) > 0 then "captain_decision"
                elif (.active_children | length) > 0 then "active_child_work"
-               elif ($backlog_holds | length) > 0 then "externally_held"
+               elif (.holds | length) > 0 then "externally_held"
                else "unknown" end
              else .current.state end)
-         } ]) as $secondmate_views
+         }
+       | . + {bearings_charted_next:
+           (if .bearings_state == .current.state and .charted_next != null then .charted_next
+            elif .bearings_state == "externally_held" then
+              ([.bearings_holds[]? | [.title, .context, .reason]
+                | map(select(. != null and . != "")) | join(": ")] | join("; ")) as $context
+              | ([.bearings_holds[]? | .id + " remains held: " + (.reason // "held")] | join("; ")) as $next
+              | ([.bearings_holds[]? | "When hold clears for " + .id + ": " + (.reason // "held")] | join("; ")) as $advance
+              | (any(.bearings_holds[]?; (.context_backlog_truncated // false) == true)) as $backlog_cut
+              | (any(.bearings_holds[]?; (.context_byte_truncated // false) == true)) as $byte_cut
+              | (any(.bearings_holds[]?; (.context_character_truncated // false) == true)) as $character_cut
+              | (any(.bearings_holds[]?; (.context_report_count_omitted // false) == true)) as $count_cut
+              | (any(.bearings_holds[]?; (.context_projection_truncated // false) == true)) as $projection_cut
+              | (any(.bearings_holds[]?; (.hold_reason_truncated // false) or (.blocked_reason_truncated // false))) as $hold_cut
+              | {context:(if $context == "" then "Structured child work is externally held" else ($context | trunc(800)) end),
+                 context_truncated:(($context | length) > 800),
+                 context_backlog_truncated:$backlog_cut,context_byte_truncated:$byte_cut,
+                 context_character_truncated:$character_cut,context_report_count_omitted:$count_cut,
+                 context_projection_truncated:$projection_cut,hold_reason_truncated:$hold_cut,
+                 next_action:(if $next == "" then "Reconcile the externally held child work" else ($next | trunc(320)) end),
+                 next_action_truncated:(($next | length) > 320),
+                 advance_when:(if $advance == "" then "When the external hold is resolved" else ($advance | trunc(320)) end),
+                 advance_when_truncated:(($advance | length) > 320),
+                 caveat:source_caveat("Structured child work is externally held";$backlog_cut;$byte_cut;$character_cut;$count_cut;$projection_cut)}
+            elif .bearings_state == "unknown" then
+              (.current.reason // "Current home state unavailable") as $context
+              | (invalidity_next((.invalidity // {kind:null,ids:[]}); .id)) as $next
+              | (invalidity_advance((.invalidity // {kind:null,ids:[]}); .id)) as $advance
+              | {context:($context | trunc(800)),context_truncated:(($context | length) > 800),
+               context_backlog_truncated:false,context_byte_truncated:false,context_character_truncated:false,
+               context_report_count_omitted:false,context_projection_truncated:false,hold_reason_truncated:false,
+               next_action:($next | trunc(320)),next_action_truncated:(($next | length) > 320),
+               advance_when:($advance | trunc(320)),advance_when_truncated:(($advance | length) > 320),
+               caveat:(.current.reason // "Current home state unavailable")}
+            else null end)} ]) as $secondmate_views
   | ([ if .secondmate_current.registry.available == false then
          {id:"(registry)",state:"unknown",objective:"Registered secondmate inventory",doing:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
           milestone:"",state_caveat:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
@@ -460,16 +553,30 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                   else (.current.reason // "Current home state unavailable") end) | trunc(120)),
           milestone:([.endpoints[]? | .milestone // empty | select(. != "")] | join("; ") | trunc(240)),
           state_caveat:(if .bearings_state == "unknown" then (.current.reason // "Current home state unavailable") else null end),
-          context:(.charted_next.context // null),
-          context_truncated:(.charted_next.context_truncated // false),
-          next_action:(.charted_next.next_action // null),
-          next_action_truncated:(.charted_next.next_action_truncated // false),
-          advance_when:(.charted_next.advance_when // null),
-          advance_when_truncated:(.charted_next.advance_when_truncated // false),
-          caveat:([if (.charted_next.context_truncated // false) then "secondmate context projection limit reached" else empty end,
-                   if (.charted_next.next_action_truncated // false) then "secondmate next-action projection limit reached" else empty end,
-                   if (.charted_next.advance_when_truncated // false) then "secondmate gate-condition projection limit reached" else empty end]
-                  | if length == 0 then null else join("; ") end),
+          context:(.bearings_charted_next.context // null),
+          context_truncated:(.bearings_charted_next.context_truncated // false),
+          context_backlog_truncated:(.bearings_charted_next.context_backlog_truncated // false),
+          context_byte_truncated:(.bearings_charted_next.context_byte_truncated // false),
+          context_character_truncated:(.bearings_charted_next.context_character_truncated // false),
+          context_report_count_omitted:(.bearings_charted_next.context_report_count_omitted // false),
+          context_projection_truncated:(.bearings_charted_next.context_projection_truncated // false),
+          hold_reason_truncated:(.bearings_charted_next.hold_reason_truncated // false),
+          next_action:(.bearings_charted_next.next_action // null),
+          next_action_truncated:(.bearings_charted_next.next_action_truncated // false),
+          advance_when:(.bearings_charted_next.advance_when // null),
+          advance_when_truncated:(.bearings_charted_next.advance_when_truncated // false),
+          caveat:([if .bearings_state == "unknown" then (.current.reason // "Current home state unavailable")
+                   elif .bearings_state == "externally_held" then "Structured child work is externally held" else empty end,
+                   if (.bearings_charted_next.context_backlog_truncated // false) then "backlog body limit reached" else empty end,
+                   if (.bearings_charted_next.context_byte_truncated // false) then "report byte limit reached" else empty end,
+                   if (.bearings_charted_next.context_character_truncated // false) then "report character limit reached" else empty end,
+                   if (.bearings_charted_next.context_report_count_omitted // false) then "report-count limit reached" else empty end,
+                   if (.bearings_charted_next.context_projection_truncated // false) then "final projection limit reached" else empty end,
+                   if (.bearings_charted_next.hold_reason_truncated // false) then "hold-reason limit reached" else empty end,
+                   if (.bearings_charted_next.context_truncated // false) then "secondmate context projection limit reached" else empty end,
+                   if (.bearings_charted_next.next_action_truncated // false) then "secondmate next-action projection limit reached" else empty end,
+                   if (.bearings_charted_next.advance_when_truncated // false) then "secondmate gate-condition projection limit reached" else empty end]
+                  | unique | if length == 0 then null else join("; ") end),
           provenance:.provenance.selected,freshness:.freshness.status,
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
           reason:(.current.reason // "-"),owner:.id} ]) as $secondmates_all
@@ -477,43 +584,62 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
        | select(.backlog.current_role != "held" or .current_state.state == "working")
+       | (joined_context_raw(.backlog.body_excerpt; report_context($source; .id))
+          // (.backlog.title // .current_state.detail // .id)) as $context_raw
+       | (if (.current_state.state == "unknown") then
+            "Re-establish current harness state, then continue objective: " + (.backlog.title // .id)
+          else "Continue objective: " + (.backlog.title // .id) end) as $next_raw
        | {id, kind,
         state: .current_state.state,
         objective:((.backlog.title // .id) | trunc(180)),
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(180)),
         milestone:((.hints.last_event_text // "") | trunc(240)),
-        state_caveat:(if .current_state.state == "unknown" then ((.current_state.detail // "Current harness state unavailable") | trunc(180)) else null end),
-        context:(joined_context(.backlog.body_excerpt; report_context($source; .id)) // (.backlog.title // .hints.last_event_text // .current_state.detail // .id) | trunc(800)),
+        state_caveat:(if .current_state.state == "unknown" then
+          (("Current harness state unavailable: " + (.current_state.detail // "reason not recorded")) | trunc(180)) else null end),
+        context:($context_raw | trunc(800)),
         context_backlog_truncated:(.backlog.body_excerpt_truncated // false),
         context_byte_truncated:report_byte_truncated($source; .id),
         context_character_truncated:report_character_truncated($source; .id),
         context_report_count_omitted:report_count_omitted($source; .id),
-        context_projection_truncated:joined_context_projection_truncated(.backlog.body_excerpt; report_context($source; .id)),
-        next_action:((if (.hints.last_event_text // "") != "" then
-                        "Resume from last structured milestone: " + .hints.last_event_text
-                      elif (.current_state.detail // "") != "" then
-                        "Continue current objective: " + .current_state.detail
-                      else "Continue objective: " + (.backlog.title // .id) end) | trunc(320)),
+        context_projection_truncated:(($context_raw | length) > 800),
+        next_action:($next_raw | trunc(320)),
+        next_action_truncated:(($next_raw | length) > 320),
+        caveat:in_flight_caveat((if .current_state.state == "unknown" then
+                                ("Current harness state unavailable: " + (.current_state.detail // "reason not recorded")) else null end);
+                              (.backlog.body_excerpt_truncated // false); report_byte_truncated($source; .id);
+                              report_character_truncated($source; .id); report_count_omitted($source; .id);
+                              (($context_raw | length) > 800); (($next_raw | length) > 320)),
         next_owner:.id,
         owner:.id
       } ]
      + [ $secondmate_views[]
          | select(.bearings_state == "active_child_work")
+         | ([.active_children[] | .context // empty | select(. != "")] | join("; ")) as $context_raw
+         | (if $context_raw != "" then $context_raw else ([.active_children[] | .objective // .id] | join("; ")) end) as $effective_context_raw
+         | ([.active_children[] | .next_action // .doing // .objective // .id] | join("; ")) as $next_raw
          | {id,kind:"secondmate",state:.bearings_state,
             objective:([.active_children[] | .objective // .id] | join("; ") | trunc(180)),
             doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(180)),
             milestone:([.active_children[] | .milestone // empty | select(. != "")] | join("; ") | trunc(240)),
             state_caveat:null,
-            context:(([.active_children[] | .context // empty | select(. != "")] | join("; ")) as $context
-              | if $context != "" then ($context | trunc(800)) else ([.active_children[] | .objective // .id] | join("; ") | trunc(800)) end),
+            context:($effective_context_raw | trunc(800)),
             context_byte_truncated:any(.active_children[]; .context_byte_truncated == true),
             context_character_truncated:any(.active_children[]; .context_character_truncated == true),
             context_backlog_truncated:any(.active_children[]; .context_backlog_truncated == true),
             context_report_count_omitted:any(.active_children[]; .context_report_count_omitted == true),
-            context_projection_truncated:any(.active_children[]; .context_projection_truncated == true),
-            next_action:(([.active_children[] | .milestone // .doing // .objective // .id] | join("; ")) as $next
-              | ("Continue active child work: " + $next) | trunc(320)),
+            context_projection_truncated:(any(.active_children[]; .context_projection_truncated == true) or (($effective_context_raw | length) > 800)),
+            next_action:(("Continue active child work: " + $next_raw) | trunc(320)),
+            next_action_truncated:(any(.active_children[]; .next_action_truncated == true)
+              or (("Continue active child work: " + $next_raw) | length) > 320),
+            caveat:in_flight_caveat(null;
+              any(.active_children[]; .context_backlog_truncated == true);
+              any(.active_children[]; .context_byte_truncated == true);
+              any(.active_children[]; .context_character_truncated == true);
+              any(.active_children[]; .context_report_count_omitted == true);
+              (any(.active_children[]; .context_projection_truncated == true) or (($effective_context_raw | length) > 800));
+              (any(.active_children[]; .next_action_truncated == true)
+               or (("Continue active child work: " + $next_raw) | length) > 320)),
             next_owner:.id,
             owner:.id} ]) as $in_flight_all
   | ([ .backlog.records[]
@@ -552,7 +678,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                (.context_report_count_omitted // false); (.context_projection_truncated // false)),
              summary:(($object + ": " + $requested) | trunc(180)),owner:$m.id,action_owner:"captain"}
             + captain_actions((.action_types // []);
-                (.action_type_missing // true); (.action_type_invalid // false))) ]) as $decisions_all
+                (if has("action_type_missing") then .action_type_missing else true end);
+                (.action_type_invalid // false))) ]) as $decisions_all
   | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),

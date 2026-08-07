@@ -383,7 +383,8 @@ test_structured_child_decision_reaches_captains_call() {
 - [ ] phase8 - Sample rollout Phase 8 (repo: sample) (kind: ship) (since 2026-07-13)
 
 ## Queued
-- [ ] phase8-decision-release - Choose sample release (repo: sample) (kind: captain) (hold: captain release choice pending) (hold-kind: captain) (captain-action: missing-choice)
+- [ ] phase8-decision-release - Choose sample release (repo: sample) (kind: captain) (hold: captain release choice pending) (hold-kind: captain)
+  Captain action: missing-choice
 
 ## Done
 - [x] phase7 - Sample rollout Phase 7 (repo: sample) (kind: ship) (done 2026-07-12)
@@ -401,7 +402,8 @@ EOF
         and .key == "phase8-decision-release" and .verb == "captain-hold"
         and .review_changes_required == false
         and .merge_decision_required == false
-        and .missing_choice_required == true))
+        and .missing_choice_required == true
+        and .action_type_evidence_gap == null))
       and (.in_flight | any(.[]; .id == "domain-alpha") | not)
   ' >/dev/null || fail "structured child captain hold did not reach Captain Call: $json"
   pass "a structured child captain hold reaches Captain's Call"
@@ -491,11 +493,13 @@ test_bad_secondmate_homes_never_revive_parent_work() {
       and (.in_flight | map(.id) | all(. != "invalid" and . != "unreadable" and . != "malformed" and . != "timedout"))
       and (.secondmates | any(.[]; .id == "missing" and .provenance == "unknown"
         and .freshness == "unknown" and (.reason | contains("invalid home"))))
-      and ([.secondmates[] | select(.id != "missing")]
+      and ([.secondmates[] | select(.id != "missing" and .id != "malformed")]
         | all(.provenance == "parent-event-fallback" and .freshness == "historical-event"))
       and (.secondmates | any(.[]; .id == "invalid" and (.reason | contains("marked for"))))
       and (.secondmates | any(.[]; .id == "unreadable" and (.reason | test("invalid home|unreadable"))))
-      and (.secondmates | any(.[]; .id == "malformed" and (.reason | contains("unstructured current backlog row"))))
+      and (.secondmates | any(.[]; .id == "malformed" and .provenance == "structured-home"
+        and (.reason | contains("unstructured current backlog row"))
+        and (.next_action | contains("Repair the structured backlog"))))
       and (.secondmates | any(.[]; .id == "timedout" and (.reason | contains("timed out"))))
   ' >/dev/null || fail "bad home outcomes revived stale work or lacked provenance: $json"
   pass "missing, invalid, unreadable, malformed, and timed-out homes stay explicit unknowns"
@@ -701,7 +705,7 @@ EOF
 }
 
 test_nonprogressing_child_states_are_explicit() {
-  local home mate fakebin canonical
+  local home mate fakebin canonical json
   home=$(make_home child-state-classification)
   mate="$TMP_ROOT/child-state-classification-home"
   make_valid_secondmate_home states "$mate"
@@ -729,6 +733,15 @@ EOF
       and .active_children == []
       and (.holds | any(.id == "parked" and .source == "child-state"))
   ' >/dev/null || fail "parked child was classified as active work: $canonical"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .secondmates[] | select(.id == "states")
+    | .state == "externally_held"
+      and (.context | length) > 0
+      and (.next_action | length) > 0
+      and (.advance_when | length) > 0
+      and (.caveat | length) > 0
+  ' >/dev/null || fail "final held reclassification lacked a complete Charted Next capsule: $json"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
 
@@ -741,8 +754,11 @@ EOF
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "states")
     | .current.state == "unknown"
+      and .invalidity.kind == "unowned_current"
       and (.current.reason | contains("live child state has no in-flight backlog item"))
       and (.current.reason | contains("parked=parked"))
+      and (.charted_next.next_action | contains("Reconcile unowned child state"))
+      and (.charted_next.advance_when | contains("owned by the backlog or retired"))
   ' >/dev/null || fail "unowned held child was silently dropped: $canonical"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
@@ -769,9 +785,12 @@ EOF
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "states")
     | .current.state == "unknown"
+      and .invalidity.kind == "terminal_in_flight"
       and (.current.reason | contains("terminal child state"))
       and (.current.reason | contains("done=done"))
       and (.current.reason | contains("failed=failed"))
+      and (.charted_next.next_action | contains("Move terminal in-flight items to Done or relaunch"))
+      and (.charted_next.advance_when | contains("backlog and terminal child state agree"))
   ' >/dev/null || fail "terminal in-flight child states were silently dropped: $canonical"
   pass "nonprogressing child states are explicit and inconsistent terminal rows invalidate"
 }
@@ -1717,14 +1736,12 @@ EOF
     .secondmate_current.records[] | select(.id == "sshhip")
     | .current.state == "unknown"
       and (.current.reason | contains("in-flight backlog item has no child metadata: ordinary-orphan"))
-      and .provenance.selected != "structured-home"
-      and .invalidity == null
+      and .provenance.selected == "structured-home"
+      and .invalidity == {kind:"orphan_in_flight",ids:["ordinary-orphan"]}
+      and (.charted_next.next_action | contains("Restore child metadata for ordinary-orphan"))
       and .active_children == []
-      and .decisions_open == []
-      and .holds == []
-      and .queued == []
-      and .landed == []
-      and .endpoints == []
+      and [.decisions_open[].id] == ["reviewer-decision"]
+      and [.landed[].id] == ["prior-release"]
   ' >/dev/null || fail "an unknown child masked a simultaneous ordinary orphan: $canonical"
   sed '/ordinary-orphan/d' "$sshhip/data/backlog.md" > "$sshhip/data/backlog.next"
   mv "$sshhip/data/backlog.next" "$sshhip/data/backlog.md"
@@ -1737,14 +1754,12 @@ EOF
     .secondmate_current.records[] | select(.id == "sshhip")
     | .current.state == "unknown"
       and (.current.reason | contains("live child state has no in-flight backlog item: unreadable-child=unknown"))
-      and .provenance.selected != "structured-home"
-      and .invalidity == null
+      and .provenance.selected == "structured-home"
+      and .invalidity == {kind:"unowned_current",ids:["unreadable-child"]}
+      and (.charted_next.next_action | contains("Reconcile unowned child state for unreadable-child"))
       and .active_children == []
-      and .decisions_open == []
-      and .holds == []
-      and .queued == []
-      and .landed == []
-      and .endpoints == []
+      and [.decisions_open[].id] == ["reviewer-decision"]
+      and [.landed[].id] == ["prior-release"]
   ' >/dev/null || fail "an unowned unknown child received partial structured projection: $canonical"
   sed '/## In flight/a\
 - [ ] unreadable-child - Submit App Store build (repo: sshhip) (kind: ship)' \
@@ -1825,13 +1840,10 @@ EOF
     .secondmate_current.records[] | select(.id == "hibit")
     | .current.state == "unknown"
       and (.current.reason | contains("in-flight backlog item has no child metadata: dogfood-program"))
-      and .provenance.selected != "structured-home"
-      and .active_children == []
-      and .decisions_open == []
-      and .holds == []
-      and .queued == []
-      and .landed == []
-      and .endpoints == []
+      and .provenance.selected == "structured-home"
+      and .invalidity == {kind:"orphan_in_flight",ids:["dogfood-program"]}
+      and (.charted_next.next_action | contains("Restore child metadata for dogfood-program"))
+      and [.active_children[].id] == ["hibit-worker"]
   ' >/dev/null || fail "an unrecognized worker kind no longer stayed strict: $canonical"
   pass "mixed secondmate roles, partial state, and captain readiness project independently"
 }
@@ -1917,7 +1929,8 @@ test_captain_call_carries_executable_review_and_merge_context() {
 ## In flight
 
 ## Queued
-- [ ] nm-codex-appserver-q8 - Codex app-server queue isolation implementation (repo: firstmate) (kind: captain) (hold: manual re-review and landing decision) (hold-kind: captain) (captain-action: review-changes+merge-decision)
+- [ ] nm-codex-appserver-q8 - Codex app-server queue isolation implementation (repo: firstmate) (kind: captain) (hold: manual re-review and landing decision) (hold-kind: captain)
+  Captain action: review-changes+merge-decision
   Prior review found cross-thread wake leakage and missing restart coverage; both are fixed. Remaining gap: no Windows evidence. Next: captain reviews the fixes, then separately decides whether to merge.
 
 ## Done
@@ -1948,12 +1961,22 @@ test_captain_actions_ignore_incidental_evidence_prose() {
 ## In flight
 
 ## Queued
-- [ ] choose-path - Choose the deployment path (repo: firstmate) (kind: captain) (hold: provide the remaining deployment choice) (hold-kind: captain) (captain-action: missing-choice)
+- [ ] choose-path - Choose the deployment path (repo: firstmate) (kind: captain) (hold: provide the remaining deployment choice) (hold-kind: captain)
+  Captain action: missing-choice
   The implementation was reviewed yesterday and the team selected the safe merge strategy. Next: captain provides the environment choice.
-- [ ] inspect-fix - Inspect the restart fix (repo: firstmate) (kind: captain) (hold: inspect the corrected restart changes) (hold-kind: captain) (captain-action: review-changes)
+- [ ] inspect-fix - Inspect the restart fix (repo: firstmate) (kind: captain) (hold: inspect the corrected restart changes) (hold-kind: captain)
+  Captain action: review-changes
   The team selected and merged the unrelated documentation path last week. Next: captain reviews only the restart changes.
 - [ ] untyped-action - Untyped captain action (repo: firstmate) (kind: captain) (hold: manual follow-up required) (hold-kind: captain)
   The prior review selected a merge path, but no structured captain action was recorded.
+- [ ] trailing-empty - Invalid trailing action token (repo: firstmate) (kind: captain) (hold: manual follow-up required) (hold-kind: captain)
+  Captain action: review-changes+
+- [ ] doubled-empty - Invalid doubled action token (repo: firstmate) (kind: captain) (hold: manual follow-up required) (hold-kind: captain)
+  Captain action: review-changes++merge-decision
+- [ ] duplicate-lines - Invalid repeated action field (repo: firstmate) (kind: captain) (hold: manual follow-up required) (hold-kind: captain)
+  Captain action: review-changes
+  Captain action: merge-decision
+- [ ] legacy-suffix - Unsupported legacy suffix (repo: firstmate) (kind: captain) (hold: manual follow-up required) (hold-kind: captain) (captain-action: review-changes)
 
 ## Done
 EOF
@@ -1975,6 +1998,17 @@ EOF
           and .review_changes_required == false
           and .merge_decision_required == false
           and .missing_choice_required == false
+          and (.action_type_evidence_gap | contains("No structured captain action")))
+      and (all(.decisions_open[] | select(.id == "trailing-empty" or .id == "doubled-empty" or .id == "duplicate-lines");
+        .action_types == []
+          and .review_changes_required == false
+          and .merge_decision_required == false
+          and .missing_choice_required == false
+          and (.action_type_evidence_gap | contains("Invalid structured captain action"))))
+      and (.decisions_open[] | select(.id == "legacy-suffix")
+        | .object == "Unsupported legacy suffix"
+          and .action_types == []
+          and .review_changes_required == false
           and (.action_type_evidence_gap | contains("No structured captain action")))
   ' >/dev/null || fail "incidental past-tense evidence invented captain actions: $json"
   pass "captain action types come from structured metadata, not incidental evidence prose"
@@ -2036,7 +2070,9 @@ EOF
         and (.milestone | contains("mapped all four scout dispositions"))
         and (.state_caveat | length) > 0
         and (.context | contains("retain unique recovery behavior"))
-        and (.next_action | contains("mapped all four scout dispositions"))
+        and (.next_action | contains("Integrate surviving NSM salvage"))
+        and (.next_action | contains("mapped all four scout dispositions") | not)
+        and (.caveat | contains("Current harness state unavailable"))
         and .next_owner == "nsm-integrator"
         and .owner == "nsm-integrator"))
   ' >/dev/null || fail "salvage dispositions or unavailable-state milestone were compressed away: $json"
@@ -2096,16 +2132,37 @@ EOF
 }
 
 test_report_count_and_decision_gate_projection_truncation_are_disclosed() {
-  local home fakebin json i long_hold
+  local home fakebin json i long_hold wt mate
   home=$(make_home causal-truncation-provenance)
   : > "$home/data/secondmates.md"
-  mkdir -p "$home/data/a-decision" "$home/data/z-count-scout"
+  mkdir -p "$home/data/a-decision" "$home/data/z-active" "$home/data/z-count-scout"
   long_hold=wait-for-
   i=0
   while [ "$i" -lt 280 ]; do long_hold="${long_hold}g"; i=$((i + 1)); done
+  mate="$TMP_ROOT/causal-truncation-mate"
+  make_valid_secondmate_home trunc-mate "$mate"
+  append_secondmate_registry "$home" trunc-mate "$mate"
+  mkdir -p "$mate/data/a-first" "$mate/data/b-mate-hold"
   {
     printf '## In flight\n\n## Queued\n'
-    printf '%s\n' '- [ ] a-decision - Choose bounded release (repo: firstmate) (kind: captain) (hold: provide release choice) (hold-kind: captain) (captain-action: missing-choice)'
+    printf -- '- [ ] b-mate-hold - Held bounded work data/b-mate-hold/report.md (repo: firstmate) (kind: ship) (hold: %s) (hold-kind: external)\n' "$long_hold"
+    printf '  Held context: '
+    i=0
+    while [ "$i" -lt 300 ]; do printf 'h'; i=$((i + 1)); done
+    printf '\n\n## Done\n'
+    printf '%s\n' '- [x] a-first - First bounded report data/a-first/report.md (repo: firstmate) (kind: scout) (reported 2026-07-22)'
+  } > "$mate/data/backlog.md"
+  printf '# First evidence\nConsumes the per-home report-summary slot.\n' > "$mate/data/a-first/report.md"
+  printf '# Held evidence\nUnique held disposition.\n' > "$mate/data/b-mate-hold/report.md"
+  {
+    printf '## In flight\n'
+    printf '%s\n' '- [ ] z-active - Active bounded work data/z-active/report.md (repo: firstmate) (kind: ship) (since 2026-07-23)'
+    printf '  Active context: '
+    i=0
+    while [ "$i" -lt 300 ]; do printf 'a'; i=$((i + 1)); done
+    printf '\n\n## Queued\n'
+    printf '%s\n' '- [ ] a-decision - Choose bounded release (repo: firstmate) (kind: captain) (hold: provide release choice) (hold-kind: captain)'
+    printf '%s\n' '  Captain action: missing-choice'
     printf '  Evidence: '
     i=0
     while [ "$i" -lt 300 ]; do printf 'e'; i=$((i + 1)); done
@@ -2121,6 +2178,17 @@ test_report_count_and_decision_gate_projection_truncation_are_disclosed() {
   i=0
   while [ "$i" -lt 700 ]; do printf 'r' >> "$home/data/a-decision/report.md"; i=$((i + 1)); done
   printf '# Count omitted\nUnique landed evidence.\n' > "$home/data/z-count-scout/report.md"
+  printf '# Active evidence\n' > "$home/data/z-active/report.md"
+  i=0
+  while [ "$i" -lt 700 ]; do printf 'w' >> "$home/data/z-active/report.md"; i=$((i + 1)); done
+  wt="$home/projects/z-active"
+  fm_git_init_commit "$wt"
+  git -C "$wt" checkout -q -b fm/z-active
+  fm_write_meta "$home/state/z-active.meta" \
+    "window=firstmate:fm-z-active" "worktree=$wt" "project=firstmate" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$home/state" z-active busy
+  printf 'working: applying current bounded fix\n' > "$home/state/z-active.status"
   fakebin=$(make_fakebin "$home")
   json=$(FM_SNAPSHOT_REPORT_SUMMARIES=1 run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
@@ -2137,8 +2205,63 @@ test_report_count_and_decision_gate_projection_truncation_are_disclosed() {
       and (.landed[] | select(.id == "z-count-scout")
         | .context_report_count_omitted == true
           and (.caveat | contains("report-count limit")))
+      and (.in_flight[] | select(.id == "z-active")
+        | .context_backlog_truncated == true
+          and .context_report_count_omitted == true
+          and (.caveat | contains("backlog body limit"))
+          and (.caveat | contains("report-count limit")))
+      and (.secondmates[] | select(.id == "trunc-mate")
+        | .state == "externally_held"
+          and .context_backlog_truncated == true
+          and .context_report_count_omitted == true
+          and .hold_reason_truncated == true
+          and (.caveat | contains("backlog body limit"))
+          and (.caveat | contains("report-count limit"))
+          and (.caveat | contains("hold-reason limit")))
   ' >/dev/null || fail "causal truncation provenance was incomplete: $json"
+  json=$(FM_SNAPSHOT_REPORT_SUMMARIES=10 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .in_flight[] | select(.id == "z-active")
+    | .context_projection_truncated == true and (.caveat | contains("final projection limit"))
+  ' >/dev/null || fail "active in-flight final projection truncation was not disclosed: $json"
+  json=$(FM_SNAPSHOT_REPORT_SUMMARIES=10 FM_SNAPSHOT_REPORT_SUMMARY_BYTES=80 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .in_flight[] | select(.id == "z-active")
+    | .context_byte_truncated == true and (.caveat | contains("report byte limit"))
+  ' >/dev/null || fail "active in-flight report byte truncation was not disclosed: $json"
+  json=$(FM_SNAPSHOT_REPORT_SUMMARIES=10 FM_SNAPSHOT_REPORT_SUMMARY_CHARS=80 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .in_flight[] | select(.id == "z-active")
+    | .context_character_truncated == true and (.caveat | contains("report character limit"))
+  ' >/dev/null || fail "active in-flight report character truncation was not disclosed: $json"
   pass "report-count, backlog-body, decision-evidence, and gate-condition limits are disclosed"
+}
+
+test_malformed_nested_cross_home_fields_fall_back_without_jq_abort() {
+  local home fakebin sshbin json
+  home=$(make_home malformed-nested-cross-home)
+  printf '%s\n' '- remote-bad - fixture (host: fixture-host; root: /remote/root; home: /remote/home; scope: fixture; projects: sample; added 2026-07-11)' > "$home/data/secondmates.md"
+  fakebin=$(make_fakebin "$home")
+  sshbin="$fakebin/fake-ssh"
+  cat > "$sshbin" <<'SH'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"schema":"fm-secondmate-home-summary.v1","generated":"2026-07-11T18:00:00Z","home":"/remote/home","valid":true,"reason":null,"invalidity":{"kind":null,"ids":[]},"state":"captain_decision","charted_next":null,"active_children":[],"decisions_open":[{"id":"bad","key":"bad","verb":"captain-hold","summary":"Bad nested action","reason":"review","action_types":"review-changes","action_type_missing":false,"action_type_invalid":false,"context":null,"context_backlog_truncated":false,"context_byte_truncated":false,"context_character_truncated":false,"context_report_count_omitted":false,"context_projection_truncated":false,"source":"backlog"}],"holds":[],"queued":[],"landed":[],"endpoints":[],"counts":{"active_children":0,"decisions_open":1,"holds":0,"queued":0,"landed":0,"endpoints":0},"omitted":[]}
+JSON
+SH
+  chmod +x "$sshbin"
+  json=$(FM_SSH_BIN="$sshbin" run "$home" "$fakebin" --json) || fail "malformed nested cross-home field aborted Bearings"
+  printf '%s' "$json" | jq -e '
+    .secondmates[] | select(.id == "remote-bad")
+    | .state == "unknown"
+      and .provenance == "unknown"
+      and (.reason | contains("malformed"))
+      and (.context | length) > 0
+      and (.next_action | length) > 0
+      and (.advance_when | length) > 0
+      and (.caveat | length) > 0
+  ' >/dev/null || fail "malformed nested cross-home data did not become structured invalidity: $json"
+  pass "malformed nested cross-home fields fall back without jq abort"
 }
 
 test_help_names_every_operator_facing_bound() {
@@ -2156,7 +2279,28 @@ test_help_names_every_operator_facing_bound() {
     'FM_BEARINGS_UNHEALTHY (default 20)' \
     'FM_BEARINGS_PR_REPOS (default 10)' \
     'FM_BEARINGS_PR_LIMIT (default 20)' \
-    'FM_BEARINGS_PR_TIMEOUT (default 20 seconds)'
+    'FM_BEARINGS_PR_TIMEOUT (default 20 seconds)' \
+    'FM_SNAPSHOT_SECONDMATES (default 20)' \
+    'FM_SNAPSHOT_SECONDMATE_TIMEOUT (default 8 seconds)' \
+    'FM_SNAPSHOT_SECONDMATE_MAX_BYTES (default 262144)' \
+    'FM_SNAPSHOT_SECONDMATE_CHILDREN (default 20)' \
+    'FM_SNAPSHOT_SECONDMATE_QUEUED (default 20)' \
+    'FM_SNAPSHOT_SECONDMATE_DECISIONS (default 20)' \
+    'FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME (default 10)' \
+    'FM_SNAPSHOT_TERMINAL_LINES (default 8)' \
+    'FM_SNAPSHOT_TERMINAL_BYTES (default 4096)' \
+    'FM_SNAPSHOT_TERMINAL_TIMEOUT (default 2 seconds)' \
+    'FM_SNAPSHOT_PARENT_ACTIVITY_LINES (default 256)' \
+    'FM_SNAPSHOT_PARENT_ACTIVITY_BYTES (default 65536)' \
+    'FM_SNAPSHOT_PARENT_ACTIVITIES (default 20)' \
+    'FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT (default 2 seconds)' \
+    'FM_SNAPSHOT_REGISTRY_LINES (default 256)' \
+    'FM_SNAPSHOT_REGISTRY_BYTES (default 65536)' \
+    'FM_SNAPSHOT_REGISTRY_RECORDS (default 40)' \
+    'FM_SNAPSHOT_REGISTRY_TIMEOUT (default 2 seconds)' \
+    'FM_SNAPSHOT_REPORT_SUMMARIES (default 40)' \
+    'FM_SNAPSHOT_REPORT_SUMMARY_BYTES (default 4096)' \
+    'FM_SNAPSHOT_REPORT_SUMMARY_CHARS (default 800)'
   do
     printf '%s' "$help" | grep -F "$name" >/dev/null ||
       fail "help omitted operator-facing bound: $name"
@@ -2200,6 +2344,7 @@ test_captain_actions_ignore_incidental_evidence_prose
 test_salvage_dispositions_and_unknown_integrator_milestone_surface
 test_landed_discloses_byte_character_and_projection_truncation
 test_report_count_and_decision_gate_projection_truncation_are_disclosed
+test_malformed_nested_cross_home_fields_fall_back_without_jq_abort
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface

@@ -19,7 +19,8 @@
 # Usage:
 #   fm-decision-hold.sh id <origin-id> <decision-key>
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
-#     --title <title> --reason <reason> [--repo <repo>]
+#     --title <title> --reason <reason> [--repo <repo>] \
+#     [--action <review-changes|merge-decision|missing-choice>...]
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
@@ -229,7 +230,7 @@ command_id() {
 }
 
 command_hold() {
-  local origin=${1:-} key=${2:-} title='' reason='' repo='' id show state kind existing_title body
+  local origin=${1:-} key=${2:-} title='' reason='' repo='' actions='' action='' id show state kind existing_title existing_body existing_actions='' body
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -237,6 +238,18 @@ command_hold() {
       --title) shift; title=${1:-} ;;
       --reason) shift; reason=${1:-} ;;
       --repo) shift; repo=${1:-} ;;
+      --action)
+        shift
+        action=${1:-}
+        case "$action" in
+          review-changes|merge-decision|missing-choice) : ;;
+          *) fail "action must be review-changes, merge-decision, or missing-choice: $action" ;;
+        esac
+        case " $actions " in
+          *" $action "*) fail "action must not be repeated: $action" ;;
+        esac
+        actions="${actions}${actions:+ }$action"
+        ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -247,15 +260,25 @@ command_hold() {
   validate_one_line reason "$reason"
   case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
   require_tasks_axi
+  actions=$(printf '%s\n' "$actions" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd+ -)
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
   id=$(hold_id "$origin" "$key")
   if show=$(task_show "$id"); then
     state=$(show_field "$show" state)
     kind=$(show_field "$show" kind)
     existing_title=$(show_field "$show" title)
+    existing_body=$(show_field "$show" body)
     [ "$state" != "done" ] || fail "captain decision $id is already durably resolved; use a new decision key for a new decision"
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
+    case "$existing_body" in
+      *"Captain action: "*)
+        existing_actions=${existing_body#*Captain action: }
+        existing_actions=${existing_actions%%\\n*}
+        ;;
+    esac
+    [ "$existing_actions" = "$actions" ] \
+      || fail "existing captain hold $id has different structured captain action intent"
   else
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
@@ -264,7 +287,11 @@ command_hold() {
     fi
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
-    body=$(printf 'Origin: %s\nDecision key: %s\nState: awaiting captain decision.' "$origin" "$key")
+    body=$(printf 'Origin: %s\nDecision key: %s' "$origin" "$key")
+    if [ -n "$actions" ]; then
+      body=$(printf '%s\nCaptain action: %s' "$body" "$actions")
+    fi
+    body=$(printf '%s\nState: awaiting captain decision.' "$body")
     tasks_axi add "$id" "$title" --kind captain --repo "$repo" --body "$body" >/dev/null \
       || fail "could not create captain decision item $id"
   fi
@@ -368,7 +395,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' action_intent='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -404,6 +431,12 @@ command_resolve() {
   hold_show=$(task_show "$id")
   hold_body=$(show_field "$hold_show" body)
   case "$hold_body" in
+    *"Captain action: "*)
+      action_intent=${hold_body#*Captain action: }
+      action_intent=${action_intent%%\\n*}
+      ;;
+  esac
+  case "$hold_body" in
     *"Resolution recorded by fm-decision-hold."*)
       verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
       resolution_recorded=1
@@ -430,7 +463,11 @@ command_resolve() {
     esac
   done
 
-  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s\n\nCaptain decision:\n%s\n\nRouted work:\n' "$decision_digest" "$routed_csv" "$decision")
+  body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s' "$decision_digest" "$routed_csv")
+  if [ -n "$action_intent" ]; then
+    body=$(printf '%s\nCaptain action: %s' "$body" "$action_intent")
+  fi
+  body=$(printf '%s\n\nCaptain decision:\n%s\n\nRouted work:\n' "$body" "$decision")
   for dep in $routed; do
     body="${body}- ${dep}"$'\n'
   done

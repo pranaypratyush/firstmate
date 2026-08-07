@@ -52,7 +52,7 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
    Captain's Call must use the canonical `action_types` values and their projected `review_changes_required`, `merge_decision_required`, and `missing_choice_required` booleans, and may render more than one explicit action when more than one value is present.
    Incidental evidence prose never creates an action type.
    Render `action_type_evidence_gap` when action metadata is missing or invalid instead of guessing from the request or evidence prose.
-   Surface every machine-visible backlog-body, report-byte, report-character, report-count, evidence-projection, context-projection, or gate-condition limit through the item's structured caveat.
+   Surface every machine-visible backlog-body, report-byte, report-character, report-count, evidence-projection, context-projection, hold-reason, next-action, or gate-condition limit through the item's structured caveat.
    Treat a missing causal field as a disclosed evidence gap, never as permission to compress the item to its title or invent the missing link.
    The chat response uses the four complete sections in the chat-response contract below, in the same order, each always present.
    Plain mode stops here and writes no report artifact.
