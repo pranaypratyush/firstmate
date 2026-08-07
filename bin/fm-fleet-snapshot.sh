@@ -694,6 +694,9 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
     def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
+    def bounded($n):
+      tostring | gsub("\\s+"; " ")
+      | if length > $n then .[:($n - 1)] + "…" else . end;
     def report_context($id):
       ([ $reports[]? | select(.id == $id) | .summary_excerpt // empty ][0]) // null;
     def report_byte_truncated($id):
@@ -887,13 +890,15 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
          | (any($holds_all[]; .context_report_count_omitted == true)) as $count_cut
          | (any($holds_all[]; .context_projection_truncated == true)) as $projection_cut
          | (any($holds_all[]; (.hold_reason_truncated // false) or (.blocked_reason_truncated // false))) as $hold_cut
-         | {context:($held_context | trunc(800)),context_truncated:(($held_context | length) > 800),
+         | {context:($held_context | bounded(800)),context_truncated:(($held_context | length) > 800),
             context_backlog_truncated:$backlog_cut,context_byte_truncated:$byte_cut,
             context_character_truncated:$character_cut,context_report_count_omitted:$count_cut,
             context_projection_truncated:$projection_cut,hold_reason_truncated:$hold_cut,
-            next_action:($held_next | trunc(320)),next_action_truncated:(($held_next | length) > 320),
-            advance_when:($held_advance | trunc(320)),advance_when_truncated:(($held_advance | length) > 320),
-            caveat:source_caveat($backlog_cut;$byte_cut;$character_cut;$count_cut;$projection_cut;$hold_cut)}
+            next_action:($held_next | bounded(320)),next_action_truncated:(($held_next | length) > 320),
+            advance_when:($held_advance | bounded(320)),advance_when_truncated:(($held_advance | length) > 320),
+            caveat:(["Structured child work is externally held",
+              source_caveat($backlog_cut;$byte_cut;$character_cut;$count_cut;$projection_cut;$hold_cut) // empty]
+              | join("; "))}
        elif $state == "unknown" then
          ([ $unknown_children[] as $child
             | $child.id + ": " +
@@ -909,13 +914,15 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
          | (any($owned_in_flight[]; context_projection_truncated(.body_excerpt; report_context(.id)) == true)) as $projection_cut
          | (invalidity_next($invalidity)) as $unknown_next
          | (invalidity_advance($invalidity)) as $unknown_advance
-         | {context:($unknown_context_value | trunc(800)),context_truncated:(($unknown_context_value | length) > 800),
+         | {context:($unknown_context_value | bounded(800)),context_truncated:(($unknown_context_value | length) > 800),
             context_backlog_truncated:$backlog_cut,context_byte_truncated:$byte_cut,
             context_character_truncated:$character_cut,context_report_count_omitted:$count_cut,
             context_projection_truncated:$projection_cut,hold_reason_truncated:false,
-            next_action:($unknown_next | trunc(320)),next_action_truncated:(($unknown_next | length) > 320),
-            advance_when:($unknown_advance | trunc(320)),advance_when_truncated:(($unknown_advance | length) > 320),
-            caveat:source_caveat($backlog_cut;$byte_cut;$character_cut;$count_cut;$projection_cut;false)}
+            next_action:($unknown_next | bounded(320)),next_action_truncated:(($unknown_next | length) > 320),
+            advance_when:($unknown_advance | bounded(320)),advance_when_truncated:(($unknown_advance | length) > 320),
+            caveat:([$reason // "Current home state unavailable",
+              source_caveat($backlog_cut;$byte_cut;$character_cut;$count_cut;$projection_cut;false) // empty]
+              | join("; ") | bounded(320))}
        else null end) as $charted_next
     | {
         schema:"fm-secondmate-home-summary.v1",
@@ -1406,6 +1413,10 @@ secondmate_current_json() {  # <parent-tasks-json>
           reason="structured home snapshot exceeded byte limit"
         elif ! printf '%s' "$summary" | jq -e --arg home "$home" --arg generated "$SNAPSHOT_NOW" --argjson remote "$remote" '
           def string_or_null: . == null or type == "string";
+          def nonempty_string: type == "string" and length > 0;
+          def bounded_nonempty($n): nonempty_string and length <= $n;
+          def string_array:
+            type == "array" and all(.[]; nonempty_string) and (unique | length) == length;
           def bool_context:
             (.context | string_or_null)
             and (.context_backlog_truncated | type) == "boolean"
@@ -1417,66 +1428,87 @@ secondmate_current_json() {  # <parent-tasks-json>
             type == "array" and all(.[];
               type == "string" and (. == "review-changes" or . == "merge-decision" or . == "missing-choice"))
             and (unique | length) == length;
+          def count_for($items):
+            type == "number" and floor == . and . >= ($items | length);
           def valid_active:
-            type == "object" and (.id | type) == "string" and (.state | type) == "string"
-            and (.objective | type) == "string" and (.doing | type) == "string"
-            and (.next_action | type) == "string" and (.next_action_truncated | type) == "boolean"
+            type == "object" and (.id | nonempty_string) and .state == "working"
+            and (.source | nonempty_string) and (.objective | nonempty_string)
+            and (.doing | type) == "string"
+            and (.next_action_truncated | type) == "boolean"
+            and (.next_action | bounded_nonempty(320))
             and (.milestone | type) == "string" and bool_context;
           def valid_decision:
-            type == "object" and (.id | type) == "string" and (.key | type) == "string"
-            and (.verb | type) == "string" and (.summary | type) == "string"
+            type == "object" and (.id | nonempty_string) and (.key | nonempty_string)
+            and (.summary | nonempty_string)
             and (.reason | string_or_null) and (.source | type) == "string"
             and (if .source == "backlog" then
-              (.action_types | action_types)
+              .verb == "captain-hold" and (.reason | nonempty_string)
+              and (.action_types | action_types)
               and (.action_type_missing | type) == "boolean"
-              and (.action_type_invalid | type) == "boolean" and bool_context
-            else .source == "status" end);
+              and (.action_type_invalid | type) == "boolean"
+              and (if .action_type_missing then (.action_types | length) == 0 and (.action_type_invalid | not)
+                   elif .action_type_invalid then (.action_types | length) == 0
+                   else (.action_types | length) > 0 end)
+              and bool_context
+            else .source == "status" and (.verb == "needs-decision" or .verb == "blocked") end);
           def valid_hold:
-            type == "object" and (.id | type) == "string" and (.title | type) == "string"
-            and (.reason | type) == "string" and (.source | type) == "string"
-            and (.blocked_by_ids | type) == "array" and all(.blocked_by_ids[]; type == "string")
-            and (.unresolved_blocker_ids | type) == "array" and all(.unresolved_blocker_ids[]; type == "string")
+            type == "object" and (.id | nonempty_string) and (.title | nonempty_string)
+            and (.reason | nonempty_string) and (.source == "backlog" or .source == "child-state")
+            and (.blocked_by_ids | string_array) and (.unresolved_blocker_ids | string_array)
             and (.hold_reason_truncated | type) == "boolean"
             and (.blocked_reason_truncated | type) == "boolean" and bool_context;
           def valid_queued:
-            type == "object" and (.id | type) == "string" and (.title | type) == "string"
-            and (.blocked_by_ids | type) == "array" and all(.blocked_by_ids[]; type == "string")
-            and (.unresolved_blocker_ids | type) == "array" and all(.unresolved_blocker_ids[]; type == "string")
+            type == "object" and (.id | nonempty_string) and (.title | nonempty_string)
+            and (.blocked_by_ids | string_array) and (.unresolved_blocker_ids | string_array)
             and (.blocked_reason | string_or_null) and (.blocked_reason_truncated | type) == "boolean"
             and (.hold_reason | string_or_null) and (.hold_reason_truncated | type) == "boolean"
             and (.hold_kind | string_or_null) and (.captain_actionable | type) == "boolean" and bool_context;
           def valid_landed:
-            type == "object" and (.id | type) == "string" and (.title | type) == "string"
+            type == "object" and (.id | nonempty_string) and (.title | nonempty_string)
             and (.pr_url | string_or_null) and (.report_path | string_or_null)
-            and (.local_note | string_or_null) and (.completion | type) == "object" and bool_context;
+            and (.local_note | string_or_null) and (.completion | type) == "object"
+            and (.completion.verb == null or .completion.verb == "merged"
+              or .completion.verb == "reported" or .completion.verb == "done")
+            and (.completion.date == null or (.completion.date | nonempty_string)) and bool_context;
           def valid_endpoint:
-            type == "object" and (.id | type) == "string" and (.state | type) == "string"
-            and (.source | type) == "string" and (.objective | type) == "string"
+            type == "object" and (.id | nonempty_string)
+            and (.state == "working" or .state == "unknown" or .state == "parked" or .state == "paused"
+              or .state == "blocked" or .state == "done" or .state == "failed")
+            and (.source | nonempty_string) and (.objective | nonempty_string)
             and (.milestone | type) == "string" and (.endpoint | type) == "object"
             and (.endpoint.exists | type) == "boolean"
-            and (.endpoint.agent_alive | type) == "string" and (.endpoint.target | string_or_null);
+            and (.endpoint.agent_alive | nonempty_string) and (.endpoint.target | string_or_null);
+          def valid_charted:
+            type == "object"
+            and (.context_truncated | type) == "boolean"
+            and (.next_action_truncated | type) == "boolean"
+            and (.advance_when_truncated | type) == "boolean"
+            and (.context | bounded_nonempty(800))
+            and (.next_action | bounded_nonempty(320))
+            and (.advance_when | bounded_nonempty(320))
+            and (.context_backlog_truncated | type) == "boolean"
+            and (.context_byte_truncated | type) == "boolean"
+            and (.context_character_truncated | type) == "boolean"
+            and (.context_report_count_omitted | type) == "boolean"
+            and (.context_projection_truncated | type) == "boolean"
+            and (.hold_reason_truncated | type) == "boolean"
+            and (.caveat | nonempty_string);
           .schema == "fm-secondmate-home-summary.v1" and .home == $home
           and (($remote == true) or .generated == $generated)
-          and (.valid | type) == "boolean" and (.state | type) == "string"
-          and ((if (.state == "unknown" or .state == "externally_held")
-                then (.charted_next | type) == "object"
-                else (.charted_next == null or (.charted_next | type) == "object") end)
-            and ((.charted_next == null) or ((.charted_next | type) == "object"
-            and (.charted_next.context | type) == "string"
-            and (.charted_next.next_action | type) == "string"
-            and (.charted_next.advance_when | type) == "string"
-            and (.charted_next.context_truncated | type) == "boolean"
-            and (.charted_next.next_action_truncated | type) == "boolean"
-            and (.charted_next.advance_when_truncated | type) == "boolean"
-            and (.charted_next.context_backlog_truncated | type) == "boolean"
-            and (.charted_next.context_byte_truncated | type) == "boolean"
-            and (.charted_next.context_character_truncated | type) == "boolean"
-            and (.charted_next.context_report_count_omitted | type) == "boolean"
-            and (.charted_next.context_projection_truncated | type) == "boolean"
-            and (.charted_next.hold_reason_truncated | type) == "boolean"
-            and (.charted_next.caveat | string_or_null))))
-          and (.invalidity | type) == "object" and (.invalidity.kind | string_or_null)
-          and (.invalidity.ids | type) == "array" and all(.invalidity.ids[]; type == "string")
+          and (.valid | type) == "boolean"
+          and (.state == "unknown" or .state == "captain_decision" or .state == "active_child_work"
+            or .state == "externally_held" or .state == "no_active_work")
+          and (if .state == "unknown" or .state == "externally_held" then (.charted_next | valid_charted)
+               else .charted_next == null end)
+          and (if .state == "unknown" then (.reason | nonempty_string) else (.reason == null) end)
+          and (if .valid then .invalidity == {kind:null,ids:[]}
+               else .state == "unknown"
+                 and (.invalidity.kind == "missing_backlog" or .invalidity.kind == "unstructured_current"
+                   or .invalidity.kind == "orphan_in_flight" or .invalidity.kind == "unowned_current"
+                   or .invalidity.kind == "terminal_in_flight" or .invalidity.kind == "child_current_unavailable")
+                 and (.invalidity.ids | string_array)
+                 and (if .invalidity.kind == "missing_backlog" or .invalidity.kind == "unstructured_current"
+                      then (.invalidity.ids | length) == 0 else (.invalidity.ids | length) > 0 end) end)
           and (.active_children | type) == "array" and all(.active_children[]; valid_active)
           and (.decisions_open | type) == "array" and all(.decisions_open[]; valid_decision)
           and (.holds | type) == "array" and all(.holds[]; valid_hold)
@@ -1484,14 +1516,14 @@ secondmate_current_json() {  # <parent-tasks-json>
           and (.landed | type) == "array" and all(.landed[]; valid_landed)
           and (.endpoints | type) == "array" and all(.endpoints[]; valid_endpoint)
           and (.counts | type) == "object"
-          and (.counts.active_children | type) == "number"
-          and (.counts.decisions_open | type) == "number"
-          and (.counts.holds | type) == "number"
-          and (.counts.queued | type) == "number"
-          and (.counts.landed | type) == "number"
-          and (.counts.endpoints | type) == "number"
+          and (.active_children as $items | .counts.active_children | count_for($items))
+          and (.decisions_open as $items | .counts.decisions_open | count_for($items))
+          and (.holds as $items | .counts.holds | count_for($items))
+          and (.queued as $items | .counts.queued | count_for($items))
+          and (.landed as $items | .counts.landed | count_for($items))
+          and (.endpoints as $items | .counts.endpoints | count_for($items))
           and (.omitted | type) == "array" and all(.omitted[];
-            type == "object" and (.surface | type) == "string" and (.count | type) == "number")
+            type == "object" and (.surface | nonempty_string) and (.count | type) == "number" and .count > 0)
         ' >/dev/null 2>&1; then
           reason="structured home snapshot was malformed or stale"
           fallback_invalidity='{"kind":"malformed_structured_home","ids":[]}'
@@ -1563,16 +1595,57 @@ secondmate_current_json() {  # <parent-tasks-json>
         --argjson registered "$registered" --argjson event_age "$event_age" --argjson activities "$activities" --argjson activity_scan "$activity_scan" \
         --argjson fallback_invalidity "$fallback_invalidity" \
         --argjson decisions "$decisions" --argjson terminal "$terminal" '
+        def bounded($n):
+          tostring | gsub("\\s+"; " ")
+          | if length > $n then .[:($n - 1)] + "…" else . end;
+        def fallback_next($invalidity; $id):
+          if $invalidity.kind == "malformed_structured_home" then
+            "Repair malformed structured home snapshot for " + $id
+          elif $invalidity.kind == "missing_backlog" or $invalidity.kind == "unstructured_current" then
+            "Repair the structured backlog for " + $id
+          elif $invalidity.kind == "orphan_in_flight" then
+            "Restore child metadata for " + (($invalidity.ids // []) | join(", "))
+          elif $invalidity.kind == "unowned_current" then
+            "Reconcile unowned child state for " + (($invalidity.ids // []) | join(", "))
+          elif $invalidity.kind == "terminal_in_flight" then
+            "Move terminal in-flight items to Done or relaunch " + (($invalidity.ids // []) | join(", "))
+          elif $invalidity.kind == "child_current_unavailable" then
+            "Restore current child state for " + (($invalidity.ids // []) | join(", "))
+          else "Restore readable structured state for " + $id end;
+        def fallback_advance($invalidity; $id):
+          if $invalidity.kind == "malformed_structured_home" then
+            "When " + $id + " emits a schema-valid bounded snapshot"
+          elif $invalidity.kind == "missing_backlog" or $invalidity.kind == "unstructured_current" then
+            "When a valid structured backlog is available for " + $id
+          elif $invalidity.kind == "orphan_in_flight" then
+            "When child metadata is available for " + (($invalidity.ids // []) | join(", "))
+          elif $invalidity.kind == "unowned_current" then
+            "When " + (($invalidity.ids // []) | join(", ")) + " are owned by the backlog or retired"
+          elif $invalidity.kind == "terminal_in_flight" then
+            "When backlog and terminal child state agree for " + (($invalidity.ids // []) | join(", "))
+          elif $invalidity.kind == "child_current_unavailable" then
+            "When current child state is available for " + (($invalidity.ids // []) | join(", "))
+          else "When the registered home is readable for " + $id end;
         {id:$id,home:($home | if . == "" then null else . end),host:($host | if . == "" then null else . end),remote:$remote,registered:$registered,
          current:{state:"unknown",reason:$reason},invalidity:$fallback_invalidity,
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
-         charted_next:{context:$reason,
-           context_truncated:false,
-           next_action:("Restore readable structured state for " + $id),
-           next_action_truncated:false,
-           advance_when:("When the registered home is readable for " + $id),
-           advance_when_truncated:false},
+         charted_next:($reason as $context
+           | fallback_next($fallback_invalidity; $id) as $next
+           | fallback_advance($fallback_invalidity; $id) as $advance
+           | {context:($context | bounded(800)),
+              context_truncated:(($context | length) > 800),
+              context_backlog_truncated:false,
+              context_byte_truncated:false,
+              context_character_truncated:false,
+              context_report_count_omitted:false,
+              context_projection_truncated:(($context | length) > 800),
+              hold_reason_truncated:false,
+              next_action:($next | bounded(320)),
+              next_action_truncated:(($next | length) > 320),
+              advance_when:($advance | bounded(320)),
+              advance_when_truncated:(($advance | length) > 320),
+              caveat:(("Structured home state unavailable (" + ($fallback_invalidity.kind // "unknown") + "): " + $reason) | bounded(320))}),
          active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}')

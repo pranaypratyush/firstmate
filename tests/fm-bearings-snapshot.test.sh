@@ -816,7 +816,11 @@ test_registry_unavailability_and_bounds_are_explicit() {
   ' >/dev/null || fail "unavailable registry produced false unregistered provenance: $canonical"
   printf '%s' "$json" | jq -e '
     (.secondmates | any(.[]; .id == "(registry)" and .state == "unknown"
-      and .provenance == "registered-table" and .freshness == "unavailable"))
+      and .provenance == "registered-table" and .freshness == "unavailable"
+      and (.context | length) > 0
+      and (.next_action | length) > 0
+      and (.advance_when | length) > 0
+      and (.caveat | contains("Registered secondmate table unavailable"))))
       and (.omitted | any(.surface | contains("secondmate registry unavailable")))
   ' >/dev/null || fail "unreadable registry disappeared from bearings: $json"
   home=$(make_home registry-bounds)
@@ -2264,6 +2268,103 @@ SH
   pass "malformed nested cross-home fields fall back without jq abort"
 }
 
+test_hostile_remote_charted_capsule_is_bounded_and_disclosed() {
+  local home fakebin sshbin canonical json
+  home=$(make_home hostile-remote-charted)
+  printf '%s\n' '- hostile - fixture (host: hostile-host; root: /remote/root; home: /remote/hostile; scope: fixture; projects: sample; added 2026-07-11)' > "$home/data/secondmates.md"
+  fakebin=$(make_fakebin "$home")
+  sshbin="$fakebin/fake-hostile-ssh"
+  cat > "$sshbin" <<'SH'
+#!/usr/bin/env bash
+long=$(printf '%01200d' 0 | tr 0 x)
+jq -n --arg long "$long" '{
+  schema:"fm-secondmate-home-summary.v1",generated:"2026-07-11T18:00:00Z",home:"/remote/hostile",
+  valid:false,reason:"hostile current state",invalidity:{kind:"child_current_unavailable",ids:["hostile-child"]},state:"unknown",
+  charted_next:{context:$long,context_truncated:false,context_backlog_truncated:false,context_byte_truncated:false,
+    context_character_truncated:false,context_report_count_omitted:false,context_projection_truncated:false,
+    hold_reason_truncated:false,next_action:$long,next_action_truncated:false,
+    advance_when:$long,advance_when_truncated:false,caveat:null},
+  active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],
+  counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[]}'
+SH
+  chmod +x "$sshbin"
+  canonical=$(PATH="$fakebin:$PATH" FM_SSH_BIN="$sshbin" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "hostile remote summary aborted the canonical snapshot"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "hostile")
+    | .current.state == "unknown"
+      and .invalidity.kind == "malformed_structured_home"
+      and .provenance.selected == "unknown"
+      and (.charted_next.context | length) <= 800
+      and (.charted_next.next_action | length) <= 320
+      and (.charted_next.advance_when | length) <= 320
+      and (.charted_next.next_action | contains("Repair malformed structured home snapshot"))
+      and (.charted_next.advance_when | contains("schema-valid bounded snapshot"))
+      and (.charted_next.caveat | length) > 0
+      and (.charted_next.context_truncated | type) == "boolean"
+      and (.charted_next.context_backlog_truncated | type) == "boolean"
+      and (.charted_next.context_byte_truncated | type) == "boolean"
+      and (.charted_next.context_character_truncated | type) == "boolean"
+      and (.charted_next.context_report_count_omitted | type) == "boolean"
+      and (.charted_next.context_projection_truncated | type) == "boolean"
+      and (.charted_next.hold_reason_truncated | type) == "boolean"
+  ' >/dev/null || fail "hostile remote capsule did not become a complete bounded malformed fallback: $canonical"
+  json=$(FM_SSH_BIN="$sshbin" run "$home" "$fakebin" --json) \
+    || fail "hostile remote summary aborted Bearings"
+  printf '%s' "$json" | jq -e '
+    .secondmates[] | select(.id == "hostile")
+    | .state == "unknown"
+      and (.context | length) <= 800
+      and (.next_action | length) <= 320
+      and (.advance_when | length) <= 320
+      and (.caveat | contains("malformed"))
+  ' >/dev/null || fail "Bearings exposed an unbounded or caveat-free hostile remote capsule: $json"
+  pass "hostile remote Charted Next values fall back to a bounded disclosed capsule"
+}
+
+test_remote_semantic_schema_rejects_invalid_states_and_empty_capsules() {
+  local home fakebin sshbin json
+  home=$(make_home remote-semantic-schema)
+  cat > "$home/data/secondmates.md" <<'EOF'
+- bad-state - fixture (host: bad-state-host; root: /remote/root; home: /remote/bad-state; scope: fixture; projects: sample; added 2026-07-11)
+- empty-unknown - fixture (host: empty-unknown-host; root: /remote/root; home: /remote/empty-unknown; scope: fixture; projects: sample; added 2026-07-11)
+- empty-held - fixture (host: empty-held-host; root: /remote/root; home: /remote/empty-held; scope: fixture; projects: sample; added 2026-07-11)
+- bad-nested - fixture (host: bad-nested-host; root: /remote/root; home: /remote/bad-nested; scope: fixture; projects: sample; added 2026-07-11)
+EOF
+  fakebin=$(make_fakebin "$home")
+  sshbin="$fakebin/fake-semantic-ssh"
+  cat > "$sshbin" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *bad-state-host*) home=/remote/bad-state; state=dancing; valid=true; charted=null; active='[]' ;;
+  *empty-unknown-host*) home=/remote/empty-unknown; state=unknown; valid=false; charted='{"context":"","context_truncated":false,"context_backlog_truncated":false,"context_byte_truncated":false,"context_character_truncated":false,"context_report_count_omitted":false,"context_projection_truncated":false,"hold_reason_truncated":false,"next_action":"","next_action_truncated":false,"advance_when":"","advance_when_truncated":false,"caveat":null}'; active='[]' ;;
+  *empty-held-host*) home=/remote/empty-held; state=externally_held; valid=true; charted='{"context":"","context_truncated":false,"context_backlog_truncated":false,"context_byte_truncated":false,"context_character_truncated":false,"context_report_count_omitted":false,"context_projection_truncated":false,"hold_reason_truncated":false,"next_action":"","next_action_truncated":false,"advance_when":"","advance_when_truncated":false,"caveat":null}'; active='[]' ;;
+  *) home=/remote/bad-nested; state=active_child_work; valid=true; charted=null; active='[{"id":"","kind":"ship","state":"dancing","source":"pane","objective":"","doing":"","next_action":"","next_action_truncated":false,"milestone":"","context":null,"context_backlog_truncated":false,"context_byte_truncated":false,"context_character_truncated":false,"context_report_count_omitted":false,"context_projection_truncated":false}]' ;;
+esac
+jq -n --arg home "$home" --arg state "$state" --argjson valid "$valid" --argjson charted "$charted" --argjson active "$active" '{
+  schema:"fm-secondmate-home-summary.v1",generated:"2026-07-11T18:00:00Z",home:$home,
+  valid:$valid,reason:(if $valid then null else "invalid child state" end),invalidity:(if $valid then {kind:null,ids:[]} else {kind:"child_current_unavailable",ids:["child"]} end),
+  state:$state,charted_next:$charted,active_children:$active,decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],
+  counts:{active_children:($active|length),decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[]}'
+SH
+  chmod +x "$sshbin"
+  json=$(FM_SSH_BIN="$sshbin" run "$home" "$fakebin" --json) \
+    || fail "semantically invalid remote summaries aborted Bearings"
+  printf '%s' "$json" | jq -e '
+    [.secondmates[] | select(.id == "bad-state" or .id == "empty-unknown" or .id == "empty-held" or .id == "bad-nested")]
+    | length == 4
+      and all(.[]; .state == "unknown")
+      and all(.[]; .provenance == "unknown")
+      and all(.[]; .reason | contains("malformed"))
+      and all(.[]; (.context | length) > 0)
+      and all(.[]; (.next_action | length) > 0)
+      and all(.[]; (.advance_when | length) > 0)
+      and all(.[]; (.caveat | length) > 0)
+  ' >/dev/null || fail "semantic remote schema violations did not fall back completely: $json"
+  pass "remote state enums, complete capsules, and nested semantics fail closed"
+}
+
 test_help_names_every_operator_facing_bound() {
   local help name
   help=$("$ROOT/bin/fm-bearings-snapshot.sh" --help)
@@ -2345,6 +2446,8 @@ test_salvage_dispositions_and_unknown_integrator_milestone_surface
 test_landed_discloses_byte_character_and_projection_truncation
 test_report_count_and_decision_gate_projection_truncation_are_disclosed
 test_malformed_nested_cross_home_fields_fall_back_without_jq_abort
+test_hostile_remote_charted_capsule_is_bounded_and_disclosed
+test_remote_semantic_schema_rejects_invalid_states_and_empty_capsules
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface

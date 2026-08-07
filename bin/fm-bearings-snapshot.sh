@@ -345,6 +345,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson candidate_prs "$CANDIDATE_PRS" '
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def bounded($n): if . == null then null else
+    (tostring | gsub("\\s+"; " ")
+     | if length > $n then .[:($n - 1)] + "…" else . end) end;
   def report_context($source; $id):
     ([ $source.scout_reports[]? | select(.id == $id) | .summary_excerpt // empty ][0]) // null;
   def report_byte_truncated($source; $id):
@@ -526,16 +529,32 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                next_action:($next | trunc(320)),next_action_truncated:(($next | length) > 320),
                advance_when:($advance | trunc(320)),advance_when_truncated:(($advance | length) > 320),
                caveat:(.current.reason // "Current home state unavailable")}
-            else null end)} ]) as $secondmate_views
+            else null end)}
+       | .bearings_charted_next |=
+           (if . == null then null
+            else .context as $context
+            | .next_action as $next
+            | .advance_when as $advance
+            | .context = ($context | bounded(800))
+            | .context_truncated = ((.context_truncated // false) or (($context | length) > 800))
+            | .next_action = ($next | bounded(320))
+            | .next_action_truncated = ((.next_action_truncated // false) or (($next | length) > 320))
+            | .advance_when = ($advance | bounded(320))
+            | .advance_when_truncated = ((.advance_when_truncated // false) or (($advance | length) > 320))
+            end) ]) as $secondmate_views
   | ([ if .secondmate_current.registry.available == false then
          {id:"(registry)",state:"unknown",objective:"Registered secondmate inventory",doing:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
           milestone:"",state_caveat:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
-          context:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
+          context:((.secondmate_current.registry.reason // "Registered secondmate table unavailable") | bounded(800)),
           context_truncated:false,
+          context_backlog_truncated:false,context_byte_truncated:false,
+          context_character_truncated:false,context_report_count_omitted:false,
+          context_projection_truncated:false,hold_reason_truncated:false,
           next_action:"Restore the registered secondmate inventory",
           next_action_truncated:false,
           advance_when:"When the registered secondmate inventory is readable",
-          advance_when_truncated:false,caveat:null,
+          advance_when_truncated:false,
+          caveat:(("Registered secondmate table unavailable: " + (.secondmate_current.registry.reason // "reason not recorded")) | bounded(320)),
           provenance:(.secondmate_current.registry.provenance // "registered-table"),
           freshness:(.secondmate_current.registry.freshness.status // "unavailable"),
           age_seconds:null,contradiction:false,reason:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),owner:"(main)"}
@@ -552,8 +571,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                   elif .bearings_state == "no_active_work" then "No active child work"
                   else (.current.reason // "Current home state unavailable") end) | trunc(120)),
           milestone:([.endpoints[]? | .milestone // empty | select(. != "")] | join("; ") | trunc(240)),
-          state_caveat:(if .bearings_state == "unknown" then (.current.reason // "Current home state unavailable") else null end),
-          context:(.bearings_charted_next.context // null),
+          state_caveat:(if .bearings_state == "unknown" then ((.current.reason // "Current home state unavailable") | bounded(180)) else null end),
+          context:((.bearings_charted_next.context // null) | bounded(800)),
           context_truncated:(.bearings_charted_next.context_truncated // false),
           context_backlog_truncated:(.bearings_charted_next.context_backlog_truncated // false),
           context_byte_truncated:(.bearings_charted_next.context_byte_truncated // false),
@@ -561,9 +580,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           context_report_count_omitted:(.bearings_charted_next.context_report_count_omitted // false),
           context_projection_truncated:(.bearings_charted_next.context_projection_truncated // false),
           hold_reason_truncated:(.bearings_charted_next.hold_reason_truncated // false),
-          next_action:(.bearings_charted_next.next_action // null),
+          next_action:((.bearings_charted_next.next_action // null) | bounded(320)),
           next_action_truncated:(.bearings_charted_next.next_action_truncated // false),
-          advance_when:(.bearings_charted_next.advance_when // null),
+          advance_when:((.bearings_charted_next.advance_when // null) | bounded(320)),
           advance_when_truncated:(.bearings_charted_next.advance_when_truncated // false),
           caveat:([if .bearings_state == "unknown" then (.current.reason // "Current home state unavailable")
                    elif .bearings_state == "externally_held" then "Structured child work is externally held" else empty end,
@@ -576,7 +595,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                    if (.bearings_charted_next.context_truncated // false) then "secondmate context projection limit reached" else empty end,
                    if (.bearings_charted_next.next_action_truncated // false) then "secondmate next-action projection limit reached" else empty end,
                    if (.bearings_charted_next.advance_when_truncated // false) then "secondmate gate-condition projection limit reached" else empty end]
-                  | unique | if length == 0 then null else join("; ") end),
+                  | unique | if length == 0 then null else (join("; ") | bounded(320)) end),
           provenance:.provenance.selected,freshness:.freshness.status,
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
           reason:(.current.reason // "-"),owner:.id} ]) as $secondmates_all
