@@ -87,14 +87,20 @@
 #   later send refusal retains aligned durable metadata and addendum state; if
 #   abort cleanup also fails, same-id retry verifies and retires only that exact
 #   pending endpoint before creating its replacement, avoiding a name collision.
-#   Herdr publishes state/<id>.adopted-endpoint before creation, advances its
-#   token-bound transaction only through creating -> endpoint -> agent, and
+#   Herdr publishes state/<id>.adopted-endpoint before creation, binds that
+#   transaction to the intake branch, HEAD, and immutable adopted-brief digest,
+#   and advances it only through creating -> endpoint -> launching -> agent. The
+#   launching phase is durable before the first launch byte reaches the pane, so
+#   retry from that phase waits for the exact agent or fails closed without ever
+#   resubmitting launch input. It
 #   publishes task metadata only after exact response-derived workspace, tab,
 #   pane, foreground CWD, and expected native agent identity are independently
-#   verified. A complete interrupted endpoint or agent resumes in place; a lost
-#   response, stale identity, or contradictory transaction fails closed without
-#   another pane. Herdr abort cleanup may close only the current attempt's exact
-#   complete no-agent pane, and normal teardown rechecks the same socket and agent.
+#   verified. A complete interrupted pre-launch endpoint or bound agent resumes
+#   in place; a lost response, stale identity, changed recovery input, or
+#   contradictory transaction fails closed without another pane. Herdr abort
+#   cleanup may close only the current attempt's exact complete no-agent pane and
+#   keeps the exact named-session lock through cleanup and focus restoration;
+#   normal teardown rechecks the same socket and agent.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -745,8 +751,12 @@ ADOPTED_HERDR_AGENT=
 ADOPTED_HERDR_EXPECTED_AGENT=
 ADOPTED_HERDR_JOURNAL=
 ADOPTED_HERDR_TOKEN=
+ADOPTED_HERDR_BRIEF_SHA256=
+ADOPTED_HERDR_BRIEF_BOUND=0
 ADOPTED_HERDR_RESUME=0
 ADOPTED_HERDR_LAUNCH_REQUIRED=1
+ADOPTED_HERDR_AGENT_WAIT_REQUIRED=1
+ADOPTED_HERDR_LAUNCH_SUBMITTED=0
 ADOPTED_HERDR_CLEANUP_SAFE=0
 ADOPTED_HERDR_META_COMPLETE=0
 ADOPTED_BRIEF_ABORT_CLEANUP=0
@@ -793,10 +803,6 @@ spawn_abort_cleanup() {
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
       "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
-  fi
-  if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
-    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
-    fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
@@ -852,6 +858,7 @@ spawn_abort_cleanup() {
         ADOPTED_CLAIM_REMOVE_ON_ABORT=1
       else
         adopted_endpoint_retired=0
+        ADOPTED_BRIEF_ABORT_CLEANUP=0
         echo "warning: retaining adopted herdr endpoint transaction after spawn refusal because exact no-agent cleanup was not proven" >&2
       fi
     fi
@@ -879,6 +886,10 @@ spawn_abort_cleanup() {
     else
       echo "warning: preserving the adopted-worktree claim for $ID because endpoint retirement was not proven" >&2
     fi
+  fi
+  if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+    fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
   fi
   if [ "$ADOPTED_BRIEF_ABORT_CLEANUP" = 1 ]; then
     ADOPTED_BRIEF_ABORT_CLEANUP=0
@@ -1682,7 +1693,7 @@ prepare_existing_worktree_adoption() {
   local meta meta_id claim claim_real own project branch prior_meta=0 claim_status live_claim recorded_backend
   local delivery_count endpoint_id_count server_id_count locator_count delivery endpoint_id server_id server_locator endpoint_target endpoint_session
   local herdr_session herdr_workspace herdr_tab herdr_pane herdr_socket herdr_parent herdr_agent
-  local home_real journal_state expected_agent
+  local home_real journal_state expected_agent current_brief_sha256
   local adopted_brief_tmp status_file_q expected_path_q expected_branch_q expected_head_q brief_path
   local claim_read_status claim_created=0 claim_absent=0 provisional_window_id provisional_status
 
@@ -2132,6 +2143,19 @@ prepare_existing_worktree_adoption() {
           echo "error: prior adopted herdr endpoint creation has no complete response-derived identity; refusing a duplicate launch" >&2
           return 1
         }
+        brief_path="$STATE/$ID.adopted-brief.md"
+        current_brief_sha256=$(fm_adopted_file_sha256 "$brief_path") || {
+          echo "error: existing adopted herdr transaction has no readable immutable adopted brief" >&2
+          return 1
+        }
+        [ "$FM_ADOPTED_ENDPOINT_BRANCH" = "$ADOPTED_WORKTREE_BRANCH" ] \
+          && [ "$FM_ADOPTED_ENDPOINT_HEAD" = "$ADOPTED_WORKTREE_HEAD" ] \
+          && [ "$FM_ADOPTED_ENDPOINT_BRIEF_SHA256" = "$current_brief_sha256" ] || {
+            echo "error: existing adopted herdr transaction does not match its original adopted branch, HEAD, or brief identity" >&2
+            return 1
+          }
+        ADOPTED_HERDR_BRIEF_SHA256=$FM_ADOPTED_ENDPOINT_BRIEF_SHA256
+        ADOPTED_HERDR_BRIEF_BOUND=1
         ADOPTED_HERDR_TOKEN=$FM_ADOPTED_ENDPOINT_TOKEN
         ADOPTED_HERDR_LAYOUT=$FM_ADOPTED_ENDPOINT_LAYOUT
         ADOPTED_HERDR_WORKSPACE_ID=$FM_ADOPTED_ENDPOINT_WORKSPACE_ID
@@ -2149,7 +2173,12 @@ prepare_existing_worktree_adoption() {
           no-agent:endpoint)
             ADOPTED_HERDR_RESUME=1
             ;;
-          live:endpoint)
+          no-agent:launching)
+            ADOPTED_HERDR_RESUME=1
+            ADOPTED_HERDR_LAUNCH_REQUIRED=0
+            ADOPTED_HERDR_LAUNCH_SUBMITTED=1
+            ;;
+          live:launching)
             [ "$FM_BACKEND_HERDR_ADOPT_AGENT" = "$expected_agent" ] || {
               echo "error: prior adopted herdr endpoint registered unexpected agent '$FM_BACKEND_HERDR_ADOPT_AGENT'" >&2
               return 1
@@ -2161,6 +2190,8 @@ prepare_existing_worktree_adoption() {
               "$ADOPTED_HERDR_PANE_ID" "$ADOPTED_HERDR_AGENT" || return 1
             ADOPTED_HERDR_RESUME=1
             ADOPTED_HERDR_LAUNCH_REQUIRED=0
+            ADOPTED_HERDR_AGENT_WAIT_REQUIRED=0
+            ADOPTED_HERDR_LAUNCH_SUBMITTED=1
             ;;
           live:agent)
             [ "$FM_ADOPTED_ENDPOINT_AGENT" = "$expected_agent" ] \
@@ -2171,6 +2202,8 @@ prepare_existing_worktree_adoption() {
             ADOPTED_HERDR_AGENT=$expected_agent
             ADOPTED_HERDR_RESUME=1
             ADOPTED_HERDR_LAUNCH_REQUIRED=0
+            ADOPTED_HERDR_AGENT_WAIT_REQUIRED=0
+            ADOPTED_HERDR_LAUNCH_SUBMITTED=1
             ;;
           *)
             echo "error: prior adopted herdr endpoint phase and live agent state are contradictory" >&2
@@ -2219,6 +2252,12 @@ prepare_existing_worktree_adoption() {
   expected_branch_q=$(shell_quote "$ADOPTED_WORKTREE_BRANCH")
   expected_head_q=$(shell_quote "$ADOPTED_WORKTREE_HEAD")
   brief_path="$STATE/$ID.adopted-brief.md"
+  if [ "$BACKEND" = herdr ] && [ "$ADOPTED_HERDR_BRIEF_BOUND" = 1 ]; then
+    BRIEF=$brief_path
+    BRIEF_REAL=$brief_path
+    verify_adopted_identity "adoption preflight"
+    return $?
+  fi
   if [ "$prior_meta" -eq 1 ] && { [ -e "$brief_path" ] || [ -L "$brief_path" ]; }; then
     [ -f "$brief_path" ] && [ ! -L "$brief_path" ] || {
       echo "error: existing adopted setup addendum for task $ID is not one regular file; recovery refused" >&2
@@ -2252,6 +2291,12 @@ prepare_existing_worktree_adoption() {
   chmod 0600 "$adopted_brief_tmp" || { rm -f -- "$adopted_brief_tmp"; return 1; }
   mv -f -- "$adopted_brief_tmp" "$brief_path" || return 1
   ADOPTED_BRIEF_ABORT_CLEANUP=1
+  if [ "$BACKEND" = herdr ]; then
+    ADOPTED_HERDR_BRIEF_SHA256=$(fm_adopted_file_sha256 "$brief_path") || {
+      echo "error: adopted herdr setup addendum could not be bound to an immutable digest" >&2
+      return 1
+    }
+  fi
   BRIEF=$brief_path
   BRIEF_REAL="$BRIEF"
   verify_adopted_identity "adoption preflight"
@@ -2368,7 +2413,9 @@ spawn_create_adopted_herdr_endpoint() {
     "$ADOPTED_HERDR_JOURNAL" "$ID" "$ADOPTED_HERDR_TOKEN" "$home_real" \
     "$ADOPTED_HERDR_SESSION" "$ADOPTED_HERDR_SOCKET_IDENTITY" \
     "$ADOPTED_HERDR_PARENT_WORKSPACE_ID" "$ADOPTED_HERDR_LAYOUT" \
-    "$ADOPTED_HERDR_WORKSPACE_ID" "$W" "$WT" || {
+    "$ADOPTED_HERDR_WORKSPACE_ID" "$W" "$WT" \
+    "$ADOPTED_WORKTREE_BRANCH" "$ADOPTED_WORKTREE_HEAD" \
+    "$ADOPTED_HERDR_BRIEF_SHA256" || {
       echo "error: adopted herdr endpoint transaction could not be published before creation" >&2
       return 1
     }
@@ -3405,6 +3452,16 @@ fi
 # the live agent or creating another pane.
 if [ "$EXISTING_WORKTREE_SET" -eq 0 ] || [ "$BACKEND" != herdr ] \
    || [ "$ADOPTED_HERDR_LAUNCH_REQUIRED" = 1 ]; then
+if [ "$EXISTING_WORKTREE_SET" -eq 1 ] && [ "$BACKEND" = herdr ]; then
+  fm_adopted_endpoint_journal_advance \
+    "$ADOPTED_HERDR_JOURNAL" "$ADOPTED_HERDR_TOKEN" launching \
+    "$ADOPTED_HERDR_WORKSPACE_ID" "$ADOPTED_HERDR_TAB_ID" \
+    "$ADOPTED_HERDR_PANE_ID" "" || {
+      echo "error: adopted herdr launch-submitted phase could not be committed before the first launch byte" >&2
+      exit 1
+    }
+  ADOPTED_HERDR_LAUNCH_SUBMITTED=1
+fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
@@ -3474,7 +3531,7 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
 fi
 
 if [ "$EXISTING_WORKTREE_SET" -eq 1 ] && [ "$BACKEND" = herdr ]; then
-  if [ "$ADOPTED_HERDR_LAUNCH_REQUIRED" = 1 ]; then
+  if [ "$ADOPTED_HERDR_AGENT_WAIT_REQUIRED" = 1 ]; then
     set +e
     fm_backend_herdr_wait_adopted_agent \
       "$ADOPTED_HERDR_SESSION" "$ADOPTED_HERDR_SOCKET_IDENTITY" \
@@ -3490,7 +3547,11 @@ if [ "$EXISTING_WORKTREE_SET" -eq 1 ] && [ "$BACKEND" = herdr ]; then
         exit 1
         ;;
       *)
-        echo "error: adopted herdr endpoint did not register the expected agent before the bounded publication deadline; exact no-agent abort cleanup will retire only a proven attempt endpoint, otherwise its transaction is retained for retry" >&2
+        if [ "$ADOPTED_HERDR_LAUNCH_SUBMITTED" = 1 ]; then
+          echo "error: adopted herdr launch was already submitted but the exact endpoint did not register the expected agent before the bounded publication deadline; retaining the transaction without resubmitting or guessing cleanup" >&2
+        else
+          echo "error: adopted herdr endpoint did not register the expected agent before the bounded publication deadline; exact no-agent abort cleanup will retire only a proven attempt endpoint, otherwise its transaction is retained for retry" >&2
+        fi
         exit 1
         ;;
     esac

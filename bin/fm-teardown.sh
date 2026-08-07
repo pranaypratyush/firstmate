@@ -63,7 +63,8 @@
 # task metadata cleanup, so deleting that home can never remove an inside worktree
 # or the common directory on which an outside worktree depends.
 # Adopted Herdr cleanup additionally requires one complete phase-agent endpoint
-# transaction that exactly matches metadata. Under the named-session lock it
+# transaction whose original branch, HEAD, and immutable adopted-brief digest
+# exactly match metadata and the retained brief. Under the named-session lock it
 # rechecks the recorded socket, workspace, tab, pane, label, foreground worktree,
 # and native agent before closing only that pane. A changed socket or agent,
 # contradictory journal, ambiguous presence, or unconfirmed close preserves every
@@ -683,6 +684,7 @@ load_adopted_tmux_endpoint_identity() {  # <meta>
 
 load_adopted_herdr_endpoint_identity() {  # <meta>
   local meta=$1 delivery socket parent agent session workspace tab pane home_real journal
+  local branch head brief_sha256
   fm_backend_source herdr || {
     echo "error: herdr endpoint validation is unavailable for adopted worktree metadata in $meta; preserving task state" >&2
     return 1
@@ -708,6 +710,9 @@ load_adopted_herdr_endpoint_identity() {  # <meta>
     echo "error: adopted herdr endpoint transaction for $ID is unreadable or ambiguous; preserving task state" >&2
     return 1
   }
+  branch=$(fm_backend_meta_exact_value "$meta" adopted_branch) || branch=
+  head=$(fm_backend_meta_exact_value "$meta" adopted_head) || head=
+  brief_sha256=$(fm_adopted_file_sha256 "$STATE/$ID.adopted-brief.md") || brief_sha256=
   home_real=$(cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
   [ "$FM_ADOPTED_ENDPOINT_TASK_ID" = "$ID" ] \
     && [ "$FM_ADOPTED_ENDPOINT_PHASE" = agent ] \
@@ -720,6 +725,12 @@ load_adopted_herdr_endpoint_identity() {  # <meta>
     && [ "$FM_ADOPTED_ENDPOINT_PANE_ID" = "$pane" ] \
     && [ "$FM_ADOPTED_ENDPOINT_TASK_LABEL" = "fm-$ID" ] \
     && [ "$FM_ADOPTED_ENDPOINT_WORKTREE" = "$(fm_meta_get "$meta" worktree)" ] \
+    && [ -n "$branch" ] \
+    && [ "$FM_ADOPTED_ENDPOINT_BRANCH" = "$branch" ] \
+    && [ -n "$head" ] \
+    && [ "$FM_ADOPTED_ENDPOINT_HEAD" = "$head" ] \
+    && [ -n "$brief_sha256" ] \
+    && [ "$FM_ADOPTED_ENDPOINT_BRIEF_SHA256" = "$brief_sha256" ] \
     && [ "$FM_ADOPTED_ENDPOINT_AGENT" = "$agent" ] || {
       echo "error: adopted herdr endpoint transaction for $ID contradicts task metadata; preserving task state" >&2
       return 1

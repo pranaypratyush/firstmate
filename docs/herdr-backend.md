@@ -82,9 +82,10 @@ While the home-wide adoption lock and named-session presentation lock are held, 
 A different `fm-<task>` claimant refuses by task id, while a renamed occupant, unreadable CWD, duplicate id, or contradictory inventory refuses as ambiguity.
 The exact pane already bound by this task's transaction is the only retry exclusion.
 
-Before asking Herdr to create anything, Firstmate atomically creates `state/<id>.adopted-endpoint` with a random attempt token and phase `creating`.
+Before asking Herdr to create anything, Firstmate atomically creates `state/<id>.adopted-endpoint` with a random attempt token, the intake branch and HEAD, the immutable adopted-brief digest, and phase `creating`.
 A flat endpoint is created only in the launcher's exact parent workspace, and a projected endpoint uses the existing presentation-space creator while retaining that exact parent as its non-authoritative visual anchor.
 Only a complete create response followed by independent workspace, tab, pane, label, topology, exact foreground-CWD, and absent-agent reads may advance the journal to `endpoint`.
+Immediately before the first launch byte, the journal advances to `launching`; this is the durable launch-submitted boundary even if interruption happens before Enter or before native agent registration.
 Only the expected native agent identity for the selected adoption-safe harness may advance it to `agent`.
 The forward-only journal never infers identity from labels and never skips or regresses a phase.
 
@@ -92,20 +93,24 @@ Task metadata remains unpublished until the journal is in `agent`, the exact age
 Herdr adoption records `adopted_herdr_socket_identity=`, `adopted_herdr_parent_workspace_id=`, `adopted_herdr_agent=`, and `adopted_delivery=complete` alongside the ordinary Herdr endpoint and adopted-worktree fields.
 The presentation journal remains visual correlation only and cannot replace any of those task or transaction fields.
 
-An interrupted retry with a complete `endpoint` phase resumes that exact agent-free pane, and a retry that finds the expected live agent advances or reuses the same identity without typing into it again.
-A `creating` phase with no complete response identity, stale or contradictory metadata, a missing journal, a changed agent, or an identity mismatch fails closed without creating another pane.
+An interrupted retry with a complete `endpoint` phase resumes that exact agent-free pane before launch submission.
+A retry from `launching` never resubmits exports, launch text, or Enter: it waits a bounded interval for the exact expected native agent, then either advances the same identity or retains the transaction and fails closed.
+A retry from `agent` reuses the exact live identity without typing into it again.
+A `creating` phase with no complete response identity, changed branch or HEAD, changed or missing adopted brief, stale or contradictory metadata, a missing journal, a changed agent, or another identity mismatch fails closed without publication, guessed cleanup, or another pane.
 Concurrent same-task attempts are serialized by the ordinary task spawn lock before either can create an endpoint.
 
 Abort cleanup may close only a complete response-derived pane from the current attempt while the journal still proves phase `endpoint` and native state `no-agent`.
 A partial response, live or changed agent, active target tab, changed socket, focus ambiguity, or failed exact close retains the transaction for inspection.
+Abort cleanup, its topology mutations, and focus restoration remain serialized under the same exact named-session presentation-order lock acquired for the attempt; only then may that lock be released.
 Successful spawn, refusal, retry, abort cleanup, and normal teardown all use the existing named-session focus snapshot and exact-tab restore contract.
 
-Normal teardown requires complete metadata and the matching phase-`agent` journal, rechecks the same named-session socket under the session lock, and closes only the exact recorded endpoint after verifying its label, topology, worktree CWD, and recorded native agent identity.
+Normal teardown requires complete metadata and the matching phase-`agent` journal, including the original branch, HEAD, and retained adopted-brief digest, rechecks the same named-session socket under the session lock, and closes only the exact recorded endpoint after verifying its label, topology, worktree CWD, and recorded native agent identity.
 A structured absent pane can retire durable task state only when the named-session socket identity is unchanged.
 The adopted worktree is never moved, detached, reset, cleaned, returned, deleted, or scanned for unrelated processes, and its normal report, landed-work, Git-lock, and secondmate-descendant safety gates remain unchanged.
 
 `tests/fm-spawn-existing-worktree.test.sh` covers the deterministic transaction, refusal, retry, presentation, secondmate-home, concurrency, worktree-preservation, and teardown matrix.
-`tests/fm-spawn-existing-worktree-herdr-e2e.test.sh` drives a real named-session lab from an actual launcher pane, verifies the native worker CWD and recorded endpoint identity, preserves the captain control tab, and tears down under the default-fleet tripwire.
+`tests/fm-spawn-existing-worktree-herdr-e2e.test.sh` resolves the lab helper from the checked-out branch, drives a real named-session lab from an actual launcher pane, verifies the native worker CWD and recorded endpoint identity, preserves the captain control tab, and tears down under the default-fleet tripwire.
+Its helper or tool absence is a required-gate skip that the authoritative test runner converts to failure in the required Herdr lane.
 
 ## Presentation spaces
 

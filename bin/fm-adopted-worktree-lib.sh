@@ -40,6 +40,21 @@
 # this journal is the interruption-safe bridge between endpoint creation and
 # that publication.
 
+fm_adopted_file_sha256() {  # <regular-file>
+  local file=$1 digest
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(shasum -a 256 "$file" 2>/dev/null | awk '{print $1}') || return 1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(sha256sum "$file" 2>/dev/null | awk '{print $1}') || return 1
+  else
+    return 1
+  fi
+  [ "${#digest}" -eq 64 ] || return 1
+  case "$digest" in *[!A-Fa-f0-9]*) return 1 ;; esac
+  printf '%s\n' "$digest"
+}
+
 fm_adopted_worktree_snapshot() {  # <worktree-path> <project-root>
   local worktree=$1 project=$2 worktree_real project_real worktree_top project_top
   local worktree_common project_common project_git_dir inventory item listed listed_real registered=0
@@ -430,6 +445,9 @@ fm_adopted_endpoint_journal_load() {  # <journal>
   FM_ADOPTED_ENDPOINT_PANE_ID=""
   FM_ADOPTED_ENDPOINT_TASK_LABEL=""
   FM_ADOPTED_ENDPOINT_WORKTREE=""
+  FM_ADOPTED_ENDPOINT_BRANCH=""
+  FM_ADOPTED_ENDPOINT_HEAD=""
+  FM_ADOPTED_ENDPOINT_BRIEF_SHA256=""
   FM_ADOPTED_ENDPOINT_AGENT=""
   [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
@@ -457,12 +475,15 @@ fm_adopted_endpoint_journal_load() {  # <journal>
       pane_id) FM_ADOPTED_ENDPOINT_PANE_ID=$value ;;
       task_label) FM_ADOPTED_ENDPOINT_TASK_LABEL=$value ;;
       worktree) FM_ADOPTED_ENDPOINT_WORKTREE=$value ;;
+      adopted_branch) FM_ADOPTED_ENDPOINT_BRANCH=$value ;;
+      adopted_head) FM_ADOPTED_ENDPOINT_HEAD=$value ;;
+      brief_sha256) FM_ADOPTED_ENDPOINT_BRIEF_SHA256=$value ;;
       agent) FM_ADOPTED_ENDPOINT_AGENT=$value ;;
       *) return 1 ;;
     esac
   done < "$journal"
-  [ "$count" -eq 16 ] \
-    && [ "$FM_ADOPTED_ENDPOINT_VERSION" = 1 ] \
+  [ "$count" -eq 19 ] \
+    && [ "$FM_ADOPTED_ENDPOINT_VERSION" = 2 ] \
     && [ "$FM_ADOPTED_ENDPOINT_BACKEND" = herdr ] \
     && [ -n "$FM_ADOPTED_ENDPOINT_TASK_ID" ] \
     && [ -n "$FM_ADOPTED_ENDPOINT_TOKEN" ] \
@@ -471,8 +492,11 @@ fm_adopted_endpoint_journal_load() {  # <journal>
     && [ -n "$FM_ADOPTED_ENDPOINT_SOCKET" ] \
     && [ -n "$FM_ADOPTED_ENDPOINT_PARENT_WORKSPACE_ID" ] \
     && [ -n "$FM_ADOPTED_ENDPOINT_TASK_LABEL" ] \
-    && [ -n "$FM_ADOPTED_ENDPOINT_WORKTREE" ] || return 1
-  case "$FM_ADOPTED_ENDPOINT_PHASE" in creating|endpoint|agent) ;; *) return 1 ;; esac
+    && [ -n "$FM_ADOPTED_ENDPOINT_WORKTREE" ] \
+    && [ -n "$FM_ADOPTED_ENDPOINT_BRANCH" ] \
+    && [ -n "$FM_ADOPTED_ENDPOINT_HEAD" ] \
+    && [ -n "$FM_ADOPTED_ENDPOINT_BRIEF_SHA256" ] || return 1
+  case "$FM_ADOPTED_ENDPOINT_PHASE" in creating|endpoint|launching|agent) ;; *) return 1 ;; esac
   case "$FM_ADOPTED_ENDPOINT_LAYOUT" in flat|projected) ;; *) return 1 ;; esac
   [ "${#FM_ADOPTED_ENDPOINT_TOKEN}" -eq 22 ] || return 1
   case "$FM_ADOPTED_ENDPOINT_TOKEN" in *[!A-Za-z0-9_-]*) return 1 ;; esac
@@ -483,18 +507,23 @@ fm_adopted_endpoint_journal_load() {  # <journal>
     "$FM_ADOPTED_ENDPOINT_TASK_ID" \
     "$FM_ADOPTED_ENDPOINT_SESSION" \
     "$FM_ADOPTED_ENDPOINT_PARENT_WORKSPACE_ID" \
+    "$FM_ADOPTED_ENDPOINT_BRANCH" \
     "$FM_ADOPTED_ENDPOINT_WORKSPACE_ID" \
     "$FM_ADOPTED_ENDPOINT_TAB_ID" \
     "$FM_ADOPTED_ENDPOINT_PANE_ID" \
     "$FM_ADOPTED_ENDPOINT_AGENT"; do
     case "$value" in *[[:space:]]*) return 1 ;; esac
   done
+  case "${#FM_ADOPTED_ENDPOINT_HEAD}" in 40|64) ;; *) return 1 ;; esac
+  case "$FM_ADOPTED_ENDPOINT_HEAD" in *[!A-Fa-f0-9]*) return 1 ;; esac
+  [ "${#FM_ADOPTED_ENDPOINT_BRIEF_SHA256}" -eq 64 ] || return 1
+  case "$FM_ADOPTED_ENDPOINT_BRIEF_SHA256" in *[!A-Fa-f0-9]*) return 1 ;; esac
   case "$FM_ADOPTED_ENDPOINT_PHASE" in
     creating)
       [ -z "$FM_ADOPTED_ENDPOINT_TAB_ID$FM_ADOPTED_ENDPOINT_PANE_ID$FM_ADOPTED_ENDPOINT_AGENT" ] || return 1
       [ "$FM_ADOPTED_ENDPOINT_LAYOUT" != flat ] || [ -n "$FM_ADOPTED_ENDPOINT_WORKSPACE_ID" ] || return 1
       ;;
-    endpoint)
+    endpoint|launching)
       [ -n "$FM_ADOPTED_ENDPOINT_WORKSPACE_ID" ] \
         && [ -n "$FM_ADOPTED_ENDPOINT_TAB_ID" ] \
         && [ -n "$FM_ADOPTED_ENDPOINT_PANE_ID" ] \
@@ -510,11 +539,12 @@ fm_adopted_endpoint_journal_load() {  # <journal>
   esac
 }
 
-fm_adopted_endpoint_journal_write_file() {  # <path> <task> <token> <phase> <home> <session> <socket> <parent> <layout> <workspace> <tab> <pane> <label> <worktree> <agent>
+fm_adopted_endpoint_journal_write_file() {  # <path> <task> <token> <phase> <home> <session> <socket> <parent> <layout> <workspace> <tab> <pane> <label> <worktree> <branch> <head> <brief-sha256> <agent>
   local path=$1 task=$2 token=$3 phase=$4 home=$5 session=$6 socket=$7 parent=$8
-  local layout=$9 workspace=${10} tab=${11} pane=${12} label=${13} worktree=${14} agent=${15}
+  local layout=$9 workspace=${10} tab=${11} pane=${12} label=${13} worktree=${14}
+  local branch=${15} head=${16} brief_sha256=${17} agent=${18}
   {
-    printf 'version=1\n'
+    printf 'version=2\n'
     printf 'backend=herdr\n'
     printf 'task_id=%s\n' "$task"
     printf 'token=%s\n' "$token"
@@ -529,18 +559,22 @@ fm_adopted_endpoint_journal_write_file() {  # <path> <task> <token> <phase> <hom
     printf 'pane_id=%s\n' "$pane"
     printf 'task_label=%s\n' "$label"
     printf 'worktree=%s\n' "$worktree"
+    printf 'adopted_branch=%s\n' "$branch"
+    printf 'adopted_head=%s\n' "$head"
+    printf 'brief_sha256=%s\n' "$brief_sha256"
     printf 'agent=%s\n' "$agent"
   } > "$path"
   chmod 0600 "$path"
 }
 
-fm_adopted_endpoint_journal_create() {  # <journal> <task> <token> <home> <session> <socket> <parent> <layout> <workspace> <label> <worktree>
+fm_adopted_endpoint_journal_create() {  # <journal> <task> <token> <home> <session> <socket> <parent> <layout> <workspace> <label> <worktree> <branch> <head> <brief-sha256>
   local journal=$1 task=$2 token=$3 home=$4 session=$5 socket=$6 parent=$7 layout=$8
-  local workspace=$9 label=${10} worktree=${11} tmp
+  local workspace=$9 label=${10} worktree=${11} branch=${12} head=${13} brief_sha256=${14} tmp
   tmp=$(umask 077; mktemp "$(dirname "$journal")/.${task}.adopted-endpoint.XXXXXXXX") || return 1
   fm_adopted_endpoint_journal_write_file \
     "$tmp" "$task" "$token" creating "$home" "$session" "$socket" "$parent" \
-    "$layout" "$workspace" "" "" "$label" "$worktree" "" || {
+    "$layout" "$workspace" "" "" "$label" "$worktree" \
+    "$branch" "$head" "$brief_sha256" "" || {
       rm -f -- "$tmp"
       return 1
     }
@@ -561,7 +595,7 @@ fm_adopted_endpoint_journal_advance() {  # <journal> <token> <phase> <workspace>
   [ "$FM_ADOPTED_ENDPOINT_TOKEN" = "$token" ] || return 1
   current=$FM_ADOPTED_ENDPOINT_PHASE
   case "$current:$phase" in
-    creating:endpoint|endpoint:agent) ;;
+    creating:endpoint|endpoint:launching|launching:agent) ;;
     *) return 1 ;;
   esac
   tmp=$(umask 077; mktemp "$(dirname "$journal")/.${FM_ADOPTED_ENDPOINT_TASK_ID}.adopted-endpoint.XXXXXXXX") || return 1
@@ -570,7 +604,9 @@ fm_adopted_endpoint_journal_advance() {  # <journal> <token> <phase> <workspace>
     "$FM_ADOPTED_ENDPOINT_HOME" "$FM_ADOPTED_ENDPOINT_SESSION" \
     "$FM_ADOPTED_ENDPOINT_SOCKET" "$FM_ADOPTED_ENDPOINT_PARENT_WORKSPACE_ID" \
     "$FM_ADOPTED_ENDPOINT_LAYOUT" "$workspace" "$tab" "$pane" \
-    "$FM_ADOPTED_ENDPOINT_TASK_LABEL" "$FM_ADOPTED_ENDPOINT_WORKTREE" "$agent" || {
+    "$FM_ADOPTED_ENDPOINT_TASK_LABEL" "$FM_ADOPTED_ENDPOINT_WORKTREE" \
+    "$FM_ADOPTED_ENDPOINT_BRANCH" "$FM_ADOPTED_ENDPOINT_HEAD" \
+    "$FM_ADOPTED_ENDPOINT_BRIEF_SHA256" "$agent" || {
       rm -f -- "$tmp"
       return 1
     }

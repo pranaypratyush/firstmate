@@ -10,6 +10,7 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-existing-worktree)
 REAL_GIT=$(command -v git)
+REAL_MV=$(command -v mv)
 fm_git_identity fmtest fmtest@example.invalid
 # shellcheck source=bin/fm-adopted-worktree-lib.sh
 . "$ROOT/bin/fm-adopted-worktree-lib.sh"
@@ -271,10 +272,18 @@ case "$cmd $sub" in
   "pane send-text")
     pane=${3:-}; text=${4:-}
     jq_state --arg p "$pane" --arg text "$text" '.pending[$p]=$text' | save_state
+    if [ "${FM_ADOPT_INTERRUPT_AT:-}" = post-byte ]; then
+      kill -KILL "$PPID"
+      exit 137
+    fi
     ;;
   "pane send-keys")
     pane=${3:-}; key=${4:-}
     if [ "$key" = enter ]; then
+      if [ "${FM_ADOPT_INTERRUPT_AT:-}" = post-enter ]; then
+        kill -KILL "$PPID"
+        exit 137
+      fi
       pending=$(jq_state -r --arg p "$pane" '.pending[$p] // empty')
       case "$pending" in
         codex\ *)
@@ -293,6 +302,28 @@ case "$cmd $sub" in
     ;;
   "pane close")
     pane=${3:-}
+    if [ -n "${FM_ADOPT_HERDR_LOCK_PROBE_PATH:-}" ]; then
+      FM_STATE_OVERRIDE="${FM_ADOPT_HERDR_LOCK_PROBE_STATE:?}" \
+        bash -c '
+          . "$1"
+          if fm_lock_try_acquire "$2"; then
+            printf "%s\n" acquired
+            fm_lock_release "$2"
+          else
+            printf "%s\n" blocked
+          fi
+        ' _ "$FM_ADOPT_HERDR_LOCK_PROBE_LIB" "$FM_ADOPT_HERDR_LOCK_PROBE_PATH" \
+        >> "$FM_ADOPT_HERDR_LOCK_PROBE_LOG"
+    fi
+    if [ -n "${FM_ADOPT_HERDR_CLOSE_GATE:-}" ]; then
+      : > "$FM_ADOPT_HERDR_CLOSE_GATE.started"
+      tries=0
+      while [ ! -e "$FM_ADOPT_HERDR_CLOSE_GATE.release" ] && [ "$tries" -lt 500 ]; do
+        sleep 0.01
+        tries=$((tries + 1))
+      done
+      [ -e "$FM_ADOPT_HERDR_CLOSE_GATE.release" ] || exit 1
+    fi
     jq_state --arg p "$pane" \
       '.tabs |= [.[] | select(.pane_id != $p)]
        | .tabs as $tabs
@@ -312,6 +343,27 @@ case "$cmd $sub" in
 esac
 exit 0
 SH
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+source_path=
+dest_path=
+for arg in "$@"; do
+  case "$arg" in -*) ;; *) source_path=$dest_path; dest_path=$arg ;; esac
+done
+if [ -n "$source_path" ] && [ -f "$source_path" ] \
+   && [ "$(sed -n 's/^phase=//p' "$source_path")" = launching ]; then
+  if [ "${FM_ADOPT_MV_FAIL_LAUNCHING:-0}" = 1 ]; then
+    exit 98
+  fi
+  if [ "${FM_ADOPT_INTERRUPT_AT:-}" = pre-byte ]; then
+    "$FM_ADOPT_REAL_MV" "$@" || exit $?
+    kill -KILL "$BASHPID"
+    exit 137
+  fi
+fi
+exec "$FM_ADOPT_REAL_MV" "$@"
+SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -328,7 +380,7 @@ SH
 exit 0
 SH
   done
-  chmod +x "$fakebin/tmux" "$fakebin/herdr" "$fakebin/treehouse" "$fakebin/no-mistakes" \
+  chmod +x "$fakebin/tmux" "$fakebin/herdr" "$fakebin/mv" "$fakebin/treehouse" "$fakebin/no-mistakes" \
     "$fakebin/pi" "$fakebin/pi-signed" "$fakebin/muse"
   printf '%s\n' "$fakebin"
 }
@@ -396,6 +448,13 @@ run_spawn_command() {
     FM_ADOPT_BASE_PANE_PATH="${FM_ADOPT_BASE_PANE_PATH:-$PROJ}" \
     FM_ADOPT_GIT_COUNT="${FM_ADOPT_GIT_COUNT:-}" FM_ADOPT_GIT_MUTATE_AT="${FM_ADOPT_GIT_MUTATE_AT:-0}" \
     FM_ADOPT_MUTATE_WT="${FM_ADOPT_MUTATE_WT:-}" FM_ADOPT_REAL_GIT="$REAL_GIT" \
+    FM_ADOPT_REAL_MV="$REAL_MV" FM_ADOPT_INTERRUPT_AT="${FM_ADOPT_INTERRUPT_AT:-}" \
+    FM_ADOPT_MV_FAIL_LAUNCHING="${FM_ADOPT_MV_FAIL_LAUNCHING:-0}" \
+    FM_ADOPT_HERDR_CLOSE_GATE="${FM_ADOPT_HERDR_CLOSE_GATE:-}" \
+    FM_ADOPT_HERDR_LOCK_PROBE_PATH="${FM_ADOPT_HERDR_LOCK_PROBE_PATH:-}" \
+    FM_ADOPT_HERDR_LOCK_PROBE_LOG="${FM_ADOPT_HERDR_LOCK_PROBE_LOG:-}" \
+    FM_ADOPT_HERDR_LOCK_PROBE_STATE="${FM_ADOPT_HERDR_LOCK_PROBE_STATE:-}" \
+    FM_ADOPT_HERDR_LOCK_PROBE_LIB="$ROOT/bin/fm-wake-lib.sh" \
     PATH="$FAKEBIN:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -446,7 +505,9 @@ run_teardown_herdr() {
     FM_TEARDOWN_GUARD_DONE=1 HERDR_ENV=1 HERDR_PANE_ID=w1:p1 \
     HERDR_SESSION=fmtest HERDR_SOCKET_PATH="$HERDR_SOCKET" \
     FM_ADOPT_HERDR_STATE="$HERDR_STATE" FM_ADOPT_HERDR_LOG="$HERDR_LOG" \
-    FM_ADOPT_HERDR_SOCKET="${FM_ADOPT_HERDR_SOCKET:-$HERDR_SOCKET}" PATH="$FAKEBIN:$PATH" \
+    FM_ADOPT_HERDR_SOCKET="${FM_ADOPT_HERDR_SOCKET:-$HERDR_SOCKET}" \
+    FM_ADOPT_HERDR_CLOSE_GATE="${FM_ADOPT_HERDR_CLOSE_GATE:-}" \
+    FM_ADOPT_REAL_MV="$REAL_MV" PATH="$FAKEBIN:$PATH" \
     "$TEARDOWN" "$@" 2>&1
 }
 
@@ -553,16 +614,18 @@ test_herdr_adoption_publishes_verified_identity_and_preserves_worktree() {
 
 test_herdr_endpoint_journal_is_atomic_strict_and_forward_only() {
   local dir journal token=1234567890123456789012
+  local head=1111111111111111111111111111111111111111
+  local digest=2222222222222222222222222222222222222222222222222222222222222222
   dir="$TMP_ROOT/herdr-journal"; mkdir -p "$dir/home" "$dir/worktree"
   journal="$dir/task.adopted-endpoint"
   fm_adopted_endpoint_journal_create \
     "$journal" task-journal "$token" "$dir/home" fmtest "$dir/herdr.sock" \
-    w1 flat w1 fm-task-journal "$dir/worktree" \
+    w1 flat w1 fm-task-journal "$dir/worktree" recovered/task-journal "$head" "$digest" \
     || fail "valid Herdr endpoint journal create failed"
   assert_grep 'phase=creating' "$journal" "Herdr endpoint journal did not begin before creation"
   if fm_adopted_endpoint_journal_create \
     "$journal" task-journal other-token "$dir/home" fmtest "$dir/herdr.sock" \
-    w1 flat w1 fm-task-journal "$dir/worktree"; then
+    w1 flat w1 fm-task-journal "$dir/worktree" recovered/task-journal "$head" "$digest"; then
     fail "Herdr endpoint journal create overwrote an existing transaction"
   fi
   if fm_adopted_endpoint_journal_advance "$journal" "$token" agent w1 w1:t2 w1:p2 codex; then
@@ -573,6 +636,8 @@ test_herdr_endpoint_journal_is_atomic_strict_and_forward_only() {
   if fm_adopted_endpoint_journal_advance "$journal" wrong-token agent w1 w1:t2 w1:p2 codex; then
     fail "Herdr endpoint journal advanced under the wrong attempt token"
   fi
+  fm_adopted_endpoint_journal_advance "$journal" "$token" launching w1 w1:t2 w1:p2 "" \
+    || fail "Herdr endpoint journal did not commit launch submission before agent identity"
   fm_adopted_endpoint_journal_advance "$journal" "$token" agent w1 w1:t2 w1:p2 codex \
     || fail "Herdr endpoint journal did not commit agent identity"
   if fm_adopted_endpoint_journal_advance "$journal" "$token" endpoint w1 w1:t2 w1:p2 ""; then
@@ -675,7 +740,7 @@ test_herdr_exact_endpoint_resume_never_duplicates() {
     run_spawn_herdr "$id" ship "$WT"); status=$?
   expect_code 1 "$status" "interrupted Herdr launch fixture should fail before agent publication"
   assert_absent "$HOME_DIR/state/$id.meta" "interrupted Herdr launch published incomplete metadata"
-  assert_grep 'phase=endpoint' "$HOME_DIR/state/$id.adopted-endpoint" "interrupted Herdr launch lost its exact endpoint identity"
+  assert_grep 'phase=launching' "$HOME_DIR/state/$id.adopted-endpoint" "interrupted Herdr launch lost its durable launch-submitted identity"
   task_pane=$(sed -n 's/^pane_id=//p' "$HOME_DIR/state/$id.adopted-endpoint")
   [ -n "$task_pane" ] || fail "interrupted Herdr launch journal omitted the pane id"
   [ "$(jq --arg p "$task_pane" '[.tabs[] | select(.pane_id == $p)] | length' "$HERDR_STATE")" = 1 ] \
@@ -683,6 +748,8 @@ test_herdr_exact_endpoint_resume_never_duplicates() {
   creates=$(grep -c $'\x1ftab\x1fcreate' "$HERDR_LOG")
   jq '.focused_workspace="w1" | .focused_tab="w1:t1"' "$HERDR_STATE" > "$HERDR_STATE.tmp" \
     && mv "$HERDR_STATE.tmp" "$HERDR_STATE"
+  jq --arg p "$task_pane" '.agent_status[$p]="working" | .agent[$p]="codex" | del(.pending[$p])' \
+    "$HERDR_STATE" > "$HERDR_STATE.tmp" && mv "$HERDR_STATE.tmp" "$HERDR_STATE"
 
   out=$(run_spawn_herdr "$id" ship "$WT"); status=$?
   expect_code 0 "$status" "retry should resume the exact journal-bound Herdr endpoint"
@@ -693,6 +760,40 @@ test_herdr_exact_endpoint_resume_never_duplicates() {
   assert_grep 'phase=agent' "$HOME_DIR/state/$id.adopted-endpoint" "exact retry did not commit the agent identity"
   [ "$(jq -r '.focused_tab' "$HERDR_STATE")" = w1:t1 ] || fail "exact Herdr retry changed the captain's active tab"
   pass "an interrupted Herdr launch resumes its exact journal-bound endpoint without duplicate panes"
+}
+
+test_herdr_launch_interruptions_never_resubmit() {
+  local point id out status pane before_run before_text before_enter
+  local after_run after_text after_enter
+  for point in pre-byte post-byte post-enter; do
+    id="adopt-herdr-interrupt-${point}"
+    setup_case "herdr-interrupt-$point" "$id" ship
+    out="$CASE/first.out"
+    FM_ADOPT_INTERRUPT_AT="$point" run_spawn_herdr "$id" ship "$WT" > "$out" 2>&1
+    status=$?
+    [ "$status" -ne 0 ] || fail "$point interruption unexpectedly completed the adopted launch"
+    assert_absent "$HOME_DIR/state/$id.meta" "$point interruption published task metadata"
+    assert_grep 'phase=launching' "$HOME_DIR/state/$id.adopted-endpoint" "$point interruption was not durably marked launch-submitted before launch input"
+    pane=$(sed -n 's/^pane_id=//p' "$HOME_DIR/state/$id.adopted-endpoint")
+    [ -n "$pane" ] || fail "$point interruption lost the exact pane identity"
+    [ "$(jq --arg p "$pane" '[.tabs[] | select(.pane_id == $p)] | length' "$HERDR_STATE")" = 1 ] \
+      || fail "$point interruption lost the exact endpoint"
+    before_run=$(grep -c $'\x1fpane\x1frun' "$HERDR_LOG" || true)
+    before_text=$(grep -c $'\x1fpane\x1fsend-text' "$HERDR_LOG" || true)
+    before_enter=$(grep -c $'\x1fpane\x1fsend-keys' "$HERDR_LOG" || true)
+
+    out=$(run_spawn_herdr "$id" ship "$WT"); status=$?
+    expect_code 1 "$status" "$point interruption retry must fail closed while the exact agent is absent"
+    assert_contains "$out" 'launch was already submitted' "$point retry did not explain its no-resubmit wait"
+    after_run=$(grep -c $'\x1fpane\x1frun' "$HERDR_LOG" || true)
+    after_text=$(grep -c $'\x1fpane\x1fsend-text' "$HERDR_LOG" || true)
+    after_enter=$(grep -c $'\x1fpane\x1fsend-keys' "$HERDR_LOG" || true)
+    [ "$after_run:$after_text:$after_enter" = "$before_run:$before_text:$before_enter" ] \
+      || fail "$point retry resubmitted exports, launch bytes, or Enter"
+    assert_grep 'phase=launching' "$HOME_DIR/state/$id.adopted-endpoint" "$point retry regressed or discarded the durable launch-submitted phase"
+    assert_absent "$HOME_DIR/state/$id.meta" "$point retry published task metadata without the exact agent"
+  done
+  pass "pre-byte, post-byte, and post-Enter interruptions never resubmit a launch-submitted Herdr transaction"
 }
 
 test_herdr_stale_transaction_refuses_without_mutation() {
@@ -711,6 +812,88 @@ test_herdr_stale_transaction_refuses_without_mutation() {
   assert_present "$HOME_DIR/state/$id.meta" "stale Herdr transaction refusal erased durable metadata"
   [ "$(jq -r '.focused_tab' "$HERDR_STATE")" = w1:t1 ] || fail "stale Herdr transaction refusal changed focus"
   pass "stale Herdr metadata/transaction identity fails closed without endpoint or focus mutation"
+}
+
+test_herdr_agent_phase_recovery_refuses_identity_drift() {
+  local drift id out status pane creates closes
+  for drift in branch head brief; do
+    id="adopt-herdr-agent-drift-$drift"
+    setup_case "herdr-agent-drift-$drift" "$id" ship
+    out="$CASE/first.out"
+    run_spawn_herdr "$id" ship "$WT" > "$out" 2>&1
+    status=$?
+    expect_code 0 "$status" "$drift drift fixture could not establish the exact live agent phase"
+    assert_grep 'phase=agent' "$HOME_DIR/state/$id.adopted-endpoint" "$drift drift fixture did not persist exact agent identity"
+    rm -f -- "$HOME_DIR/state/$id.meta"
+    assert_absent "$HOME_DIR/state/$id.meta" "$drift drift fixture could not model interruption before metadata publication"
+    pane=$(sed -n 's/^pane_id=//p' "$HOME_DIR/state/$id.adopted-endpoint")
+    [ -n "$pane" ] || fail "$drift drift fixture lost the exact pane"
+    case "$drift" in
+      branch) git -C "$WT" checkout -q -b "drift/$id" ;;
+      head) git -C "$WT" commit -q --allow-empty -m drift-after-agent ;;
+      brief) printf '%s\n' 'drift after agent phase' >> "$HOME_DIR/state/$id.adopted-brief.md" ;;
+    esac
+    creates=$(grep -c $'\x1ftab\x1fcreate' "$HERDR_LOG" || true)
+    closes=$(grep -c $'\x1fpane\x1fclose' "$HERDR_LOG" || true)
+
+    out=$(run_spawn_herdr "$id" ship "$WT"); status=$?
+    expect_code 1 "$status" "$drift drift after agent phase must refuse recovery"
+    assert_contains "$out" 'original adopted branch, HEAD, or brief identity' "$drift drift refusal did not name the immutable launch identity"
+    assert_absent "$HOME_DIR/state/$id.meta" "$drift drift recovery published metadata for an agent launched under another identity"
+    [ "$(grep -c $'\x1ftab\x1fcreate' "$HERDR_LOG" || true)" -eq "$creates" ] \
+      || fail "$drift drift recovery created another endpoint"
+    [ "$(grep -c $'\x1fpane\x1fclose' "$HERDR_LOG" || true)" -eq "$closes" ] \
+      || fail "$drift drift recovery guessed endpoint cleanup"
+    [ "$(jq --arg p "$pane" '[.tabs[] | select(.pane_id == $p)] | length' "$HERDR_STATE")" = 1 ] \
+      || fail "$drift drift recovery removed the exact live endpoint"
+    assert_grep 'phase=agent' "$HOME_DIR/state/$id.adopted-endpoint" "$drift drift recovery changed the committed agent phase"
+  done
+  pass "agent-phase recovery binds the original branch, HEAD, and immutable adopted brief"
+}
+
+test_herdr_e2e_uses_branch_helper_and_required_gate() {
+  local probe_root fakebin helper_log out status gate_err
+  probe_root="$TMP_ROOT/herdr-e2e-helper-provenance"
+  fakebin="$probe_root/fakebin"
+  helper_log="$probe_root/helper.log"
+  mkdir -p "$probe_root/tests" "$probe_root/bin" "$fakebin"
+  cp "$ROOT/tests/fm-spawn-existing-worktree-herdr-e2e.test.sh" "$probe_root/tests/"
+  for tool in herdr jq codex; do
+    cat > "$fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    chmod +x "$fakebin/$tool"
+  done
+  cat > "$probe_root/bin/fm-herdr-lab.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\t%s\n' "$0" "$*" >> "$FM_E2E_HELPER_LOG"
+case "${1:-}" in
+  name) printf '%s\n' fm-lab-branch-helper-probe ;;
+  provision) exit 23 ;;
+  teardown) exit 0 ;;
+  *) exit 24 ;;
+esac
+SH
+  chmod +x "$probe_root/bin/fm-herdr-lab.sh"
+  out="$probe_root/provenance.out"
+  PATH="$fakebin:$PATH" FM_E2E_HELPER_LOG="$helper_log" \
+    "$probe_root/tests/fm-spawn-existing-worktree-herdr-e2e.test.sh" > "$out" 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "branch-helper provenance fixture unexpectedly completed the real lab"
+  assert_grep "$probe_root/bin/fm-herdr-lab.sh" "$helper_log" "Herdr adoption E2E did not execute the helper from its own branch root"
+  assert_grep $'\tname fm-adopt-existing-worktree-herdr' "$helper_log" "Herdr adoption E2E did not ask the branch helper for its lab name"
+  assert_grep $'\tprovision fm-lab-branch-helper-probe' "$helper_log" "Herdr adoption E2E did not provision through the branch helper"
+
+  rm -f "$probe_root/bin/fm-herdr-lab.sh"
+  gate_err="$probe_root/gate.err"
+  "$ROOT/bin/fm-test-run.sh" --fail-on-gate-skip 'herdr not found' \
+    "$probe_root/tests/fm-spawn-existing-worktree-herdr-e2e.test.sh" \
+    > "$probe_root/gate.out" 2> "$gate_err"
+  status=$?
+  [ "$status" -ne 0 ] || fail "required Herdr lane accepted an absent branch lab helper"
+  assert_grep 'required gate skip token seen' "$gate_err" "absent branch lab helper did not use the runner's required Herdr gate token"
+  pass "Herdr adoption E2E exercises its branch helper and missing helper trips the required Herdr gate"
 }
 
 test_herdr_secondmate_home_caller_uses_its_exact_home_and_parent() {
@@ -759,6 +942,68 @@ test_concurrent_same_task_herdr_adoption_creates_once() {
   assert_grep 'adopted_delivery=complete' "$HOME_DIR/state/$id.meta" "the lock-owning Herdr spawn did not publish complete identity"
   [ "$(jq -r '.focused_tab' "$HERDR_STATE")" = w1:t1 ] || fail "concurrent Herdr attempts changed focus"
   pass "concurrent same-task Herdr adoption is serialized before creation and produces one endpoint"
+}
+
+test_herdr_abort_cleanup_holds_session_lock() {
+  local first=adopt-herdr-cleanup-lock-a second=adopt-herdr-cleanup-lock-b
+  local gate first_out second_out first_pid second_pid i creates_before creates_during
+  local first_status second_status second_home second_project second_wt
+  local lock_path lock_probe
+  setup_case herdr-cleanup-lock "$first" ship
+  gate="$CASE/close-gate"
+  lock_probe="$CASE/lock-probe.log"
+  lock_path=$(HERDR_SESSION=fmtest FM_ADOPT_HERDR_STATE="$HERDR_STATE" \
+    FM_ADOPT_HERDR_LOG="$HERDR_LOG" FM_ADOPT_HERDR_SOCKET="$HERDR_SOCKET" \
+    PATH="$FAKEBIN:$PATH" bash -c '
+      . "$1/bin/fm-backend.sh"
+      fm_backend_source herdr
+      fm_backend_herdr_presentation_session_lock_path fmtest
+    ' _ "$ROOT") || fail "could not resolve the exact session lock for the cleanup race"
+  first_out="$CASE/first.out"
+  second_out="$CASE/second.out"
+  FM_ADOPT_MV_FAIL_LAUNCHING=1 FM_ADOPT_HERDR_CLOSE_GATE="$gate" \
+    FM_ADOPT_HERDR_LOCK_PROBE_PATH="$lock_path" FM_ADOPT_HERDR_LOCK_PROBE_LOG="$lock_probe" \
+    FM_ADOPT_HERDR_LOCK_PROBE_STATE="$HOME_DIR/state" \
+    run_spawn_herdr "$first" ship "$WT" > "$first_out" 2>&1 &
+  first_pid=$!
+  i=0
+  while [ ! -e "$gate.started" ] && [ "$i" -lt 500 ]; do sleep 0.01; i=$((i + 1)); done
+  if [ ! -e "$gate.started" ]; then
+    touch "$gate.release"
+    wait "$first_pid" || true
+    fail "abort-cleanup fixture did not reach the exact pane close"
+  fi
+  creates_before=$(grep -c $'\x1ftab\x1fcreate' "$HERDR_LOG" || true)
+  [ "$creates_before" -eq 1 ] || { touch "$gate.release"; wait "$first_pid" || true; fail "abort-cleanup fixture did not create exactly one endpoint"; }
+
+  second_home="$CASE/second-home"
+  second_project="$CASE/second-project"
+  second_wt="$CASE/second-adopted-wt"
+  mkdir -p "$second_home/data/$second" "$second_home/state" "$second_home/config" "$second_home/projects"
+  printf '%s\n' off > "$second_home/config/herdr-presentation-spaces"
+  printf '%s\n' 'Delivery contract: mode=local-only' > "$second_home/data/$second/brief.md"
+  git init -q -b main "$second_project"
+  printf '%s\n' baseline > "$second_project/base.txt"
+  git -C "$second_project" add base.txt
+  git -C "$second_project" commit -q -m baseline
+  git -C "$second_project" worktree add -q -b "recovered/$second" "$second_wt" main
+
+  FM_ADOPT_TASK_HOME="$second_home" FM_ADOPT_PROJECT_ARG="$second_project" \
+    run_spawn_herdr "$second" ship "$second_wt" > "$second_out" 2>&1 &
+  second_pid=$!
+  sleep 0.3
+  creates_during=$(grep -c $'\x1ftab\x1fcreate' "$HERDR_LOG" || true)
+  touch "$gate.release"
+  wait "$first_pid"; first_status=$?
+  wait "$second_pid"; second_status=$?
+  [ "$first_status" -ne 0 ] || fail "abort-cleanup fixture unexpectedly completed its refused spawn"
+  expect_code 0 "$second_status" "second home could not spawn after serialized cleanup: $(cat "$second_out")"
+  [ "$(cat "$lock_probe")" = blocked ] \
+    || fail "exact abort cleanup began after releasing the named-session lock"
+  [ "$creates_during" -eq "$creates_before" ] \
+    || fail "a same-session spawn mutated Herdr while exact abort cleanup and focus restoration were still in progress"
+  assert_grep 'adopted_delivery=complete' "$second_home/state/$second.meta" "same-session waiter did not complete after cleanup released the lock"
+  pass "adopted Herdr abort cleanup and focus restoration remain under the exact session lock"
 }
 
 test_input_and_ownership_refusals_precede_endpoint() {
@@ -1502,7 +1747,7 @@ test_herdr_teardown_retires_exact_endpoint_and_preserves_worktree() {
   : > "$TREELOG"
 
   out=$(run_teardown_herdr "$id"); status=$?
-  expect_code 0 "$status" "landed adopted Herdr ship teardown should complete"
+  expect_code 0 "$status" "landed adopted Herdr ship teardown should complete: $out"
   assert_contains "$out" "teardown $id complete" "adopted Herdr teardown did not report completion"
   assert_absent "$HOME_DIR/state/$id.meta" "adopted Herdr teardown retained task metadata"
   assert_absent "$HOME_DIR/state/$id.adopted-endpoint" "adopted Herdr teardown retained endpoint transaction identity"
@@ -1818,9 +2063,13 @@ test_herdr_projected_adoption_keeps_authority_exact_and_focus_stable
 test_herdr_identity_and_live_claim_refusals_precede_creation
 test_herdr_partial_create_fails_closed_without_duplicate_or_guessed_cleanup
 test_herdr_exact_endpoint_resume_never_duplicates
+test_herdr_launch_interruptions_never_resubmit
 test_herdr_stale_transaction_refuses_without_mutation
+test_herdr_agent_phase_recovery_refuses_identity_drift
+test_herdr_e2e_uses_branch_helper_and_required_gate
 test_herdr_secondmate_home_caller_uses_its_exact_home_and_parent
 test_concurrent_same_task_herdr_adoption_creates_once
+test_herdr_abort_cleanup_holds_session_lock
 test_input_and_ownership_refusals_precede_endpoint
 test_live_claims_and_ambiguous_tmux_inventory_refuse
 test_cross_home_dead_durable_claim_refuses

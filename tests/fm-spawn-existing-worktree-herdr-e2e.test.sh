@@ -6,17 +6,18 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HERDR_LAB_HELPER='/home/pranay/wd/firstmate/bin/fm-herdr-lab.sh'
+HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 field() { sed -n "s/^$2=//p" "$1"; }
 shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
+[ -x "$HERDR_LAB_HELPER" ] \
+  || { echo "skip: herdr not found (required branch lab helper unavailable at $HERDR_LAB_HELPER)"; exit 0; }
 command -v herdr >/dev/null 2>&1 || { echo 'skip: herdr not found'; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo 'skip: jq not found'; exit 0; }
 command -v codex >/dev/null 2>&1 || { echo 'skip: codex not found for adopted-agent registration'; exit 0; }
-[ -x "$HERDR_LAB_HELPER" ] || { echo "skip: Herdr lab helper not executable at $HERDR_LAB_HELPER"; exit 0; }
 
 REAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-adopt-e2e.XXXXXX")
