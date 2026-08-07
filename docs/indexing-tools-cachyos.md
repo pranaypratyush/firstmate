@@ -26,7 +26,8 @@ Apply mode requires a private rollback-manifest path and is safe to rerun agains
 Existing compatible state receives substantive health checks before setup mutation, while version, owner, model, language, state-path, symlink, service, and lazy-mcp conflicts stop with the exact choice that must be reconciled.
 Fresh grepai state is revalidated with an explicit `http://127.0.0.1:11434` endpoint before any watcher starts, and planned initializer paths plus partial failures are retained in the rollback manifest for operator recovery.
 The script never removes or overwrites an existing index, model, service, tool owner, MCP entry, lazy-mcp category, or Serena configuration.
-Serena operations require explicit permission for its managed dependency resolution because a network-free run cannot be proven across every supported language backend.
+Fresh Serena initialization requires explicit permission for managed dependency resolution because a network-free first run cannot be proven across every supported language backend.
+Healthy reruns may deny language downloads: they reuse only owner-validated managed Serena state and caches, force supported package managers into offline mode, and stop before health when that managed state is absent.
 
 ## Resource and benchmark gate
 
@@ -40,7 +41,8 @@ The script's help owns their exact thresholds and cleanup mechanics.
 Persistent grepai watching is intentionally outside this kit and its required decision accepts only no.
 
 Health mode forbids install, pull, start, and persistence mutations while running the bounded probes owned by the script.
-Indexer status, search, stop, init, query, MCP, and individual embed requests all have process-enforced timeouts, while Serena health runs once in a disposable local artifact sandbox and records that boundary for apply runs.
+Indexer status, search, stop, init, query, MCP, and individual embed requests all have process-enforced timeouts.
+Serena health runs once against its owner-validated managed cache, removes only the exact task-created project health log, and records that boundary for apply runs.
 
 ## Ollama and tool ownership
 

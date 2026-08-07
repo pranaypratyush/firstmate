@@ -47,8 +47,22 @@ SH
 case "${1:-}" in
   is-active|is-enabled) exit 1 ;;
   show) printf '/usr/lib/systemd/system/ollama.service\n' ;;
+  start)
+    [ -n "${FM_FAKE_OLLAMA_STATE:-}" ] && : > "$FM_FAKE_OLLAMA_STATE"
+    ;;
+  stop)
+    if [ "${FM_FAKE_SYSTEMCTL_STOP_FAIL:-no}" = yes ]; then
+      printf 'fake Ollama stop failure\n' >&2
+      exit 55
+    fi
+    [ -z "${FM_FAKE_OLLAMA_STATE:-}" ] || rm -f "$FM_FAKE_OLLAMA_STATE"
+    ;;
   *) printf 'unexpected systemctl mutation: %s\n' "$*" >&2; exit 92 ;;
 esac
+SH
+  cat > "$fakebin/sudo" <<'SH'
+#!/usr/bin/env bash
+exec "$@"
 SH
   cat > "$fakebin/ss" <<'SH'
 #!/usr/bin/env bash
@@ -112,6 +126,7 @@ case "${1:-}" in
         fi
         ;;
       --status)
+        [ "${FM_FAKE_WATCH_STATUS_FAIL:-no}" != yes ] || exit 46
         pid=$(cat .grepai/fake-watcher.pid 2>/dev/null || true)
         [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || exit 1
         printf 'Watcher: running (PID %s)\n' "$pid"
@@ -176,14 +191,36 @@ SH
 if [ -n "${FM_FAKE_LOG:-}" ]; then
   printf 'serena cwd=%s args=%s\n' "$PWD" "$*" >> "$FM_FAKE_LOG"
 fi
+assert_offline_managed_runtime() {
+  [ "${FM_FAKE_SERENA_OFFLINE_RERUN:-no}" = yes ] || return 0
+  expected_root=${FM_FAKE_SERENA_MANAGED_ROOT:?}
+  [ "$HOME" = "$expected_root/runtime-home" ] \
+    && [ "$SERENA_HOME" = "$expected_root/home" ] \
+    && [ "$XDG_CACHE_HOME" = "$expected_root/runtime-home/.cache" ] \
+    && [ "$XDG_STATE_HOME" = "$expected_root/runtime-home/.local/state" ] \
+    && [ "${UV_OFFLINE:-}" = 1 ] \
+    && [ "${npm_config_offline:-}" = true ] \
+    && [ "${PIP_NO_INDEX:-}" = 1 ] \
+    && [ "${HTTPS_PROXY:-}" = http://127.0.0.1:9 ] \
+    && [ -f "$HOME/.solidlsp/cache.ready" ] || {
+      [ -z "${FM_FAKE_NETWORK_ATTEMPT:-}" ] || : > "$FM_FAKE_NETWORK_ATTEMPT"
+      exit 44
+    }
+}
 case "${1:-}" in
   --version) printf 'Serena 1.6.1\n' ;;
   project)
     case "${2:-}" in
       health-check)
-        mkdir -p "${SERENA_HOME:?}"
-        printf health > "$SERENA_HOME/health.log"
+        target=${3:-}
+        log_dir="$target/.serena/logs/health-checks"
+        log_file="$log_dir/health_check_fake_$$.log"
+        mkdir -p "$log_dir"
+        printf health > "$log_file"
+        printf 'Log saved to: %s\n' "$log_file"
+        assert_offline_managed_runtime
         [ "${FM_FAKE_SERENA_HEALTH:-healthy}" = healthy ] || exit 42
+        printf 'Health check passed - All tools working correctly\n'
         ;;
       create)
         target=${!#}
@@ -194,6 +231,7 @@ case "${1:-}" in
     esac
     ;;
   start-mcp-server)
+    assert_offline_managed_runtime
     while IFS= read -r line; do
       case "$line" in
         *'"id":1'*) printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"serena","version":"test"}}}\n' ;;
@@ -207,7 +245,13 @@ SH
   cat > "$fakebin/curl" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  *'/api/version'*) printf '{"version":"0.32.6"}\n' ;;
+  *'/api/version'*)
+    if [ "${FM_FAKE_API_REQUIRES_START:-no}" = yes ] \
+      && { [ -z "${FM_FAKE_OLLAMA_STATE:-}" ] || [ ! -f "$FM_FAKE_OLLAMA_STATE" ]; }; then
+      exit 7
+    fi
+    printf '{"version":"0.32.6"}\n'
+    ;;
   *'/api/tags'*)
     jq -nc \
       --arg digest "${FM_FAKE_MODEL_DIGEST:-0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f}" \
@@ -242,6 +286,7 @@ run_kit() {
     FM_FAKE_EMBED_RESPONSE="$dir/embed-response.json" \
     FM_FAKE_LOG="${FM_FAKE_LOG:-}" \
     FM_FAKE_WATCH_HANG="${FM_FAKE_WATCH_HANG:-no}" \
+    FM_FAKE_WATCH_STATUS_FAIL="${FM_FAKE_WATCH_STATUS_FAIL:-no}" \
     FM_FAKE_CHILD_PID_FILE="${FM_FAKE_CHILD_PID_FILE:-}" \
     FM_FAKE_GENERATOR_LOG="${FM_FAKE_GENERATOR_LOG:-}" \
     FM_FAKE_MODEL_DIGEST="${FM_FAKE_MODEL_DIGEST:-}" \
@@ -255,6 +300,12 @@ run_kit() {
     FM_FAKE_HANG_MICRO="${FM_FAKE_HANG_MICRO:-no}" \
     FM_FAKE_PARTIAL_INITIALIZER="${FM_FAKE_PARTIAL_INITIALIZER:-}" \
     FM_FAKE_SS_LISTENER="${FM_FAKE_SS_LISTENER:-}" \
+    FM_FAKE_API_REQUIRES_START="${FM_FAKE_API_REQUIRES_START:-no}" \
+    FM_FAKE_OLLAMA_STATE="${FM_FAKE_OLLAMA_STATE:-}" \
+    FM_FAKE_SYSTEMCTL_STOP_FAIL="${FM_FAKE_SYSTEMCTL_STOP_FAIL:-no}" \
+    FM_FAKE_SERENA_OFFLINE_RERUN="${FM_FAKE_SERENA_OFFLINE_RERUN:-no}" \
+    FM_FAKE_SERENA_MANAGED_ROOT="${FM_FAKE_SERENA_MANAGED_ROOT:-}" \
+    FM_FAKE_NETWORK_ATTEMPT="${FM_FAKE_NETWORK_ATTEMPT:-}" \
     HOME="$dir/home" \
     XDG_RUNTIME_DIR="$dir/runtime" \
     PATH="$dir/fakebin:$PATH" \
@@ -373,6 +424,32 @@ test_unset_runtime_uses_private_home_lock_without_following_public_symlink() {
   [ -f "$dir/home/.fm-indexing-tools-cachyos-locks/recovery.lock" ] || fail "private fallback lock was not created under HOME"
   [ "$(stat -c %a "$dir/home/.fm-indexing-tools-cachyos-locks")" = 700 ] || fail "private fallback lock directory is not mode 0700"
   pass "indexing recovery: unset runtime uses a private lock without following a public-temp symlink"
+}
+
+test_temporary_ollama_stop_failure_is_terminal_without_masking_primary_failure() {
+  local dir out rc
+  dir=$(new_fixture ollama-cleanup-failure)
+  : > "$dir/fake.log"
+  FM_FAKE_LOG="$dir/fake.log" FM_FAKE_API_REQUIRES_START=yes FM_FAKE_OLLAMA_STATE="$dir/ollama.started" \
+    FM_FAKE_SYSTEMCTL_STOP_FAIL=yes \
+    out=$(run_kit "$dir" --action apply --pull-model no --start-ollama yes --persist-ollama no --install-tools no \
+      --init none --rollback-manifest "$dir/rollback.log" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "temporary Ollama stop failure was reported as success"
+  assert_contains "$out" "could not stop task-started Ollama service" "temporary Ollama cleanup failure"
+  grep -Fq 'systemctl args=start ollama' "$dir/fake.log" || fail "cleanup fixture did not start Ollama"
+  grep -Fq 'systemctl args=stop ollama' "$dir/fake.log" || fail "cleanup fixture did not attempt Ollama stop"
+
+  dir=$(new_fixture ollama-primary-and-cleanup-failure)
+  : > "$dir/fake.log"
+  FM_FAKE_LOG="$dir/fake.log" FM_FAKE_API_REQUIRES_START=yes FM_FAKE_OLLAMA_STATE="$dir/ollama.started" \
+    FM_FAKE_SYSTEMCTL_STOP_FAIL=yes FM_FAKE_MODEL_DIGEST=wrong \
+    out=$(run_kit "$dir" --action apply --pull-model no --start-ollama yes --persist-ollama no --install-tools no \
+      --init none --rollback-manifest "$dir/rollback.log" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "combined primary and Ollama cleanup failure was reported as success"
+  assert_contains "$out" "model digest 'wrong'" "preserved primary model failure"
+  assert_contains "$out" "could not stop task-started Ollama service" "surfaced secondary cleanup failure"
+  unset FM_FAKE_LOG FM_FAKE_API_REQUIRES_START FM_FAKE_OLLAMA_STATE FM_FAKE_SYSTEMCTL_STOP_FAIL FM_FAKE_MODEL_DIGEST
+  pass "indexing recovery: task-started Ollama cleanup failure is terminal without masking the primary failure"
 }
 
 test_serena_download_refusal_and_exact_model_identity() {
@@ -499,7 +576,12 @@ test_incompatible_existing_indexes_refuse_before_mutation() {
     case "$component" in
       grepai) printf 'provider: ollama\nmodel: nomic-embed-text:latest\nbackend: gob\nendpoint: http://127.0.0.1:11434\n' > "$dir/project/.grepai/config.yaml" ;;
       codegraph) printf 'sqlite fixture\n' > "$dir/project/.codegraph/codegraph.db" ;;
-      serena) printf 'languages:\n- rust\n- typescript\n- python\n' > "$dir/project/.serena/project.yml" ;;
+      serena)
+        printf 'languages:\n- rust\n- typescript\n- python\n' > "$dir/project/.serena/project.yml"
+        mkdir -p "$dir/install-parent/tools/serena/home" \
+          "$dir/install-parent/tools/serena/runtime-home/.cache" \
+          "$dir/install-parent/tools/serena/runtime-home/.local/state"
+        ;;
     esac
     : > "$dir/project/.git/info/exclude"
     git -C "$dir/project" add -f ".$component"
@@ -599,8 +681,11 @@ test_read_only_health_observes_local_model() {
 }
 
 seed_healthy_indexes() {
-  local dir=$1
+  local dir=$1 managed_root="$1/install-parent/tools/serena"
   mkdir -p "$dir/project/.grepai" "$dir/project/.codegraph" "$dir/project/.serena" "$dir/project/.git/info"
+  mkdir -p "$managed_root/home" "$managed_root/runtime-home/.cache" "$managed_root/runtime-home/.local/state" \
+    "$managed_root/runtime-home/.solidlsp"
+  printf ready > "$managed_root/runtime-home/.solidlsp/cache.ready"
   printf 'provider: ollama\nmodel: nomic-embed-text:latest\nbackend: gob\nendpoint: http://127.0.0.1:11434\n' > "$dir/project/.grepai/config.yaml"
   printf 'sqlite fixture\n' > "$dir/project/.codegraph/codegraph.db"
   printf 'languages:\n- rust\n- typescript\n- python\n' > "$dir/project/.serena/project.yml"
@@ -781,19 +866,27 @@ test_bounded_indexer_commands_and_micro_requests() {
   pass "indexing recovery: indexer commands and micro requests have real hard timeouts"
 }
 
-test_serena_health_is_single_pass_sandboxed_and_recorded() {
-  local dir out count
-  dir=$(new_fixture serena-health-sandbox)
+test_serena_healthy_rerun_reuses_managed_cache_offline_without_state_changes() {
+  local dir out count before after managed_root
+  dir=$(new_fixture serena-offline-rerun)
   seed_healthy_indexes "$dir"
+  managed_root="$dir/install-parent/tools/serena"
   : > "$dir/fake.log"
-  FM_FAKE_LOG="$dir/fake.log" out=$(run_kit "$dir" --action apply --pull-model no --start-ollama no --persist-ollama no --install-tools no \
-    --init grepai,codegraph,serena --allow-language-downloads yes --rollback-manifest "$dir/rollback.log")
+  before=$(find "$dir/project/.serena" "$managed_root" -type f -print0 | sort -z | xargs -0 sha256sum)
+  FM_FAKE_LOG="$dir/fake.log" FM_FAKE_SERENA_OFFLINE_RERUN=yes FM_FAKE_SERENA_MANAGED_ROOT="$managed_root" \
+    FM_FAKE_NETWORK_ATTEMPT="$dir/network.attempt" \
+    out=$(run_kit "$dir" --action apply --pull-model no --start-ollama no --persist-ollama no --install-tools no \
+      --init grepai,codegraph,serena --allow-language-downloads no --rollback-manifest "$dir/rollback.log")
+  after=$(find "$dir/project/.serena" "$managed_root" -type f -print0 | sort -z | xargs -0 sha256sum)
   count=$(grep -Fc 'args=project health-check' "$dir/fake.log")
   [ "$count" -eq 1 ] || fail "Serena health-check ran $count times instead of once"
-  [ -z "$(find "$dir/home" "$dir/install-parent" "$dir/project" -name health.log -print -quit)" ] || fail "Serena health artifact escaped its disposable sandbox"
-  grep -Fq 'serena_health_artifacts=sandboxed removed_at_exit=yes' "$dir/rollback.log" || fail "Serena health sandbox was not recorded"
+  [ "$before" = "$after" ] || fail "healthy offline Serena rerun changed managed or project state"
+  [ ! -e "$dir/network.attempt" ] || fail "healthy offline Serena rerun attempted dependency network access"
+  grep -Fq 'serena_health_artifacts=project_log_removed managed_cache_reused=yes offline=yes' "$dir/rollback.log" \
+    || fail "Serena managed-cache health boundary was not recorded"
   assert_contains "$out" "serena_health" "Serena health result"
-  pass "indexing recovery: Serena health is single-pass, sandboxed, and recorded"
+  unset FM_FAKE_LOG FM_FAKE_SERENA_OFFLINE_RERUN FM_FAKE_SERENA_MANAGED_ROOT FM_FAKE_NETWORK_ATTEMPT
+  pass "indexing recovery: healthy Serena rerun reuses managed caches and is a true offline no-op"
 }
 
 test_partial_initializer_state_is_planned_and_reconciled() {
@@ -930,20 +1023,38 @@ test_git_exclude_refuses_symlink_without_following() {
   pass "indexing recovery: Git info/exclude symlinks are refused without following"
 }
 
-test_watcher_cleanup_is_generation_bound_and_explicitly_cleared() {
-  local source
-  source=$(sed -n '/^process_starttime()/,/^run_scratch_benchmark()/p' "$SCRIPT")
-  assert_contains "$source" 'watch_command_starttime' "watcher generation binding"
-  assert_contains "$source" 'clear_watch_command' "watcher PID clearing helper"
-  # shellcheck disable=SC2016 # The range intentionally matches literal shell source.
-  source=$(sed -n '/^run_scratch_benchmark()/,/^if \[ "$BENCHMARK" = yes \]/p' "$SCRIPT")
-  assert_contains "$source" 'clear_watch_command' "watcher PID cleared after wait"
-  pass "indexing recovery: watcher cleanup is generation-bound and clears stale PIDs"
+test_watcher_fast_exit_cleanup_does_not_reuse_stale_identity() {
+  local dir out rc decoy_pid index
+  dir=$(new_fixture watcher-fast-exit-boundary)
+  for index in $(seq 1 100); do
+    printf 'pub fn fast_exit_%03d() -> usize { %d }\n' "$index" "$index" > "$dir/project/src/fast-exit-$index.rs"
+  done
+  git -C "$dir/project" add src
+  git -C "$dir/project" -c user.name=Test -c user.email=test@example.invalid commit -qm 'fast-exit watcher corpus'
+  : > "$dir/fake.log"
+  setsid sleep 30 &
+  decoy_pid=$!
+  FM_FAKE_LOG="$dir/fake.log" FM_FAKE_WATCH_STATUS_FAIL=yes \
+    out=$(run_kit "$dir" --action apply --pull-model no --start-ollama no --persist-ollama no --install-tools no \
+      --init none --benchmark yes --max-index-seconds 5 \
+      --benchmark-query 'one=src/main.rs' --benchmark-query 'two=src/main.rs' --benchmark-query 'three=src/main.rs' \
+      --benchmark-query 'four=src/main.rs' --benchmark-query 'five=src/main.rs' \
+      --rollback-manifest "$dir/rollback.log" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "fast-exit watcher status failure unexpectedly passed"
+  assert_contains "$out" "scratch grepai watcher did not report running" "post-fast-exit watcher failure"
+  kill -0 "$decoy_pid" 2>/dev/null || fail "cleanup reused stale watcher identity and terminated an unrelated process"
+  grep -Fq 'args=watch --background' "$dir/fake.log" || fail "fast-exit watcher command was not exercised"
+  grep -Fq 'args=watch --stop' "$dir/fake.log" || fail "owned scratch watcher was not stopped after the boundary failure"
+  kill "$decoy_pid" 2>/dev/null || true
+  wait "$decoy_pid" 2>/dev/null || true
+  unset FM_FAKE_LOG FM_FAKE_WATCH_STATUS_FAIL
+  pass "indexing recovery: fast-exit watcher cleanup stops only owned work and does not reuse stale identity"
 }
 
 test_help_and_plan_are_read_only
 test_fail_closed_preflight_matrix
 test_unset_runtime_uses_private_home_lock_without_following_public_symlink
+test_temporary_ollama_stop_failure_is_terminal_without_masking_primary_failure
 test_serena_download_refusal_and_exact_model_identity
 test_grepai_config_rejects_commented_local_values_and_missing_endpoint
 test_grepai_config_rejects_deceptive_remote_endpoint
@@ -959,11 +1070,11 @@ test_lazy_mcp_conflict_preserves_bytes
 test_lazy_mcp_registration_is_additive_reversible_and_idempotent
 test_required_service_inventory_and_listener_refuse_before_mutation
 test_bounded_indexer_commands_and_micro_requests
-test_serena_health_is_single_pass_sandboxed_and_recorded
+test_serena_healthy_rerun_reuses_managed_cache_offline_without_state_changes
 test_partial_initializer_state_is_planned_and_reconciled
 test_existing_model_is_validated_before_apply_mutation
 test_unmanaged_grepai_destination_is_never_overwritten
 test_lazy_mcp_symlink_topology_is_refused_without_target_changes
 test_source_inventory_rejects_symlink_and_fifo_without_following
 test_git_exclude_refuses_symlink_without_following
-test_watcher_cleanup_is_generation_bound_and_explicitly_cleared
+test_watcher_fast_exit_cleanup_does_not_reuse_stale_identity

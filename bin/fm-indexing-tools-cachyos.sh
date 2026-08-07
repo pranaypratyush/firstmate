@@ -520,7 +520,7 @@ terminate_watch_command() {
 }
 
 cleanup() {
-  local exit_status=$? path index restore_tmp name state_path
+  local exit_status=$? cleanup_status=0 path index restore_tmp name state_path
   trap - EXIT INT TERM
   if [ "$LAZY_TRANSACTION_ACTIVE" -eq 1 ]; then
     for ((index = 0; index < ${#LAZY_BACKUPS[@]}; index++)); do
@@ -552,12 +552,18 @@ cleanup() {
     ollama stop "$MODEL" >/dev/null 2>&1 || true
   fi
   if [ "${OLLAMA_SERVICE_STARTED:-0}" -eq 1 ] && [ "$PERSIST_OLLAMA" = no ]; then
-    run_privileged systemctl stop ollama >/dev/null 2>&1 || true
+    if ! run_privileged systemctl stop ollama >/dev/null 2>&1; then
+      printf '%s: could not stop task-started Ollama service; operator cleanup is required\n' "$SCRIPT_NAME" >&2
+      cleanup_status=1
+    fi
   fi
   for path in "${cleanup_files[@]}"; do
     [ -e "$path" ] && rm -rf -- "$path"
   done
-  return "$exit_status"
+  if [ "$exit_status" -ne 0 ]; then
+    exit "$exit_status"
+  fi
+  exit "$cleanup_status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
@@ -846,7 +852,11 @@ nonlocal_listener=$(printf '%s\n' "$listener_snapshot" | awk '$4 ~ /:11434$/ && 
 GREPAI_DEST="$INSTALL_ROOT/grepai/v$GREPAI_VERSION/grepai"
 CODEGRAPH_DEST="$INSTALL_ROOT/codegraph/v$CODEGRAPH_VERSION/bin/codegraph"
 SERENA_TOOL_DIR="$INSTALL_ROOT/uv-tools"
-SERENA_HOME_DIR="$INSTALL_ROOT/serena-home"
+SERENA_MANAGED_ROOT="$INSTALL_ROOT/serena"
+SERENA_HOME_DIR="$SERENA_MANAGED_ROOT/home"
+SERENA_RUNTIME_HOME_DIR="$SERENA_MANAGED_ROOT/runtime-home"
+SERENA_CACHE_DIR="$SERENA_RUNTIME_HOME_DIR/.cache"
+SERENA_STATE_DIR="$SERENA_RUNTIME_HOME_DIR/.local/state"
 GREPAI_BIN=$(command_path grepai)
 CODEGRAPH_BIN=$(command_path codegraph)
 SERENA_BIN=$(command_path serena)
@@ -922,18 +932,109 @@ bounded_command() {
 
 SERENA_HEALTH_CHECKED=0
 SERENA_HEALTH_EVIDENCE=
+
+validate_serena_managed_dirs() {
+  local path owner
+  for path in "$SERENA_MANAGED_ROOT" "$SERENA_HOME_DIR" "$SERENA_RUNTIME_HOME_DIR" "$SERENA_CACHE_DIR" "$SERENA_STATE_DIR"; do
+    [ -d "$path" ] && [ ! -L "$path" ] \
+      || die "managed Serena runtime state is missing or unsafe: $path"
+    owner=$(stat -c %u -- "$path" 2>/dev/null || true)
+    [ "$owner" = "$EUID" ] || die "managed Serena runtime state is not owned by effective user $EUID: $path"
+    [ -z "$(find "$path" -maxdepth 0 -perm /022 -print -quit)" ] \
+      || die "managed Serena runtime state must not be group/world writable: $path"
+  done
+}
+
+prepare_serena_managed_dirs() {
+  local path
+  for path in "$SERENA_MANAGED_ROOT" "$SERENA_HOME_DIR" "$SERENA_RUNTIME_HOME_DIR" "$SERENA_CACHE_DIR" "$SERENA_STATE_DIR"; do
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+      install -d -m 0700 "$path"
+      append_manifest "created_serena_runtime_dir=$path removal_requires_explicit_approval=yes"
+    fi
+  done
+  validate_serena_managed_dirs
+}
+
+run_serena_managed() {
+  local -a managed_env
+  managed_env=(
+    "HOME=$SERENA_RUNTIME_HOME_DIR"
+    "XDG_CACHE_HOME=$SERENA_CACHE_DIR"
+    "XDG_STATE_HOME=$SERENA_STATE_DIR"
+    "SERENA_HOME=$SERENA_HOME_DIR"
+    "SERENA_USAGE_REPORTING=false"
+  )
+  if [ "$ALLOW_LANGUAGE_DOWNLOADS" = no ]; then
+    managed_env+=(
+      "UV_OFFLINE=1"
+      "npm_config_offline=true"
+      "PIP_NO_INDEX=1"
+      "HTTP_PROXY=http://127.0.0.1:9"
+      "HTTPS_PROXY=http://127.0.0.1:9"
+      "ALL_PROXY=http://127.0.0.1:9"
+      "NO_PROXY=127.0.0.1,localhost,::1"
+    )
+  fi
+  env "${managed_env[@]}" "$@"
+}
+
 run_serena_health() {
-  local context=$1 sandbox
+  local context=$1 sandbox log_root log_dir command_output status=0
+  local log_root_existed=0 log_dir_existed=0 log_name log_path new_log_count=0
   [ "$SERENA_HEALTH_CHECKED" -eq 0 ] || return 0
+  validate_serena_managed_dirs
   sandbox=$(mktemp -d "${TMPDIR:-/tmp}/fm-serena-health.XXXXXX")
   cleanup_files+=("$sandbox")
-  mkdir -p "$sandbox/home" "$sandbox/cache" "$sandbox/state" "$sandbox/serena"
-  HOME="$sandbox/home" XDG_CACHE_HOME="$sandbox/cache" XDG_STATE_HOME="$sandbox/state" \
-    SERENA_HOME="$sandbox/serena" SERENA_USAGE_REPORTING=false \
-    bounded_command "$context Serena health-check" "$MAX_INDEX_SECONDS" "$SERENA_BIN" project health-check "$PROJECT" >/dev/null \
-    || die "$context serena index is unhealthy; choose repair or rebuild outside this non-destructive run"
+  log_root="$PROJECT/.serena/logs"
+  log_dir="$log_root/health-checks"
+  if [ -e "$log_root" ] || [ -L "$log_root" ]; then
+    [ -d "$log_root" ] && [ ! -L "$log_root" ] \
+      || die "Serena health log root must be a real directory: $log_root"
+    log_root_existed=1
+  fi
+  if [ -e "$log_dir" ] || [ -L "$log_dir" ]; then
+    [ -d "$log_dir" ] && [ ! -L "$log_dir" ] \
+      || die "Serena health log directory must be a real directory: $log_dir"
+    log_dir_existed=1
+    find "$log_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort > "$sandbox/before"
+  else
+    : > "$sandbox/before"
+  fi
+  command_output="$sandbox/command.out"
+  if run_serena_managed timeout --kill-after=5s "$MAX_INDEX_SECONDS" "$SERENA_BIN" project health-check "$PROJECT" \
+      >"$command_output" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  [ -d "$log_dir" ] && [ ! -L "$log_dir" ] \
+    || die "$context Serena health-check did not leave a safe health-log directory"
+  find "$log_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort > "$sandbox/after"
+  comm -13 "$sandbox/before" "$sandbox/after" > "$sandbox/new"
+  while IFS= read -r log_name; do
+    [ -n "$log_name" ] || continue
+    new_log_count=$((new_log_count + 1))
+    case "$log_name" in health_check_*.log) ;; *) die "Serena health-check created an unexpected artifact: $log_dir/$log_name" ;; esac
+    log_path="$log_dir/$log_name"
+    [ -f "$log_path" ] && [ ! -L "$log_path" ] && [ "$(stat -c %u -- "$log_path")" = "$EUID" ] \
+      || die "Serena health-check artifact is not a safe owner-owned regular file: $log_path"
+    rm -- "$log_path" || die "could not remove task-created Serena health log: $log_path"
+  done < "$sandbox/new"
+  [ "$new_log_count" -eq 1 ] || die "Serena health-check created $new_log_count new health logs; expected exactly one"
+  [ "$log_dir_existed" -eq 1 ] || rmdir -- "$log_dir" \
+    || die "could not remove task-created Serena health-log directory: $log_dir"
+  [ "$log_root_existed" -eq 1 ] || rmdir -- "$log_root" \
+    || die "could not remove task-created Serena log root: $log_root"
+  case "$status" in
+    0) ;;
+    124|137) die "$context Serena health-check exceeded its ${MAX_INDEX_SECONDS}s hard timeout" ;;
+    *) die "$context serena index is unhealthy; choose repair or rebuild outside this non-destructive run" ;;
+  esac
+  grep -Fq 'Health check passed - All tools working correctly' "$command_output" \
+    || die "$context Serena health-check did not report complete symbol health"
   SERENA_HEALTH_CHECKED=1
-  SERENA_HEALTH_EVIDENCE="serena_health_artifacts=sandboxed removed_at_exit=yes"
+  SERENA_HEALTH_EVIDENCE="serena_health_artifacts=project_log_removed managed_cache_reused=yes offline=$([ "$ALLOW_LANGUAGE_DOWNLOADS" = no ] && printf yes || printf no)"
   if [ -n "${ROLLBACK_MANIFEST:-}" ] && [ -e "$ROLLBACK_MANIFEST" ]; then
     append_manifest "$SERENA_HEALTH_EVIDENCE"
   fi
@@ -941,7 +1042,7 @@ run_serena_health() {
 }
 
 if [ "$ACTION" != plan ] && [ "$ALLOW_LANGUAGE_DOWNLOADS" = no ] \
-  && { contains_component serena || [ -d "$PROJECT/.serena" ]; }; then
+  && contains_component serena && [ ! -d "$PROJECT/.serena" ]; then
   die "cannot prove Serena dependency resolution is network-free for the selected languages; use --action plan, or pass --allow-language-downloads yes after approving Serena-managed downloads"
 fi
 
@@ -969,9 +1070,20 @@ json_command() {
 }
 
 build_mcp_entries() {
+  local serena_env
   grepai_entry=$(json_command "$GREPAI_MCP_BIN" "$(jq -nc --arg project "$PROJECT" '["mcp-serve",$project]')" '{}')
   codegraph_entry=$(json_command "$CODEGRAPH_MCP_BIN" "$(jq -nc --arg project "$PROJECT" '["serve","--mcp","--path",$project]')" '{"CODEGRAPH_NO_DAEMON":"1","CODEGRAPH_TELEMETRY":"0","DO_NOT_TRACK":"1"}')
-  serena_entry=$(json_command "$SERENA_MCP_BIN" "$(jq -nc --arg project "$PROJECT" '["start-mcp-server","--project",$project,"--context=codex","--enable-web-dashboard","false","--open-web-dashboard","false"]')" "$(jq -nc --arg home "$SERENA_HOME_DIR" '{SERENA_HOME:$home,SERENA_USAGE_REPORTING:"false"}')")
+  serena_env=$(jq -nc \
+    --arg home "$SERENA_HOME_DIR" --arg runtime_home "$SERENA_RUNTIME_HOME_DIR" --arg cache "$SERENA_CACHE_DIR" --arg state "$SERENA_STATE_DIR" \
+    '{HOME:$runtime_home,XDG_CACHE_HOME:$cache,XDG_STATE_HOME:$state,SERENA_HOME:$home,SERENA_USAGE_REPORTING:"false"}')
+  if [ "$ALLOW_LANGUAGE_DOWNLOADS" = no ]; then
+    serena_env=$(printf '%s' "$serena_env" | jq -c '. + {
+      UV_OFFLINE:"1",npm_config_offline:"true",PIP_NO_INDEX:"1",
+      HTTP_PROXY:"http://127.0.0.1:9",HTTPS_PROXY:"http://127.0.0.1:9",ALL_PROXY:"http://127.0.0.1:9",
+      NO_PROXY:"127.0.0.1,localhost,::1"
+    }')
+  fi
+  serena_entry=$(json_command "$SERENA_MCP_BIN" "$(jq -nc --arg project "$PROJECT" '["start-mcp-server","--project",$project,"--context=codex","--enable-web-dashboard","false","--open-web-dashboard","false"]')" "$serena_env")
   mcp_entries=$(jq -nc --argjson grepai "$grepai_entry" --argjson codegraph "$codegraph_entry" --argjson serena "$serena_entry" '{grepai:$grepai,codegraph:$codegraph,serena:$serena}')
 }
 build_mcp_entries
@@ -1226,7 +1338,8 @@ install_serena() {
   else
     pacman -Qo "$uv_path" >/dev/null 2>&1 || die "uv owner conflict: '$uv_path' is not owned by the selected Arch package track"
   fi
-  mkdir -p "$SERENA_TOOL_DIR" "$SERENA_HOME_DIR" "$BIN_DIR"
+  mkdir -p "$SERENA_TOOL_DIR" "$BIN_DIR"
+  prepare_serena_managed_dirs
   if [ ! -x "$BIN_DIR/serena" ]; then
     UV_TOOL_DIR="$SERENA_TOOL_DIR" UV_TOOL_BIN_DIR="$BIN_DIR" "$uv_path" tool install --python 3.13 "serena-agent==$SERENA_VERSION"
     append_manifest "created_uv_tool=serena-agent:$SERENA_VERSION tool_dir=$SERENA_TOOL_DIR bin=$BIN_DIR/serena"
@@ -1619,6 +1732,7 @@ if [ "$ACTION" = apply ]; then
       note "Serena create no-op: existing healthy project state preserved"
     else
       plan_project_initializer serena "$PROJECT/.serena"
+      prepare_serena_managed_dirs
       serena_args=()
       for language in "${SERENA_LANGUAGES[@]}"; do serena_args+=(--language "$language"); done
       if [ "$ALLOW_LANGUAGE_DOWNLOADS" = no ]; then
@@ -1630,7 +1744,8 @@ if [ "$ACTION" = apply ]; then
           esac
         done
       fi
-      SERENA_HOME="$SERENA_HOME_DIR" SERENA_USAGE_REPORTING=false timeout --kill-after=5s "$MAX_INDEX_SECONDS" "$SERENA_BIN" project create "${serena_args[@]}" --index "$PROJECT"
+      run_serena_managed timeout --kill-after=5s "$MAX_INDEX_SECONDS" "$SERENA_BIN" project create "${serena_args[@]}" --index "$PROJECT" \
+        || die "Serena project create failed or exceeded its ${MAX_INDEX_SECONDS}s hard timeout"
       complete_project_initializer serena
       append_manifest "created_project_state=$PROJECT/.serena languages=$(IFS=,; printf '%s' "${SERENA_LANGUAGES[*]}") removal_requires_explicit_approval=yes"
     fi
