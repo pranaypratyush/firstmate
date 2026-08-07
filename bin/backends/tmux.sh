@@ -273,13 +273,12 @@ fm_backend_tmux_kill_window_id() {  # <window-id>
   tmux kill-window -t "$window_id"
 }
 
-# fm_backend_tmux_retire_adopted_window: remove an adopted endpoint by its
-# durable creation-time window id during same-task retry or teardown. A live
-# id is removed only after its server lifetime, session, sole
-# pane, and physical worktree-root-or-descendant CWD all match. An absent id is already clear;
-# unreadable inventory or any identity mismatch fails closed with a bounded
-# reason on stdout.
-fm_backend_tmux_retire_adopted_window() {  # <window-id> <server-identity> <session> <worktree>
+# fm_backend_tmux_inspect_adopted_window: prove whether a durable adopted
+# endpoint is `live` with its exact server lifetime, session, sole pane, and
+# physical worktree-root-or-descendant CWD, or `missing` from a still-readable
+# matching server. Unreadable inventory or any mismatch fails closed with a
+# bounded reason on stdout.
+fm_backend_tmux_inspect_adopted_window() {  # <window-id> <server-identity> <session> <worktree>
   local window_id=$1 expected_server=$2 expected_session=$3 worktree=$4
   local actual_server actual_id inventory actual_session panes pane_id pane_path pane_real
   fm_backend_tmux_window_id_valid "$window_id" || { printf '%s\n' window-id; return 2; }
@@ -302,6 +301,7 @@ fm_backend_tmux_retire_adopted_window() {  # <window-id> <server-identity> <sess
       printf '%s\n' window-unreadable
       return 2
     fi
+    printf '%s\n' missing
     return 0
   fi
   [ "$actual_id" = "$window_id" ] || {
@@ -338,6 +338,22 @@ fm_backend_tmux_retire_adopted_window() {  # <window-id> <server-identity> <sess
     printf '%s\n' cwd-identity
     return 2
   }
+  printf '%s\n' live
+}
+
+# fm_backend_tmux_retire_adopted_window: remove one endpoint only after the
+# shared inspector proves its complete durable identity. A missing endpoint is
+# already clear; a live endpoint is removed by stable id.
+fm_backend_tmux_retire_adopted_window() {  # <window-id> <server-identity> <session> <worktree>
+  local window_id=$1 state
+  if state=$(fm_backend_tmux_inspect_adopted_window "$@"); then
+    :
+  else
+    printf '%s\n' "$state"
+    return 2
+  fi
+  [ "$state" = missing ] && return 0
+  [ "$state" = live ] || { printf '%s\n' window-state; return 2; }
   fm_backend_tmux_kill_window_id "$window_id" || {
     printf '%s\n' window-kill
     return 2

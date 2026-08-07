@@ -50,6 +50,9 @@
 # Git-common-directory claim must identify this home/task/worktree/project under
 # its shared lock; teardown holds that lock from endpoint retirement through
 # local-state removal and removes the claim only after local metadata is gone.
+# Teardown also holds the task's spawn-generation lock before reading metadata
+# through final state retirement, so same-ID recovery cannot replace the
+# endpoint generation being retired.
 # Forced
 # recursive secondmate retirement refuses before mutation when descendant
 # metadata declares adoption or when a direct checkout under the home's projects/
@@ -186,13 +189,20 @@ FORCE=${2:-}
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 
-META="$STATE/$ID.meta"
-[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
-
+TEARDOWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
+TEARDOWN_TASK_LOCK_HELD=0
 TEARDOWN_ADOPTED_CLAIM_LOCK=
 TEARDOWN_ADOPTED_CLAIM_LOCK_HELD=0
 TEARDOWN_ADOPTED_CLAIM_FILE=
 TEARDOWN_ADOPTED_CLAIM_HOME=
+TEARDOWN_ADOPTED_ENDPOINT_SESSION=
+
+teardown_release_task_lock() {
+  if [ "$TEARDOWN_TASK_LOCK_HELD" = 1 ]; then
+    TEARDOWN_TASK_LOCK_HELD=0
+    fm_lock_release "$TEARDOWN_TASK_LOCK" || true
+  fi
+}
 
 teardown_release_adopted_claim_lock() {
   if [ "$TEARDOWN_ADOPTED_CLAIM_LOCK_HELD" = 1 ]; then
@@ -200,6 +210,24 @@ teardown_release_adopted_claim_lock() {
     fm_lock_release "$TEARDOWN_ADOPTED_CLAIM_LOCK" || true
   fi
 }
+
+teardown_release_lifecycle_locks() {
+  teardown_release_adopted_claim_lock
+  if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
+    teardown_release_herdr_locks
+  fi
+  teardown_release_task_lock
+}
+
+META="$STATE/$ID.meta"
+[ -d "$STATE" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+fm_lock_acquire_wait "$TEARDOWN_TASK_LOCK" || {
+  echo "error: task generation lock could not be acquired for teardown of $ID" >&2
+  exit 1
+}
+TEARDOWN_TASK_LOCK_HELD=1
+trap teardown_release_lifecycle_locks EXIT
+[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
 REMOTE_HANDOFF_DIR_PRESENT=0
 REMOTE_HANDOFF_DIR_REAL=
@@ -499,13 +527,39 @@ teardown_adopted_claim_lock_and_validate() {
     return 1
   }
   TEARDOWN_ADOPTED_CLAIM_LOCK_HELD=1
-  trap teardown_release_adopted_claim_lock EXIT
   [ -d "$FM_ADOPTED_CLAIM_DIR" ] && [ ! -L "$FM_ADOPTED_CLAIM_DIR" ] || {
     echo "error: adopted-worktree global claim registry is missing or unsafe; preserving endpoint and task state" >&2
     return 1
   }
   if fm_adopted_claim_matches "$TEARDOWN_ADOPTED_CLAIM_FILE" "$ID" \
     "$TEARDOWN_ADOPTED_CLAIM_HOME" "$WT" "$PROJ"; then
+    case "$FM_ADOPTED_CLAIM_ENDPOINT_STATE" in
+      legacy)
+        fm_adopted_claim_bind_endpoint "$TEARDOWN_ADOPTED_CLAIM_FILE" "$ID" \
+          "$TEARDOWN_ADOPTED_CLAIM_HOME" "$WT" "$PROJ" \
+          "$TEARDOWN_ADOPTED_WINDOW_ID" "$TEARDOWN_ADOPTED_SERVER_IDENTITY" \
+          "$TEARDOWN_ADOPTED_ENDPOINT_SESSION" || {
+            echo "error: legacy adopted-worktree claim could not be upgraded for teardown; preserving endpoint and task state" >&2
+            return 1
+          }
+        ;;
+      creating)
+        echo "error: adopted-worktree claim records an unresolved endpoint creation; preserving endpoint and task state" >&2
+        return 1
+        ;;
+      bound)
+        [ "$FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID" = "$TEARDOWN_ADOPTED_WINDOW_ID" ] \
+          && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY" = "$TEARDOWN_ADOPTED_SERVER_IDENTITY" ] \
+          && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SESSION" = "$TEARDOWN_ADOPTED_ENDPOINT_SESSION" ] || {
+            echo "error: adopted-worktree claim and task metadata identify different endpoint generations; preserving endpoint and task state" >&2
+            return 1
+          }
+        ;;
+      *)
+        echo "error: adopted-worktree claim endpoint state is unsupported; preserving endpoint and task state" >&2
+        return 1
+        ;;
+    esac
     return 0
   else
     claim_status=$?
@@ -519,7 +573,7 @@ teardown_adopted_claim_lock_and_validate() {
 }
 
 load_adopted_tmux_endpoint_identity() {  # <meta>
-  local meta=$1 window_id server_identity delivery
+  local meta=$1 window_id server_identity delivery endpoint_target
   fm_backend_source tmux || {
     echo "error: tmux endpoint validation is unavailable for adopted worktree metadata in $meta; preserving task state" >&2
     return 1
@@ -548,6 +602,17 @@ load_adopted_tmux_endpoint_identity() {  # <meta>
     pending|complete) ;;
     *)
       echo "error: adopted worktree metadata in $meta has an invalid endpoint delivery state; preserving task state" >&2
+      return 1
+      ;;
+  esac
+  endpoint_target=$(fm_backend_meta_exact_value "$meta" window) || endpoint_target=
+  case "$endpoint_target" in
+    *:*) TEARDOWN_ADOPTED_ENDPOINT_SESSION=${endpoint_target%%:*} ;;
+    *) TEARDOWN_ADOPTED_ENDPOINT_SESSION= ;;
+  esac
+  case "$TEARDOWN_ADOPTED_ENDPOINT_SESSION" in
+    ''|*$'\n'*|*$'\r'*|*$'\t'*)
+      echo "error: adopted worktree metadata in $meta has an invalid endpoint session; preserving task state" >&2
       return 1
       ;;
   esac
@@ -2269,7 +2334,6 @@ $session	$lock_path"
       else
         TEARDOWN_HERDR_LOCK_RECORDS="$session	$lock_path"
       fi
-      trap teardown_release_herdr_locks EXIT
       return 0
     fi
     sleep 0.1

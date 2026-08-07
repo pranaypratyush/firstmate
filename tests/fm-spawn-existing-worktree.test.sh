@@ -567,6 +567,92 @@ test_endpoint_cwd_mismatch_refuses_unbound_cleanup() {
   pass "fm-spawn refuses to kill a cwd-mismatched endpoint during abort cleanup"
 }
 
+test_unresolved_prepublication_endpoint_blocks_duplicate_retry() {
+  local id=adopt-unresolved-endpoint-k3 out status new_windows kills common claim
+  setup_case unresolved-endpoint "$id" ship
+  out=$(FM_FAKE_PANE_PATH="$PROJ" run_spawn "$id" ship "$WT")
+  status=$?
+  expect_code 1 "$status" "pre-publication cwd mismatch should refuse"
+  assert_contains "$out" 'failed to retire adopted task endpoint @123 safely after spawn refusal (cwd-identity)' \
+    "pre-publication fixture did not preserve an unresolved endpoint"
+  assert_absent "$HOME_DIR/state/$id.meta" "unresolved pre-publication fixture unexpectedly published metadata"
+  common=$(git -C "$PROJ" rev-parse --path-format=absolute --git-common-dir)
+  claim=$(find "$common/firstmate-adopted-worktree-claims-v1" -type f -name '*.claim' -print -quit)
+  [ -n "$claim" ] || fail "unresolved pre-publication fixture did not retain its durable global claim"
+  assert_grep 'endpoint_state=bound' "$claim" "unresolved pre-publication claim did not bind an endpoint generation"
+  assert_grep 'endpoint_window_id=@123' "$claim" "unresolved pre-publication claim lost the stable endpoint id"
+  assert_grep 'endpoint_server_identity=4242:123456' "$claim" "unresolved pre-publication claim lost the tmux server identity"
+  assert_grep 'endpoint_session=firstmate' "$claim" "unresolved pre-publication claim lost the tmux session"
+  printf '%s\n' lost-old-endpoint > "$WINDOW_STATE"
+
+  out=$(FM_FAKE_PANE_PATH="$PROJ" run_spawn "$id" ship "$WT")
+  status=$?
+  expect_code 1 "$status" "same-task retry must refuse when the exact preserved endpoint cannot be retired"
+  assert_contains "$out" 'pending adopted endpoint @123 could not be retired safely before retry (cwd-identity)' \
+    "same-task retry did not bind its refusal to the preserved endpoint"
+  new_windows=$(grep -c 'tmux new-window ' "$TLOG" || true)
+  kills=$(grep -c 'tmux kill-window ' "$TLOG" || true)
+  [ "$new_windows" -eq 1 ] || fail "unresolved endpoint retry created a duplicate endpoint (new_windows=$new_windows)"
+  [ "$kills" -eq 0 ] || fail "unresolved endpoint retry killed an endpoint without exact identity (kills=$kills)"
+  assert_absent "$HOME_DIR/state/$id.meta" "unresolved endpoint retry published replacement metadata"
+  pass "fm-spawn persists unresolved pre-publication endpoint identity and refuses duplicate retry"
+}
+
+test_teardown_serializes_against_same_id_recovery() {
+  local id=adopt-teardown-generation-k4 ready release teardown_out teardown_rc_file
+  local teardown_pid spawn_out spawn_status teardown_status new_windows
+  setup_case teardown-generation "$id" ship
+  run_spawn "$id" ship "$WT" >/dev/null \
+    || fail "teardown-generation fixture could not publish its initial adoption"
+  ready="$CASE/teardown.ready"
+  release="$CASE/teardown.release"
+  teardown_out="$CASE/teardown.out"
+  teardown_rc_file="$CASE/teardown.rc"
+  cat > "$FAKEBIN/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_ADOPT_TEARDOWN_PAUSE_READY:-}" ] \
+   && printf '%s\n' "$*" | grep -q 'worktree list'; then
+  : > "$FM_ADOPT_TEARDOWN_PAUSE_READY"
+  while [ ! -e "$FM_ADOPT_TEARDOWN_PAUSE_RELEASE" ]; do sleep 0.05; done
+fi
+exec "$FM_ADOPT_REAL_GIT" "$@"
+SH
+  chmod +x "$FAKEBIN/git"
+
+  (
+    FM_ADOPT_TEARDOWN_PAUSE_READY="$ready" \
+      FM_ADOPT_TEARDOWN_PAUSE_RELEASE="$release" \
+      FM_ADOPT_REAL_GIT="$REAL_GIT" run_teardown "$id" > "$teardown_out"
+    printf '%s\n' "$?" > "$teardown_rc_file"
+  ) &
+  teardown_pid=$!
+  for _ in $(seq 1 200); do
+    [ -e "$ready" ] && break
+    sleep 0.05
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$teardown_pid" || true
+    fail "teardown-generation fixture did not pause after reading task identity"
+  fi
+
+  spawn_out=$(run_spawn "$id" ship "$WT")
+  spawn_status=$?
+  : > "$release"
+  wait "$teardown_pid" || true
+  teardown_status=$(cat "$teardown_rc_file")
+
+  expect_code 1 "$spawn_status" "same-ID recovery must not publish while teardown owns the task generation"
+  assert_contains "$spawn_out" "another spawn is already creating task $id" \
+    "concurrent recovery did not refuse on the shared task-generation lock"
+  expect_code 0 "$teardown_status" "serialized teardown should complete after the pause clears"
+  assert_absent "$HOME_DIR/state/$id.meta" "serialized teardown retained its retired generation metadata"
+  new_windows=$(grep -c 'tmux new-window ' "$TLOG" || true)
+  [ "$new_windows" -eq 1 ] || fail "concurrent recovery created a replacement endpoint during teardown (new_windows=$new_windows)"
+  pass "fm-teardown serializes old-generation retirement against same-ID recovery publication"
+}
+
 test_recovery_reuses_claim_and_recaptures_head() {
   local id=adopt-recovery-l2 out status new_head meta_before brief_before
   setup_case recovery "$id" ship
@@ -588,7 +674,8 @@ test_recovery_reuses_claim_and_recaptures_head() {
 
   out=$(run_spawn "$id" ship "$WT"); status=$?
   expect_code 1 "$status" "recovery should refuse while the prior endpoint still exists"
-  assert_contains "$out" 'already exists' "live-window recovery refusal was not explicit"
+  assert_contains "$out" 'existing adopted endpoint @123 is still live; recovery refused' \
+    "live-window recovery refusal was not bound to the durable endpoint generation"
   cmp -s "$meta_before" "$HOME_DIR/state/$id.meta" || fail "failed recovery changed durable metadata"
   cmp -s "$brief_before" "$HOME_DIR/state/$id.adopted-brief.md" || fail "failed recovery desynchronized the adopted addendum"
 
@@ -613,6 +700,31 @@ test_recovery_reuses_claim_and_recaptures_head() {
   assert_contains "$out" 'does not prove the same adopted worktree, project, and branch' "branch-drift recovery refusal lacked ownership evidence"
   assert_no_endpoint_created
   pass "fm-spawn recovery reuses its durable adopted claim, recaptures HEAD, and refuses branch drift"
+}
+
+test_metadata_backed_legacy_claim_upgrades_on_recovery() {
+  local id=adopt-legacy-claim-l3 common claim legacy out status
+  setup_case legacy-claim "$id" ship
+  run_spawn "$id" ship "$WT" >/dev/null \
+    || fail "legacy-claim fixture could not publish its initial adoption"
+  common=$(git -C "$PROJ" rev-parse --path-format=absolute --git-common-dir)
+  claim=$(find "$common/firstmate-adopted-worktree-claims-v1" -type f -name '*.claim' -print -quit)
+  [ -n "$claim" ] || fail "legacy-claim fixture did not publish a global claim"
+  legacy="$CASE/legacy.claim"
+  {
+    printf '%s\n' 'version=1'
+    grep -E '^(task|home|worktree|project)=' "$claim"
+  } > "$legacy"
+  mv -f -- "$legacy" "$claim"
+  : > "$WINDOW_STATE"
+
+  out=$(run_spawn "$id" ship "$WT")
+  status=$?
+  expect_code 0 "$status" "metadata-backed version-1 claim should upgrade during same-task recovery"
+  assert_contains "$out" "spawned $id" "legacy claim recovery did not relaunch"
+  assert_grep 'version=2' "$claim" "legacy claim recovery did not publish the current schema"
+  assert_grep 'endpoint_state=bound' "$claim" "legacy claim recovery did not bind the replacement endpoint"
+  pass "fm-spawn upgrades metadata-backed path-only claims without losing recovery"
 }
 
 test_identity_change_before_publication_refuses_atomically() {
@@ -1026,7 +1138,10 @@ test_incompatible_modes_refuse_before_endpoint
 test_adoption_safe_harnesses_preserve_worktree_end_to_end
 test_retireable_secondmate_home_requires_discoverable_project
 test_endpoint_cwd_mismatch_refuses_unbound_cleanup
+test_teardown_serializes_against_same_id_recovery
+test_unresolved_prepublication_endpoint_blocks_duplicate_retry
 test_recovery_reuses_claim_and_recaptures_head
+test_metadata_backed_legacy_claim_upgrades_on_recovery
 test_identity_change_before_publication_refuses_atomically
 test_abort_cleanup_refuses_reused_window_id_after_server_restart
 test_post_publication_send_failures_are_retryable

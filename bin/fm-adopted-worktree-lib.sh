@@ -25,9 +25,12 @@
 # record path per physical worktree plus its common-directory-scoped lock.
 # Callers hold that lock from claim inspection/publication through their local
 # metadata publication, and during teardown from exact endpoint retirement
-# through local metadata plus claim retirement. Claim records contain exactly
-# version=, task=, home=, worktree=, and project=; every malformed, symbolic,
-# missing, or mismatched record fails closed.
+# through local metadata plus claim retirement. Version 2 records also carry an
+# endpoint_state=: `creating` fails closed across the tmux-create/publication
+# gap, while `bound` records the exact window, server lifetime, and session that
+# a retry must retire before creating another endpoint. Version 1 path-only
+# records are readable only for an exact metadata-backed upgrade. Every
+# malformed, symbolic, missing, or mismatched record fails closed.
 
 fm_adopted_worktree_snapshot() {  # <worktree-path> <project-root>
   local worktree=$1 project=$2 worktree_real project_real worktree_top project_top
@@ -159,12 +162,16 @@ fm_adopted_claim_registry_prepare() {  # uses FM_ADOPTED_CLAIM_DIR
 }
 
 fm_adopted_claim_read() {  # <claim-file>; returns 0 valid, 1 absent, 2 malformed
-  local claim=$1 line_count
+  local claim=$1 line_count version endpoint_state
   FM_ADOPTED_CLAIM_ERROR=
   FM_ADOPTED_CLAIM_TASK=
   FM_ADOPTED_CLAIM_HOME=
   FM_ADOPTED_CLAIM_WORKTREE=
   FM_ADOPTED_CLAIM_PROJECT=
+  FM_ADOPTED_CLAIM_ENDPOINT_STATE=
+  FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID=
+  FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY=
+  FM_ADOPTED_CLAIM_ENDPOINT_SESSION=
   if [ ! -e "$claim" ] && [ ! -L "$claim" ]; then
     FM_ADOPTED_CLAIM_ERROR=absent
     return 1
@@ -174,9 +181,12 @@ fm_adopted_claim_read() {  # <claim-file>; returns 0 valid, 1 absent, 2 malforme
     return 2
   fi
   line_count=$(wc -l < "$claim" | tr -d '[:space:]')
-  [ "$line_count" = 5 ] || { FM_ADOPTED_CLAIM_ERROR=shape; return 2; }
-  [ "$(fm_backend_meta_exact_value "$claim" version 2>/dev/null || true)" = 1 ] \
-    || { FM_ADOPTED_CLAIM_ERROR=version; return 2; }
+  version=$(fm_backend_meta_exact_value "$claim" version 2>/dev/null || true)
+  case "$version" in
+    1) [ "$line_count" = 5 ] || { FM_ADOPTED_CLAIM_ERROR=shape; return 2; } ;;
+    2) ;;
+    *) FM_ADOPTED_CLAIM_ERROR=version; return 2 ;;
+  esac
   FM_ADOPTED_CLAIM_TASK=$(fm_backend_meta_exact_value "$claim" task) \
     || { FM_ADOPTED_CLAIM_ERROR=task; return 2; }
   FM_ADOPTED_CLAIM_HOME=$(fm_backend_meta_exact_value "$claim" home) \
@@ -185,6 +195,35 @@ fm_adopted_claim_read() {  # <claim-file>; returns 0 valid, 1 absent, 2 malforme
     || { FM_ADOPTED_CLAIM_ERROR=worktree; return 2; }
   FM_ADOPTED_CLAIM_PROJECT=$(fm_backend_meta_exact_value "$claim" project) \
     || { FM_ADOPTED_CLAIM_ERROR=project; return 2; }
+  if [ "$version" = 1 ]; then
+    FM_ADOPTED_CLAIM_ENDPOINT_STATE=legacy
+    return 0
+  fi
+  endpoint_state=$(fm_backend_meta_exact_value "$claim" endpoint_state) \
+    || { FM_ADOPTED_CLAIM_ERROR=endpoint-state; return 2; }
+  case "$endpoint_state" in
+    creating)
+      [ "$line_count" = 6 ] || { FM_ADOPTED_CLAIM_ERROR=shape; return 2; }
+      ;;
+    bound)
+      [ "$line_count" = 9 ] || { FM_ADOPTED_CLAIM_ERROR=shape; return 2; }
+      FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID=$(fm_backend_meta_exact_value "$claim" endpoint_window_id) \
+        || { FM_ADOPTED_CLAIM_ERROR=endpoint-window; return 2; }
+      FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY=$(fm_backend_meta_exact_value "$claim" endpoint_server_identity) \
+        || { FM_ADOPTED_CLAIM_ERROR=endpoint-server; return 2; }
+      FM_ADOPTED_CLAIM_ENDPOINT_SESSION=$(fm_backend_meta_exact_value "$claim" endpoint_session) \
+        || { FM_ADOPTED_CLAIM_ERROR=endpoint-session; return 2; }
+      fm_backend_tmux_window_id_valid "$FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID" \
+        || { FM_ADOPTED_CLAIM_ERROR=endpoint-window; return 2; }
+      fm_backend_tmux_server_identity_valid "$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY" \
+        || { FM_ADOPTED_CLAIM_ERROR=endpoint-server; return 2; }
+      case "$FM_ADOPTED_CLAIM_ENDPOINT_SESSION" in
+        *$'\n'*|*$'\r'*|*$'\t'*) FM_ADOPTED_CLAIM_ERROR=endpoint-session; return 2 ;;
+      esac
+      ;;
+    *) FM_ADOPTED_CLAIM_ERROR=endpoint-state; return 2 ;;
+  esac
+  FM_ADOPTED_CLAIM_ENDPOINT_STATE=$endpoint_state
 }
 
 fm_adopted_claim_matches() {  # <claim> <task> <home> <worktree> <project>
@@ -205,20 +244,68 @@ fm_adopted_claim_matches() {  # <claim> <task> <home> <worktree> <project>
   fi
 }
 
-fm_adopted_claim_publish() {  # <claim> <task> <home> <worktree> <project>
-  local claim=$1 task=$2 home=$3 worktree=$4 project=$5 tmp
-  [ ! -e "$claim" ] && [ ! -L "$claim" ] || return 1
-  tmp=$(umask 077; mktemp "$FM_ADOPTED_CLAIM_DIR/.claim.XXXXXXXX") || return 1
+fm_adopted_claim_write() {  # <claim> <task> <home> <worktree> <project> <creating|bound> [window server session]
+  local claim=$1 task=$2 home=$3 worktree=$4 project=$5 state=$6
+  local window=${7:-} server=${8:-} session=${9:-} tmp claim_dir
+  claim_dir=${claim%/*}
+  case "$state" in
+    creating) ;;
+    bound)
+      fm_backend_tmux_window_id_valid "$window" || return 1
+      fm_backend_tmux_server_identity_valid "$server" || return 1
+      case "$session" in ''|*$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+  tmp=$(umask 077; mktemp "$claim_dir/.claim.XXXXXXXX") || return 1
   {
-    printf '%s\n' 'version=1'
+    printf '%s\n' 'version=2'
     printf 'task=%s\n' "$task"
     printf 'home=%s\n' "$home"
     printf 'worktree=%s\n' "$worktree"
     printf 'project=%s\n' "$project"
+    printf 'endpoint_state=%s\n' "$state"
+    if [ "$state" = bound ]; then
+      printf 'endpoint_window_id=%s\n' "$window"
+      printf 'endpoint_server_identity=%s\n' "$server"
+      printf 'endpoint_session=%s\n' "$session"
+    fi
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  FM_ADOPTED_CLAIM_WRITE_TMP=$tmp
+}
+
+fm_adopted_claim_publish() {  # <claim> <task> <home> <worktree> <project>
+  local claim=$1 tmp
+  [ ! -e "$claim" ] && [ ! -L "$claim" ] || return 1
+  fm_adopted_claim_write "$@" creating || return 1
+  tmp=$FM_ADOPTED_CLAIM_WRITE_TMP
   ln "$tmp" "$claim" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
   rm -f -- "$tmp"
+}
+
+fm_adopted_claim_mark_creating() {  # <claim> <task> <home> <worktree> <project>
+  local claim=$1 tmp
+  fm_adopted_claim_matches "$@" || return 1
+  [ "$FM_ADOPTED_CLAIM_ENDPOINT_STATE" != creating ] || return 0
+  fm_adopted_claim_write "$@" creating || return 1
+  tmp=$FM_ADOPTED_CLAIM_WRITE_TMP
+  mv -f -- "$tmp" "$claim" || { rm -f -- "$tmp"; return 1; }
+}
+
+fm_adopted_claim_bind_endpoint() {  # <claim> <task> <home> <worktree> <project> <window> <server> <session>
+  local claim=$1 task=$2 home=$3 worktree=$4 project=$5 window=$6 server=$7 session=$8 tmp
+  fm_adopted_claim_matches "$claim" "$task" "$home" "$worktree" "$project" || return 1
+  if [ "$FM_ADOPTED_CLAIM_ENDPOINT_STATE" = bound ]; then
+    [ "$FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID" = "$window" ] \
+      && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY" = "$server" ] \
+      && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SESSION" = "$session" ]
+    return
+  fi
+  fm_adopted_claim_write "$claim" "$task" "$home" "$worktree" "$project" \
+    bound "$window" "$server" "$session" || return 1
+  tmp=$FM_ADOPTED_CLAIM_WRITE_TMP
+  mv -f -- "$tmp" "$claim" || { rm -f -- "$tmp"; return 1; }
 }
 
 fm_adopted_claim_remove_exact() {  # <claim> <task> <home> <worktree> <project>
