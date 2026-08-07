@@ -253,6 +253,13 @@ done
   || fail "real tmux: pending-delivery fixture did not report its exact adopted cwd"
 PENDING_SERVER_IDENTITY=$(fm_backend_tmux_server_identity "$PENDING_WID") \
   || fail "real tmux: pending-delivery fixture had no stable server identity"
+restarted_refusal=$(fm_backend_tmux_retire_adopted_window \
+  "$PENDING_WID" '999999999:1' "$SESSION" "$PENDING_CWD")
+restarted_status=$?
+[ "$restarted_status" -eq 2 ] && [ "$restarted_refusal" = server-mismatch ] \
+  || fail "real tmux: cleanup did not refuse a stable id bound to another server lifetime"
+tmux list-windows -t "$SESSION" -F '#{window_id}' | grep -Fqx "$PENDING_WID" \
+  || fail "real tmux: server-mismatched cleanup removed the pending endpoint"
 tmux split-window -d -t "$PENDING_WID" -c "$PENDING_CWD" \
   || fail "real tmux: could not add the unrelated second-pane safety fixture"
 pending_refusal=$(fm_backend_tmux_retire_adopted_window \
@@ -273,7 +280,7 @@ fm_backend_tmux_retire_adopted_window \
 if tmux list-windows -t "$SESSION" -F '#{window_id}' | grep -Fqx "$PENDING_WID"; then
   fail "real tmux: exact pending endpoint survived stable-id retirement"
 fi
-pass "real tmux: adopted endpoint cleanup refuses multi-pane ambiguity and retires a renamed single-pane window by stable id"
+pass "real tmux: adopted endpoint cleanup refuses server-lifetime and multi-pane ambiguity, then retires a renamed bound window"
 
 tmux rename-window -t "$STABLE_WID" fm-renamed-after-create \
   || fail "real tmux: could not simulate a lost task window name"

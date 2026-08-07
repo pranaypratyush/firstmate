@@ -46,7 +46,11 @@
 # worktree-provider removal operation. Any adopted index.lock is preserved and
 # refuses teardown, including --force. The marker is accepted only once and only
 # with one adopted_branch= and adopted_head= on the supported tmux ordinary-task
-# contract; any other value or shape refuses before cleanup mutation. Forced
+# contract; any other value or shape refuses before cleanup mutation. The exact
+# Git-common-directory claim must identify this home/task/worktree/project under
+# its shared lock; teardown holds that lock from endpoint retirement through
+# local-state removal and removes the claim only after local metadata is gone.
+# Forced
 # recursive secondmate retirement refuses before mutation when descendant
 # metadata declares adoption or when a direct checkout under the home's projects/
 # directory still registers an unowned secondary Git worktree. fm-spawn refuses
@@ -153,6 +157,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-adopted-worktree-lib.sh
+. "$SCRIPT_DIR/fm-adopted-worktree-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -182,6 +188,18 @@ FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+
+TEARDOWN_ADOPTED_CLAIM_LOCK=
+TEARDOWN_ADOPTED_CLAIM_LOCK_HELD=0
+TEARDOWN_ADOPTED_CLAIM_FILE=
+TEARDOWN_ADOPTED_CLAIM_HOME=
+
+teardown_release_adopted_claim_lock() {
+  if [ "$TEARDOWN_ADOPTED_CLAIM_LOCK_HELD" = 1 ]; then
+    TEARDOWN_ADOPTED_CLAIM_LOCK_HELD=0
+    fm_lock_release "$TEARDOWN_ADOPTED_CLAIM_LOCK" || true
+  fi
+}
 
 REMOTE_HANDOFF_DIR_PRESENT=0
 REMOTE_HANDOFF_DIR_REAL=
@@ -438,8 +456,6 @@ validate_adopted_worktree_metadata() {  # <meta> <kind> <backend>
   # explicit --force. When it exists, prove the complete project relationship
   # before process cleanup or any other path-scoped action.
   [ -e "$wt" ] || return 0
-  # shellcheck source=bin/fm-adopted-worktree-lib.sh
-  . "$SCRIPT_DIR/fm-adopted-worktree-lib.sh"
   if ! fm_adopted_worktree_identity_matches "$wt" "$project" "$wt" "$branch" ""; then
     case "${FM_ADOPTED_IDENTITY_ERROR:-unknown}" in
       registration|inventory)
@@ -454,6 +470,52 @@ validate_adopted_worktree_metadata() {  # <meta> <kind> <backend>
     esac
     return 1
   fi
+}
+
+load_adopted_global_claim_identity() {  # <worktree> <project>
+  local wt=$1 project=$2
+  TEARDOWN_ADOPTED_CLAIM_HOME=$(cd -- "$FM_HOME" 2>/dev/null && pwd -P) || {
+    echo "error: Firstmate home identity cannot be resolved for adopted-worktree teardown; preserving task state" >&2
+    return 1
+  }
+  case "$TEARDOWN_ADOPTED_CLAIM_HOME" in
+    *$'\n'*|*$'\r'*|*$'\t'*)
+      echo "error: Firstmate home path contains metadata-unsafe bytes; preserving adopted task state" >&2
+      return 1
+      ;;
+  esac
+  fm_adopted_claim_paths "$project" "$wt" || {
+    echo "error: adopted-worktree global claim identity cannot be derived; preserving task state" >&2
+    return 1
+  }
+  TEARDOWN_ADOPTED_CLAIM_LOCK=$FM_ADOPTED_CLAIM_LOCK
+  TEARDOWN_ADOPTED_CLAIM_FILE=$FM_ADOPTED_CLAIM_FILE
+}
+
+teardown_adopted_claim_lock_and_validate() {
+  local claim_status
+  fm_lock_acquire_wait "$TEARDOWN_ADOPTED_CLAIM_LOCK" || {
+    echo "error: adopted-worktree global claim registry could not be locked; preserving task state" >&2
+    return 1
+  }
+  TEARDOWN_ADOPTED_CLAIM_LOCK_HELD=1
+  trap teardown_release_adopted_claim_lock EXIT
+  [ -d "$FM_ADOPTED_CLAIM_DIR" ] && [ ! -L "$FM_ADOPTED_CLAIM_DIR" ] || {
+    echo "error: adopted-worktree global claim registry is missing or unsafe; preserving endpoint and task state" >&2
+    return 1
+  }
+  if fm_adopted_claim_matches "$TEARDOWN_ADOPTED_CLAIM_FILE" "$ID" \
+    "$TEARDOWN_ADOPTED_CLAIM_HOME" "$WT" "$PROJ"; then
+    return 0
+  else
+    claim_status=$?
+  fi
+  if [ "$claim_status" -eq 2 ] && [ "${FM_ADOPTED_CLAIM_ERROR:-}" = ownership ]; then
+    echo "error: adopted-worktree global claim belongs to task $FM_ADOPTED_CLAIM_TASK in home $FM_ADOPTED_CLAIM_HOME; preserving endpoint and task state" >&2
+  else
+    echo "error: adopted-worktree global claim is ${FM_ADOPTED_CLAIM_ERROR:-ambiguous}; preserving endpoint and task state" >&2
+  fi
+  return 1
 }
 
 load_adopted_tmux_endpoint_identity() {  # <meta>
@@ -511,6 +573,7 @@ WORKTREE_OWNERSHIP=$(require_worktree_ownership "$META") || exit 1
 if [ "$WORKTREE_OWNERSHIP" = adopted ]; then
   validate_adopted_worktree_metadata "$META" "$KIND" "$BACKEND" || exit 1
   load_adopted_tmux_endpoint_identity "$META" || exit 1
+  load_adopted_global_claim_identity "$WT" "$PROJ" || exit 1
 fi
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
@@ -2476,6 +2539,9 @@ fi
 # kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
+if [ "$WORKTREE_OWNERSHIP" = adopted ]; then
+  teardown_adopted_claim_lock_and_validate || exit 1
+fi
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
   if [ "$WORKTREE_OWNERSHIP" = adopted ]; then
@@ -2644,12 +2710,27 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
+if [ "$WORKTREE_OWNERSHIP" = adopted ]; then
+  fm_adopted_claim_matches "$TEARDOWN_ADOPTED_CLAIM_FILE" "$ID" \
+    "$TEARDOWN_ADOPTED_CLAIM_HOME" "$WT" "$PROJ" || {
+      echo "error: adopted-worktree global claim changed during teardown; preserving task metadata" >&2
+      exit 1
+    }
+fi
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" \
   "$STATE/$ID.adopted-brief.md" \
   "$STATE/.$ID.open-decisions-cursor"
+if [ "$WORKTREE_OWNERSHIP" = adopted ]; then
+  fm_adopted_claim_remove_exact "$TEARDOWN_ADOPTED_CLAIM_FILE" "$ID" \
+    "$TEARDOWN_ADOPTED_CLAIM_HOME" "$WT" "$PROJ" || {
+      echo "error: adopted task state retired but its global claim could not be removed; the claim remains fail-closed for recovery" >&2
+      exit 1
+    }
+  teardown_release_adopted_claim_lock
+fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

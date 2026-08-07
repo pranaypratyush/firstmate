@@ -21,7 +21,11 @@ set -u
 [ -z "${FM_ADOPT_TMUX_LOG:-}" ] || printf 'tmux %s\n' "$*" >> "$FM_ADOPT_TMUX_LOG"
 case "$*" in
   display-message*"#{pid}:#{start_time}"*)
-    printf '%s\n' "${FM_ADOPT_SERVER_IDENTITY:-4242:123456}"
+    if [ -n "${FM_ADOPT_SERVER_IDENTITY_STATE:-}" ] && [ -s "$FM_ADOPT_SERVER_IDENTITY_STATE" ]; then
+      cat "$FM_ADOPT_SERVER_IDENTITY_STATE"
+    else
+      printf '%s\n' "${FM_ADOPT_SERVER_IDENTITY:-4242:123456}"
+    fi
     exit 0
     ;;
   display-message*"#{window_id}"*)
@@ -145,21 +149,23 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-setup_case() {  # <name> <task-id> <ship|scout>
-  local name=$1 id=$2 kind=$3
+setup_case() {  # <name> <task-id> <ship|scout> [project-suffix] [worktree-suffix]
+  local name=$1 id=$2 kind=$3 project_suffix=${4:-} worktree_suffix=${5:-}
   CASE="$TMP_ROOT/$name"
   HOME_DIR="$CASE/home"
-  PROJ="$CASE/project"
-  WT="$CASE/adopted-wt"
+  PROJ="$CASE/project$project_suffix"
+  WT="$CASE/adopted-wt$worktree_suffix"
   TLOG="$CASE/tmux.log"
   TREELOG="$CASE/treehouse.log"
   WINDOW_STATE="$CASE/window.state"
+  SERVER_IDENTITY_STATE="$CASE/server-identity.state"
   SEND_COUNT="$CASE/send.count"
   FAKEBIN=$(make_fakebin "$CASE/fakes")
   mkdir -p "$HOME_DIR/data/$id" "$HOME_DIR/state" "$HOME_DIR/config" "$HOME_DIR/projects"
   : > "$TLOG"
   : > "$TREELOG"
   : > "$WINDOW_STATE"
+  printf '%s\n' '4242:123456' > "$SERVER_IDENTITY_STATE"
   : > "$SEND_COUNT"
   git init -q -b main "$PROJ"
   printf '%s\n' baseline > "$PROJ/base.txt"
@@ -188,6 +194,7 @@ run_spawn_command() {
     FM_ADOPT_LIVE_SESSION="${FM_ADOPT_LIVE_SESSION:-firstmate}" \
     FM_ADOPT_LIVE_WINDOW_ID="${FM_ADOPT_LIVE_WINDOW_ID:-@777}" \
     FM_ADOPT_SERVER_IDENTITY="${FM_ADOPT_SERVER_IDENTITY:-4242:123456}" \
+    FM_ADOPT_SERVER_IDENTITY_STATE="$SERVER_IDENTITY_STATE" \
     FM_ADOPT_BASE_PANE_PATH="${FM_ADOPT_BASE_PANE_PATH:-$PROJ}" \
     FM_ADOPT_GIT_COUNT="${FM_ADOPT_GIT_COUNT:-}" FM_ADOPT_GIT_MUTATE_AT="${FM_ADOPT_GIT_MUTATE_AT:-0}" \
     FM_ADOPT_MUTATE_WT="${FM_ADOPT_MUTATE_WT:-}" FM_ADOPT_REAL_GIT="$REAL_GIT" \
@@ -298,6 +305,14 @@ test_input_and_ownership_refusals_precede_endpoint() {
   assert_contains "$out" 'did not yield an isolated worktree' "primary refusal lacked isolation evidence"
   assert_no_endpoint_created
 
+  id=adopt-inverse-primary-e6
+  setup_case inverse-primary "$id" ship
+  out=$(FM_ADOPT_PROJECT_ARG="$WT" FM_ADOPT_BASE_PANE_PATH="$CASE" run_spawn "$id" ship "$PROJ"); status=$?
+  expect_code 1 "$status" "linked worktree project argument must not make the primary checkout adoptable"
+  assert_contains "$out" 'requested project is not the canonical primary Git worktree' "inverse primary refusal lacked canonical-project evidence"
+  assert_no_endpoint_created
+  assert_absent "$HOME_DIR/state/$id.meta" "inverse primary refusal published metadata"
+
   id=adopt-foreign-f6
   setup_case foreign "$id" ship
   foreign="$CASE/foreign"
@@ -351,6 +366,22 @@ test_input_and_ownership_refusals_precede_endpoint() {
   assert_no_endpoint_created
   assert_absent "$HOME_DIR/state/$id.meta" "project-newline refusal published malformed metadata"
 
+  id=adopt-project-tab-j1
+  setup_case project-tab "$id" ship $'\tunsafe'
+  out=$(run_spawn "$id" ship "$WT"); status=$?
+  expect_code 1 "$status" "tab-bearing requested project should refuse"
+  assert_contains "$out" 'requested project path must not contain a tab' "project-tab refusal did not name the metadata-safety boundary"
+  assert_no_endpoint_created
+  assert_absent "$HOME_DIR/state/$id.meta" "project-tab refusal published malformed metadata"
+
+  id=adopt-worktree-tab-j2
+  setup_case worktree-tab "$id" ship '' $'\tunsafe'
+  out=$(run_spawn "$id" ship "$WT"); status=$?
+  expect_code 1 "$status" "tab-bearing adopted worktree should refuse"
+  assert_contains "$out" '--existing-worktree path must not contain a tab' "worktree-tab refusal did not name the metadata-safety boundary"
+  assert_no_endpoint_created
+  assert_absent "$HOME_DIR/state/$id.meta" "worktree-tab refusal published malformed metadata"
+
   pass "fm-spawn refuses non-exact, primary, foreign, symlinked, claimed, detached, and metadata-unsafe identities before endpoint creation"
 }
 
@@ -392,6 +423,28 @@ test_live_claims_and_ambiguous_tmux_inventory_refuse() {
   assert_no_endpoint_created
   assert_absent "$HOME_DIR/state/$id.meta" "ambiguous inventory refusal published metadata"
   pass "fm-spawn refuses same-session and cross-session live claims plus renamed or unreadable tmux occupancy"
+}
+
+test_cross_home_dead_durable_claim_refuses() {
+  local first_id=adopt-home-a-k2 second_id=adopt-home-b-k3 home_b out status
+  setup_case cross-home-dead-claim "$first_id" ship
+  run_spawn "$first_id" ship "$WT" >/dev/null \
+    || fail "cross-home fixture could not publish the first durable adoption"
+  assert_present "$HOME_DIR/state/$first_id.meta" "cross-home fixture lost the first home's durable metadata"
+  : > "$WINDOW_STATE"
+  : > "$TLOG"
+
+  home_b="$CASE/home-b"
+  mkdir -p "$home_b/data/$second_id" "$home_b/state" "$home_b/config" "$home_b/projects"
+  printf '%s\n' 'Delivery contract: mode=local-only' > "$home_b/data/$second_id/brief.md"
+  out=$(FM_ADOPT_TASK_HOME="$home_b" run_spawn "$second_id" ship "$WT")
+  status=$?
+  expect_code 1 "$status" "a second home should refuse another home's dead durable adoption claim"
+  assert_contains "$out" "already claimed by durable Firstmate task $first_id" "cross-home refusal did not identify the durable owner"
+  assert_no_endpoint_created
+  assert_absent "$home_b/state/$second_id.meta" "cross-home refusal published duplicate task metadata"
+  assert_present "$HOME_DIR/state/$first_id.meta" "cross-home refusal changed the original durable owner"
+  pass "fm-spawn enforces adopted-worktree durable claims across Firstmate homes after endpoint death"
 }
 
 test_incompatible_modes_refuse_before_endpoint() {
@@ -492,7 +545,7 @@ test_retireable_secondmate_home_requires_discoverable_project() {
   pass "retireable secondmate homes adopt only from direct registered project checkouts"
 }
 
-test_endpoint_cwd_mismatch_is_cleaned_without_meta() {
+test_endpoint_cwd_mismatch_refuses_unbound_cleanup() {
   local id=adopt-cwd-mismatch-k2 out status
   setup_case cwd-mismatch "$id" ship
   out=$(FM_FAKE_PANE_PATH="$PROJ" run_spawn_command \
@@ -501,10 +554,17 @@ test_endpoint_cwd_mismatch_is_cleaned_without_meta() {
   status=$?
   expect_code 1 "$status" "endpoint cwd mismatch should refuse"
   assert_contains "$out" 'endpoint did not start in the exact worktree' "cwd mismatch refusal lacked exact evidence"
-  assert_grep 'tmux kill-window -t @123' "$TLOG" "failed adopted endpoint was not cleaned up by stable id"
+  assert_contains "$out" 'failed to retire adopted task endpoint @123 safely after spawn refusal (cwd-identity)' "cwd mismatch did not surface the fail-closed cleanup boundary"
+  assert_no_grep 'tmux kill-window -t @123' "$TLOG" "cwd-mismatched abort cleanup killed an endpoint it could not bind to the adopted worktree"
+  [ -s "$WINDOW_STATE" ] || fail "cwd-mismatched endpoint was removed despite failed identity binding"
   assert_absent "$HOME_DIR/state/$id.meta" "cwd mismatch published task metadata"
   assert_absent "$HOME_DIR/state/$id.adopted-brief.md" "cwd mismatch retained a new adoption addendum"
-  pass "fm-spawn cleans a mismatched endpoint and publishes no durable adoption claim"
+  : > "$WINDOW_STATE"
+  out=$(run_spawn "$id" ship "$WT")
+  status=$?
+  expect_code 0 "$status" "same-task recovery should reuse a preserved pre-publication global claim"
+  assert_contains "$out" "spawned $id" "preserved pre-publication claim did not support same-task recovery"
+  pass "fm-spawn refuses to kill a cwd-mismatched endpoint during abort cleanup"
 }
 
 test_recovery_reuses_claim_and_recaptures_head() {
@@ -588,6 +648,41 @@ SH
   pass "fm-spawn revalidates complete adopted identity immediately before atomic metadata publication"
 }
 
+test_abort_cleanup_refuses_reused_window_id_after_server_restart() {
+  local id=adopt-abort-server-restart-m4 out status git_count
+  setup_case abort-server-restart "$id" ship
+  git_count="$CASE/git-worktree-list.count"
+  cat > "$FAKEBIN/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if printf '%s\n' "$*" | grep -q 'worktree list'; then
+  count=0
+  [ ! -s "$FM_ADOPT_GIT_COUNT" ] || count=$(cat "$FM_ADOPT_GIT_COUNT")
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$FM_ADOPT_GIT_COUNT"
+  if [ "$count" = "$FM_ADOPT_GIT_MUTATE_AT" ]; then
+    "$FM_ADOPT_REAL_GIT" -C "$FM_ADOPT_MUTATE_WT" commit -q --allow-empty -m external-race
+    printf '%s\n' '9001:654321' > "$FM_ADOPT_SERVER_IDENTITY_STATE"
+    printf '%s\n' unrelated-reused-window > "$FM_ADOPT_WINDOW_STATE"
+  fi
+fi
+exec "$FM_ADOPT_REAL_GIT" "$@"
+SH
+  chmod +x "$FAKEBIN/git"
+
+  out=$(FM_ADOPT_GIT_COUNT="$git_count" FM_ADOPT_GIT_MUTATE_AT=4 FM_ADOPT_MUTATE_WT="$WT" \
+    run_spawn "$id" ship "$WT")
+  status=$?
+  expect_code 1 "$status" "server restart during abort cleanup should preserve the reused window"
+  assert_contains "$out" 'identity changed during metadata publication' "server-restart fixture did not reach pre-publication abort cleanup"
+  [ "$(cat "$SERVER_IDENTITY_STATE")" = '9001:654321' ] || fail "server-restart fixture did not change the tmux server identity"
+  [ "$(cat "$WINDOW_STATE")" = unrelated-reused-window ] \
+    || fail "abort cleanup killed an unrelated window that reused the old stable id"
+  assert_no_grep 'tmux kill-window -t @123' "$TLOG" "abort cleanup killed a reused window id after server restart"
+  assert_absent "$HOME_DIR/state/$id.meta" "server-restart abort cleanup published task metadata"
+  pass "fm-spawn abort cleanup binds stable window ids to their creation-time tmux server"
+}
+
 test_post_publication_send_failures_are_retryable() {
   local fail_at id out status before_retry
   for fail_at in 1 2 3; do
@@ -637,7 +732,7 @@ test_post_publication_send_failures_are_retryable() {
 }
 
 test_teardown_retires_task_without_returning_adopted_worktree() {
-  local id=adopt-teardown-l3 out status branch head origin
+  local id=adopt-teardown-l3 next_id=adopt-after-teardown-l4 out status branch head origin home_b
   setup_case teardown "$id" ship
   origin="$CASE/origin.git"
   git init -q --bare "$origin"
@@ -660,6 +755,14 @@ test_teardown_retires_task_without_returning_adopted_worktree() {
   [ "$(git -C "$WT" rev-parse HEAD)" = "$head" ] || fail "adopted teardown changed HEAD"
   assert_no_grep 'treehouse ' "$TREELOG" "adopted teardown returned or mutated the Treehouse lease"
   assert_grep 'tmux kill-window ' "$TLOG" "adopted teardown did not close the ordinary endpoint"
+
+  home_b="$CASE/home-b"
+  mkdir -p "$home_b/data/$next_id" "$home_b/state" "$home_b/config" "$home_b/projects"
+  printf '%s\n' 'Delivery contract: mode=local-only' > "$home_b/data/$next_id/brief.md"
+  out=$(FM_ADOPT_TASK_HOME="$home_b" run_spawn "$next_id" ship "$WT")
+  status=$?
+  expect_code 0 "$status" "successful teardown should release the global claim for later cross-home adoption"
+  assert_contains "$out" "spawned $next_id" "later cross-home adoption did not succeed after teardown"
   pass "fm-teardown retires landed adopted task state and endpoint without reclaiming the worktree"
 }
 
@@ -713,6 +816,32 @@ SH
   wait "$external_pid" 2>/dev/null || true
   assert_present "$WT" "external-process teardown removed the adopted worktree"
   pass "fm-teardown never scans or reaps arbitrary processes by adopted-worktree cwd"
+}
+
+test_teardown_refuses_without_exact_global_claim() {
+  local id=adopt-missing-global-claim-p6 out status origin common claim
+  setup_case missing-global-claim "$id" ship
+  origin="$CASE/origin.git"
+  git init -q --bare "$origin"
+  git -C "$PROJ" remote add origin "$origin"
+  git -C "$PROJ" push -q origin main
+  git -C "$WT" push -q -u origin "recovered/$id"
+  run_spawn "$id" ship "$WT" >/dev/null
+  common=$(git -C "$PROJ" rev-parse --path-format=absolute --git-common-dir)
+  claim=$(find "$common/firstmate-adopted-worktree-claims-v1" -type f -name '*.claim' -print -quit)
+  [ -n "$claim" ] || fail "missing-claim fixture did not publish a global claim"
+  rm -f -- "$claim"
+  : > "$TLOG"
+
+  out=$(run_teardown "$id")
+  status=$?
+  expect_code 1 "$status" "adopted teardown should refuse when its global claim is missing"
+  assert_contains "$out" 'global claim is absent' "missing global claim refusal did not name the ownership gap"
+  assert_present "$HOME_DIR/state/$id.meta" "missing global claim refusal erased local metadata"
+  [ -s "$WINDOW_STATE" ] || fail "missing global claim refusal removed the live endpoint"
+  assert_no_grep 'tmux kill-window ' "$TLOG" "missing global claim refusal closed the endpoint"
+  assert_present "$WT" "missing global claim refusal removed the adopted worktree"
+  pass "fm-teardown preserves endpoint and state when global adopted ownership is missing"
 }
 
 test_adopted_teardown_preserves_index_lock() {
@@ -775,7 +904,7 @@ test_symlinked_project_identity_is_canonical_and_teardown_safe() {
 }
 
 test_forced_secondmate_retirement_refuses_adopted_descendants() {
-  local placement parent child sm_home child_project child_wt branch head out status
+  local placement parent child sm_home child_project child_wt out status
   for placement in inside-home outside-home; do
     parent="adopt-parent-${placement}-s8"
     child="adopt-child-${placement}-t9"
@@ -787,27 +916,15 @@ test_forced_secondmate_retirement_refuses_adopted_descendants() {
     else
       child_wt="$CASE/outside-adopted-worktree"
     fi
-    mkdir -p "$sm_home/state" "$sm_home/data" "$sm_home/config" "$sm_home/projects"
+    mkdir -p "$sm_home/state" "$sm_home/data/$child" "$sm_home/config" "$sm_home/projects"
     printf '%s\n' "$parent" > "$sm_home/.fm-secondmate-home"
+    printf '%s\n' 'Delivery contract: mode=local-only' > "$sm_home/data/$child/brief.md"
     git init -q -b main "$child_project"
     git -C "$child_project" commit -q --allow-empty -m baseline
     git -C "$child_project" worktree add -q -b "recovered/$child" "$child_wt" main
-    branch=$(git -C "$child_wt" symbolic-ref --short HEAD)
-    head=$(git -C "$child_wt" rev-parse HEAD)
-    fm_write_meta "$sm_home/state/$child.meta" \
-      "window=firstmate:fm-$child" \
-      "endpoint_task_id=$child" \
-      "worktree=$child_wt" \
-      "project=$child_project" \
-      'harness=codex' \
-      'kind=ship' \
-      'mode=local-only' \
-      'worktree_ownership=adopted' \
-      "adopted_branch=$branch" \
-      "adopted_head=$head" \
-      'adopted_window_id=@123' \
-      'adopted_tmux_server_identity=4242:123456' \
-      'adopted_delivery=complete'
+    FM_ADOPT_TASK_HOME="$sm_home" FM_ADOPT_PROJECT_ARG="$child_project" \
+      FM_FAKE_PANE_PATH="$child_wt" run_spawn "$child" ship "$child_wt" >/dev/null \
+      || fail "forced-retirement fixture could not publish the $placement adopted child"
     fm_write_meta "$HOME_DIR/state/$parent.meta" \
       "window=firstmate:fm-$parent" \
       "endpoint_task_id=$parent" \
@@ -837,7 +954,7 @@ test_forced_secondmate_retirement_refuses_adopted_descendants() {
 }
 
 test_completed_adopted_descendant_still_blocks_secondmate_retirement() {
-  local placement parent child sm_home child_project child_wt origin branch head out status
+  local placement parent child sm_home child_project child_wt origin out status
   for placement in inside-home outside-home; do
     parent="adopt-complete-parent-${placement}-u0"
     child="adopt-complete-child-${placement}-v1"
@@ -860,22 +977,9 @@ test_completed_adopted_descendant_still_blocks_secondmate_retirement() {
     git -C "$child_project" push -q origin main
     git -C "$child_project" worktree add -q -b "recovered/$child" "$child_wt" main
     git -C "$child_wt" push -q -u origin "recovered/$child"
-    branch=$(git -C "$child_wt" symbolic-ref --short HEAD)
-    head=$(git -C "$child_wt" rev-parse HEAD)
-    fm_write_meta "$sm_home/state/$child.meta" \
-      "window=firstmate:fm-$child" \
-      "endpoint_task_id=$child" \
-      "worktree=$child_wt" \
-      "project=$child_project" \
-      'harness=codex' \
-      'kind=ship' \
-      'mode=local-only' \
-      'worktree_ownership=adopted' \
-      "adopted_branch=$branch" \
-      "adopted_head=$head" \
-      'adopted_window_id=@123' \
-      'adopted_tmux_server_identity=4242:123456' \
-      'adopted_delivery=complete'
+    FM_ADOPT_TASK_HOME="$sm_home" FM_ADOPT_PROJECT_ARG="$child_project" \
+      FM_FAKE_PANE_PATH="$child_wt" run_spawn "$child" ship "$child_wt" >/dev/null \
+      || fail "completed-descendant fixture could not publish the $placement adopted child"
     fm_write_meta "$HOME_DIR/state/$parent.meta" \
       "window=firstmate:fm-$parent" \
       "endpoint_task_id=$parent" \
@@ -917,16 +1021,19 @@ test_safe_ship_adoption_preserves_git_state
 test_safe_scout_adoption_has_non_discard_contract
 test_input_and_ownership_refusals_precede_endpoint
 test_live_claims_and_ambiguous_tmux_inventory_refuse
+test_cross_home_dead_durable_claim_refuses
 test_incompatible_modes_refuse_before_endpoint
 test_adoption_safe_harnesses_preserve_worktree_end_to_end
 test_retireable_secondmate_home_requires_discoverable_project
-test_endpoint_cwd_mismatch_is_cleaned_without_meta
+test_endpoint_cwd_mismatch_refuses_unbound_cleanup
 test_recovery_reuses_claim_and_recaptures_head
 test_identity_change_before_publication_refuses_atomically
+test_abort_cleanup_refuses_reused_window_id_after_server_restart
 test_post_publication_send_failures_are_retryable
 test_teardown_retires_task_without_returning_adopted_worktree
 test_teardown_closes_renamed_adopted_endpoint_by_stable_id
 test_teardown_does_not_reap_external_worktree_processes
+test_teardown_refuses_without_exact_global_claim
 test_adopted_teardown_preserves_index_lock
 test_symlinked_project_identity_is_canonical_and_teardown_safe
 test_forced_secondmate_retirement_refuses_adopted_descendants

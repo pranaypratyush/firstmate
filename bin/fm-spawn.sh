@@ -49,12 +49,14 @@
 #   top-level, be distinct from the requested project's primary checkout, share
 #   that project's exact Git common directory, occur exactly once in `git worktree
 #   list --porcelain`, carry a named branch, and be unclaimed by every other
-#   durable task meta in this home. A home-wide adoption lock closes the
-#   check-to-publication race between different task ids. A recovery spawn may
-#   reuse its own adopted claim only when the path, project, ownership marker, and
-#   named branch still agree. Recovery atomically replaces only spawn-owned meta
-#   fields, retains every other durable field, and rolls the generated addendum
-#   back if refusal occurs before the matching metadata publication.
+#   durable Firstmate task in any home. The shared identity library owns a
+#   Git-common-directory claim record keyed by the physical worktree and a lock
+#   held from global claim inspection/publication through this home's metadata
+#   publication. A recovery spawn may reuse only its own exact home/task claim
+#   when the path, project, ownership marker, and named branch still agree.
+#   Recovery atomically replaces only spawn-owned meta fields, retains every
+#   other durable field, and rolls the generated addendum back if refusal occurs
+#   before the matching metadata publication.
 #   While holding that lock, adoption also reads every live tmux fm-<task-id>
 #   endpoint and its exact physical CWD. A different live task at the requested
 #   worktree, or any unreadable/ambiguous task inventory, refuses before creation.
@@ -76,8 +78,9 @@
 #   worktree_ownership=adopted are recorded in task meta. Absence of that marker
 #   retains the historical Firstmate-owned allocation contract byte-for-byte.
 #   The complete worktree identity is revalidated immediately before atomic meta
-#   publication. Until launch delivery succeeds, abort cleanup owns the endpoint
-#   by its stable tmux window id. Publication records that id with pending
+#   publication. Until launch delivery succeeds, abort cleanup binds the endpoint
+#   to its creation-time tmux server, session, sole pane, and worktree CWD before
+#   removing it by stable window id. Publication records that id with pending
 #   delivery, and successful brief delivery atomically marks it complete. A
 #   later send refusal retains aligned durable metadata and addendum state; if
 #   abort cleanup also fails, same-id retry verifies and retires only that exact
@@ -691,6 +694,11 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 ADOPTION_LOCK=
 ADOPTION_LOCK_HELD=0
+ADOPTED_CLAIM_LOCK=
+ADOPTED_CLAIM_LOCK_HELD=0
+ADOPTED_CLAIM_FILE=
+ADOPTED_CLAIM_HOME=
+ADOPTED_CLAIM_REMOVE_ON_ABORT=0
 ADOPTED_ENDPOINT_ABORT_CLEANUP=0
 ADOPTED_ENDPOINT_ID=
 ADOPTED_RECOVERY_ENDPOINT_ID=
@@ -722,7 +730,7 @@ parse_orca_worktree_result() {
 }
 
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? adopted_cleanup adopted_endpoint_retired=1
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -772,8 +780,24 @@ spawn_abort_cleanup() {
   if [ "$ADOPTED_ENDPOINT_ABORT_CLEANUP" = 1 ]; then
     ADOPTED_ENDPOINT_ABORT_CLEANUP=0
     if [ -n "$ADOPTED_ENDPOINT_ID" ]; then
-      fm_backend_tmux_kill_window_id "$ADOPTED_ENDPOINT_ID" 2>/dev/null || \
-        echo "warning: failed to remove adopted task endpoint $ADOPTED_ENDPOINT_ID after spawn refusal" >&2
+      if adopted_cleanup=$(fm_backend_tmux_retire_adopted_window \
+        "$ADOPTED_ENDPOINT_ID" "$ADOPTED_TMUX_SERVER_IDENTITY" \
+        "$ADOPTED_TMUX_SESSION" "$WT"); then
+        :
+      else
+        adopted_endpoint_retired=0
+        echo "warning: failed to retire adopted task endpoint $ADOPTED_ENDPOINT_ID safely after spawn refusal (${adopted_cleanup:-unknown})" >&2
+      fi
+    fi
+  fi
+  if [ "$ADOPTED_CLAIM_REMOVE_ON_ABORT" = 1 ]; then
+    ADOPTED_CLAIM_REMOVE_ON_ABORT=0
+    if [ "$adopted_endpoint_retired" = 1 ]; then
+      fm_adopted_claim_remove_exact "$ADOPTED_CLAIM_FILE" "$ID" \
+        "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" || \
+        echo "warning: failed to retire the pre-publication adopted-worktree claim for $ID" >&2
+    else
+      echo "warning: preserving the adopted-worktree claim for $ID because endpoint retirement was not proven" >&2
     fi
   fi
   if [ "$ADOPTED_BRIEF_ABORT_CLEANUP" = 1 ]; then
@@ -788,6 +812,10 @@ spawn_abort_cleanup() {
   [ -z "$ADOPTED_BRIEF_PREVIOUS_TMP" ] || rm -f -- "$ADOPTED_BRIEF_PREVIOUS_TMP"
   [ -z "$ADOPTED_META_TMP" ] || rm -f -- "$ADOPTED_META_TMP"
   [ -z "$ADOPTED_DELIVERY_TMP" ] || rm -f -- "$ADOPTED_DELIVERY_TMP"
+  if [ "$ADOPTED_CLAIM_LOCK_HELD" = 1 ]; then
+    ADOPTED_CLAIM_LOCK_HELD=0
+    fm_lock_release "$ADOPTED_CLAIM_LOCK" || true
+  fi
   if [ "$ADOPTION_LOCK_HELD" = 1 ]; then
     ADOPTION_LOCK_HELD=0
     fm_lock_release "$ADOPTION_LOCK" || true
@@ -1529,11 +1557,14 @@ report_adopted_snapshot_refusal() {
   case "${FM_ADOPTED_IDENTITY_ERROR:-unknown}" in
     absolute) echo "error: --existing-worktree requires an exact absolute path, got '$EXISTING_WORKTREE_ARG'" >&2 ;;
     newline) echo "error: --existing-worktree path must not contain a newline" >&2 ;;
+    tab) echo "error: --existing-worktree path must not contain a tab" >&2 ;;
     project-newline) echo "error: requested project path must not contain a newline" >&2 ;;
+    project-tab) echo "error: requested project path must not contain a tab" >&2 ;;
     missing) echo "error: adopted worktree does not exist as a directory: $EXISTING_WORKTREE_ARG" >&2 ;;
     resolve) echo "error: adopted worktree cannot be resolved exactly: $EXISTING_WORKTREE_ARG" >&2 ;;
     nonphysical) echo "error: --existing-worktree must use the exact physical worktree path '$FM_ADOPTED_IDENTITY_DETAIL', not '$EXISTING_WORKTREE_ARG'" >&2 ;;
     project-root) echo "error: requested project is not its exact Git checkout root: $PROJ_ABS" >&2 ;;
+    project-primary) echo "error: requested project is not the canonical primary Git worktree: $PROJ_ABS" >&2 ;;
     isolated) echo "error: --existing-worktree did not yield an isolated worktree (resolved '$EXISTING_WORKTREE_ARG'; worktree root '${FM_ADOPTED_IDENTITY_DETAIL:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout" >&2 ;;
     common-directory) echo "error: adopted worktree does not belong to the requested project's Git common directory" >&2 ;;
     inventory) echo "error: requested project's registered worktree inventory cannot be read" >&2 ;;
@@ -1571,6 +1602,7 @@ prepare_existing_worktree_adoption() {
   local meta meta_id claim claim_real own project branch prior_meta=0 claim_status live_claim
   local delivery_count endpoint_id_count server_id_count delivery endpoint_id server_id
   local adopted_brief_tmp status_file_q expected_path_q expected_branch_q expected_head_q brief_path
+  local claim_read_status claim_created=0
 
   if ! fm_adopted_worktree_snapshot "$requested" "$PROJ_ABS_REAL"; then
     report_adopted_snapshot_refusal
@@ -1649,6 +1681,56 @@ prepare_existing_worktree_adoption() {
     fi
   done
   ADOPTED_PRIOR_META=$prior_meta
+
+  ADOPTED_CLAIM_HOME=$(cd -- "$FM_HOME" 2>/dev/null && pwd -P) || {
+    echo "error: Firstmate home identity cannot be resolved for adopted-worktree ownership" >&2
+    return 1
+  }
+  case "$ADOPTED_CLAIM_HOME" in
+    *$'\n'*|*$'\r'*|*$'\t'*)
+      echo "error: Firstmate home path contains metadata-unsafe bytes; adopted-worktree ownership cannot be published" >&2
+      return 1
+      ;;
+  esac
+  fm_adopted_claim_paths "$PROJ_ABS_REAL" "$WT" || {
+    echo "error: adopted-worktree global claim identity cannot be derived" >&2
+    return 1
+  }
+  ADOPTED_CLAIM_LOCK=$FM_ADOPTED_CLAIM_LOCK
+  ADOPTED_CLAIM_FILE=$FM_ADOPTED_CLAIM_FILE
+  fm_lock_acquire_wait "$ADOPTED_CLAIM_LOCK" || {
+    echo "error: adopted-worktree global claim registry could not be locked" >&2
+    return 1
+  }
+  ADOPTED_CLAIM_LOCK_HELD=1
+  fm_adopted_claim_registry_prepare || {
+    echo "error: adopted-worktree global claim registry is unsafe or unavailable" >&2
+    return 1
+  }
+  if fm_adopted_claim_read "$ADOPTED_CLAIM_FILE"; then
+    if [ "$FM_ADOPTED_CLAIM_TASK" != "$ID" ] \
+       || [ "$FM_ADOPTED_CLAIM_HOME" != "$ADOPTED_CLAIM_HOME" ] \
+       || [ "$FM_ADOPTED_CLAIM_WORKTREE" != "$WT" ] \
+       || [ "$FM_ADOPTED_CLAIM_PROJECT" != "$PROJ_ABS_REAL" ]; then
+      echo "error: adopted worktree is already claimed by durable Firstmate task $FM_ADOPTED_CLAIM_TASK in home $FM_ADOPTED_CLAIM_HOME" >&2
+      return 1
+    fi
+  else
+    claim_read_status=$?
+    if [ "$claim_read_status" -ne 1 ]; then
+      echo "error: adopted-worktree global claim is ambiguous (${FM_ADOPTED_CLAIM_ERROR:-unknown}); adoption refused" >&2
+      return 1
+    fi
+    fm_adopted_claim_publish "$ADOPTED_CLAIM_FILE" "$ID" \
+      "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" || {
+        echo "error: adopted-worktree global claim could not be published atomically" >&2
+        return 1
+      }
+    claim_created=1
+  fi
+  if [ "$claim_created" -eq 1 ] && [ "$prior_meta" -eq 0 ]; then
+    ADOPTED_CLAIM_REMOVE_ON_ABORT=1
+  fi
 
   ADOPTED_TMUX_SESSION=$(fm_backend_tmux_container_ensure) || {
     echo "error: live tmux task inventory is ambiguous; adoption could not resolve its exact session" >&2
@@ -2603,12 +2685,15 @@ if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
   verify_adopted_identity "metadata publication" || exit 1
   mv -f -- "$ADOPTED_META_TMP" "$STATE/$ID.meta"
   ADOPTED_META_TMP=
+  ADOPTED_CLAIM_REMOVE_ON_ABORT=0
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
   ADOPTED_BRIEF_ABORT_CLEANUP=0
   [ -z "$ADOPTED_BRIEF_PREVIOUS_TMP" ] || rm -f -- "$ADOPTED_BRIEF_PREVIOUS_TMP"
   ADOPTED_BRIEF_PREVIOUS_TMP=
+  ADOPTED_CLAIM_LOCK_HELD=0
+  fm_lock_release "$ADOPTED_CLAIM_LOCK" || true
   ADOPTION_LOCK_HELD=0
   fm_lock_release "$ADOPTION_LOCK" || true
 fi
