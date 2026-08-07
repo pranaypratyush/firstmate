@@ -234,6 +234,8 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_grep 'mode=direct-PR' "$meta" "promotion did not record the decided delivery mode"
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided approval posture"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
+  assert_contains "$out" "next: bin/fm-send.sh --home $home fm-promote-d1" "promotion hint did not preserve fm-send as the approval command prefix"
+  assert_not_contains "$out" "next: FM_HOME=" "promotion hint must not lead with an environment assignment"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }

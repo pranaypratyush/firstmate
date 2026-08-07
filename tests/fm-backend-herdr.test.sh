@@ -63,6 +63,19 @@ SH
   printf '%s\n' "$fb"
 }
 
+# make_herdr_absent_path: a PATH containing only the real non-Herdr tools that
+# sourcing and checking the adapter needs. Broad host directories are excluded
+# deliberately, so an installed host Herdr cannot mask the advertised absence.
+make_herdr_absent_path() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/absent-fakebin" tool path
+  mkdir -p "$fb"
+  for tool in dirname jq; do
+    path=$(command -v "$tool") || return 1
+    ln -s "$path" "$fb/$tool" || return 1
+  done
+  printf '%s\n' "$fb"
+}
+
 # make_herdr_statefake: a STATEFUL `herdr` stub that models the parts of herdr's
 # real container behavior the workspace-leak fix (and the default-tab-prune
 # safety fix) depend on, so a full spawn->teardown cycle can be replayed
@@ -214,10 +227,13 @@ test_version_check_refuses_old_protocol() {
 }
 
 test_version_check_refuses_missing_herdr() {
-  local dir out status
-  dir="$TMP_ROOT/version-missing"; mkdir -p "$dir/empty-fakebin"
-  out=$( PATH="$dir/empty-fakebin:/usr/bin:/bin" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1 )
+  local dir fb bash_bin out status
+  dir="$TMP_ROOT/version-missing"; mkdir -p "$dir"
+  fb=$(make_herdr_absent_path "$dir") || fail "could not build the deterministic no-Herdr PATH"
+  bash_bin=$(command -v bash) || fail "bash is required for the no-Herdr fixture"
+  # shellcheck disable=SC2016 # The child shell expands $0 from its first argument.
+  out=$( PATH="$fb" \
+    "$bash_bin" -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "version_check should refuse when herdr is not installed"
   assert_contains "$out" "not installed" "version_check did not report herdr as missing"

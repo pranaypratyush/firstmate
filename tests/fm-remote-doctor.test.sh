@@ -23,13 +23,22 @@ DOCTOR_WORKER_PID=
 trap 'if [ -n "$DOCTOR_WORKER_PID" ]; then kill "$DOCTOR_WORKER_PID" 2>/dev/null || true; fi; fm_test_cleanup || true' EXIT
 
 # A fixture must be able to present a host with NO herdr, so the doctor never
-# sees the runner's own PATH. Only the two required tools are re-exposed, by
-# symlink, alongside the system directories the doctor's own helpers need.
+# sees the runner's own Herdr binary. Re-expose the ordinary system commands
+# through a sanitized directory alongside the two explicitly required tools.
 TOOLS="$TMP_ROOT/tools"
-mkdir -p "$TOOLS"
+SYSTEM_TOOLS="$TMP_ROOT/system-tools"
+mkdir -p "$TOOLS" "$SYSTEM_TOOLS"
 ln -sf "$(command -v git)" "$TOOLS/git"
 ln -sf "$(command -v jq)" "$TOOLS/jq"
-BASE_PATH="$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin"
+for candidate in /usr/bin/* /bin/* /usr/sbin/* /sbin/*; do
+  [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+  tool=${candidate##*/}
+  case "$tool" in
+    herdr|tasks-axi|treehouse|claude|codex|opencode|pi|pi-signed|grok|kimi|muse) continue ;;
+  esac
+  [ -e "$SYSTEM_TOOLS/$tool" ] || ln -s "$candidate" "$SYSTEM_TOOLS/$tool"
+done
+BASE_PATH="$TOOLS:$SYSTEM_TOOLS"
 
 # new_case <Darwin|Linux> [with-herdr] [gui]
 # Builds one isolated account fixture and points the module-level CASE_*

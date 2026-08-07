@@ -91,9 +91,9 @@ SH
 run_send() {
   local fb=$1 home=$2 log=$3; shift 3
   : > "$log"
-  env PATH="$fb:$PATH" \
-    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
-    "$SEND" "$@" 2>/dev/null
+  env -u FM_HOME PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" --home "$home" "$@" 2>/dev/null
 }
 
 setup_home() {  # <name> -> echoes a fresh home dir with an empty state/
@@ -312,10 +312,10 @@ test_remote_secondmate_answer_closes_locally() {
   printf 'needs-decision [key=upgrade-window]: tonight or the weekend\n' > "$home/state/rsm.status"
 
   : > "$log"
-  env PATH="$fb:$PATH" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+  env -u FM_HOME PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" FM_FAKE_SSH_RC=0 \
-    "$SEND" rsm --resolve-key upgrade-window "the weekend, freeze Friday" >/dev/null 2>&1; rc=$?
+    "$SEND" --home "$home" rsm --resolve-key upgrade-window "the weekend, freeze Friday" >/dev/null 2>&1; rc=$?
   expect_code 0 "$rc" "a remote secondmate answer send should succeed"
   assert_grep 'fm-remote-entrypoint.sh' "$ssh_log" \
     "the answer message should cross the remote transport"
@@ -336,10 +336,10 @@ test_remote_transport_failure_does_not_close() {
   printf 'blocked [key=quota]: remote host is out of runway\n' > "$home/state/rsm.status"
 
   : > "$log"
-  env PATH="$fb:$PATH" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+  env -u FM_HOME PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" FM_FAKE_SSH_RC=1 \
-    "$SEND" rsm --resolve-key quota "quota refreshed, resume" >/dev/null 2>&1; rc=$?
+    "$SEND" --home "$home" rsm --resolve-key quota "quota refreshed, resume" >/dev/null 2>&1; rc=$?
   [ "$rc" -ne 0 ] || fail "a failed remote transport should exit nonzero"
   if grep -F 'resolved' "$home/state/rsm.status" >/dev/null; then
     fail "a failed remote send still closed the decision: $(cat "$home/state/rsm.status")"

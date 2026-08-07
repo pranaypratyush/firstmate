@@ -84,10 +84,10 @@ setup_parent() {  # <name> -> home
 run_send() {
   local fb=$1 home=$2 log=$3; shift 3
   : > "$log"
-  env PATH="$fb:$PATH" \
-    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+  env -u FM_HOME PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     FM_PENDING_REPLY_GRACE_SECS=0 \
-    "$SEND" "$@" 2>/dev/null
+    "$SEND" --home "$home" "$@" 2>/dev/null
 }
 
 phase_of() {  # <state> <corr>

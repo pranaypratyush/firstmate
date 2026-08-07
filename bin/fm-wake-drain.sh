@@ -83,7 +83,7 @@ EOF
   # the send that answers a listed decision also closes it, so closure never
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
-  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n"
+  printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh --home <absolute-firstmate-home> <task> --resolve-key <key> '<answer>'\n"
 }
 
 # shellcheck disable=SC2317,SC2329 # Invoked by trap handlers below.

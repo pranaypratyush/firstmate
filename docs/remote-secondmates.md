@@ -164,7 +164,7 @@ Startup liveness recovery relaunches a dead or missing remote second mate throug
 Send routed requests normally:
 
 ```sh
-FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
+bin/fm-send.sh --home <absolute-primary-home> fm-<id> '<request>'
 ```
 
 Marked requests keep the existing correlation contract.

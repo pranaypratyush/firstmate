@@ -52,7 +52,7 @@ Do not manually patch metadata to make an externally-created Orca terminal look 
 ## Supervision
 
 Use `bin/fm-peek.sh`, `bin/fm-send.sh`, `bin/fm-crew-state.sh`, and `bin/fm-teardown.sh` for routine operation.
-For steer messages, send short lines through `bin/fm-send.sh <id> '...'`; the stable `fm-<id>` alias also works.
+For steer messages, send short lines through `bin/fm-send.sh --home <absolute-firstmate-home> <id> '...'`; the stable `fm-<id>` alias also works.
 Put long instructions in the task brief or a temporary file and point the crewmate at that file.
 
 When supervising, treat `state/<id>.meta` as the routing record and Orca's own ids as backend implementation details.
@@ -85,7 +85,7 @@ Keep Orca smoke tests focused on lifecycle plumbing:
 1. Select Orca intentionally for a disposable task or scout.
 2. Spawn through `bin/fm-spawn.sh`.
 3. Confirm metadata records the Orca backend, terminal, Orca worktree id, and isolated worktree path.
-4. Verify `bin/fm-peek.sh`, a short `bin/fm-send.sh` steer, watcher wake behavior, and `bin/fm-crew-state.sh`.
+4. Verify `bin/fm-peek.sh`, a short `bin/fm-send.sh --home <absolute-firstmate-home>` steer, watcher wake behavior, and `bin/fm-crew-state.sh`.
 5. Tear down through `bin/fm-teardown.sh` after the task is safely disposable or landed.
 6. Restore the previous backend selection if Orca was selected only for the smoke test.
 

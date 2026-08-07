@@ -106,6 +106,117 @@ test_exact_lane_id_send_still_works() {
   pass "fm-send strict: exact task/lane ids resolve through home metadata"
 }
 
+test_home_argument_selects_task_home_without_ambient_fallback() {
+  local dir fb home err log rc got
+  dir="$TMP_ROOT/home-argument"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home homearg); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/home-lane.meta" "window=sess:fm-home-lane" "kind=ship"
+
+  env -u FM_HOME PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" --home "$home" home-lane "explicit home" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "--home should select the task home without ambient FM_HOME"
+  got=$(cat "$log")
+  assert_contains "$got" "target=sess:fm-home-lane literal=1 arg=explicit home" "--home should resolve the selector through its own state"
+  assert_contains "$got" "target=sess:fm-home-lane literal=0 arg=Enter" "--home task send should submit with Enter"
+  pass "fm-send --home: explicit argument selects the task home without ambient fallback"
+}
+
+test_home_argument_rejects_missing_and_unsafe_values() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/home-invalid"; mkdir -p "$dir/relative-home/state" "$dir/no-state"
+  fb=$(make_stubs "$dir"); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  home=$(setup_home missing-target)
+
+  env -u FM_HOME PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$dir" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" --home >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "--home without a value should fail"
+  assert_contains "$(cat "$err")" "--home requires an absolute firstmate home" "missing --home value should be explicit"
+
+  (cd "$dir" && env -u FM_HOME PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$dir" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" --home relative-home sess:win "hello" >/dev/null 2>"$err"); rc=$?
+  [ "$rc" -ne 0 ] || fail "relative --home should fail even when the directory exists"
+  assert_contains "$(cat "$err")" "must be an absolute path" "relative --home diagnostic should explain the safe shape"
+
+  env -u FM_HOME PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$dir" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" --home --key Enter >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "option-looking --home value should fail"
+  assert_contains "$(cat "$err")" "--home requires an absolute firstmate home" "option-looking --home value should be treated as missing"
+
+  env -u FM_HOME PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$dir" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" "--home=$home" sess:win "hello" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "joined --home=value syntax should fail"
+  assert_contains "$(cat "$err")" "use '--home <absolute-firstmate-home>'" "joined --home syntax should point to the one supported shape"
+
+  env -u FM_HOME PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$dir" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" --home "$home" --home "$home" sess:win "hello" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "duplicate --home should fail"
+  assert_contains "$(cat "$err")" "--home may be provided only once" "duplicate --home diagnostic should be explicit"
+
+  env -u FM_HOME PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$dir" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" --home "$home" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "--home without a target should fail"
+  assert_contains "$(cat "$err")" "target is required" "missing target diagnostic should be explicit"
+
+  env -u FM_HOME PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$dir" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" --home "$dir/not-present" sess:win "hello" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "nonexistent --home should fail"
+  assert_contains "$(cat "$err")" "is not a directory" "nonexistent --home diagnostic should name the missing directory"
+
+  env -u FM_HOME PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$dir" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" --home "$dir/no-state" sess:win "hello" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "--home without state should fail"
+  assert_contains "$(cat "$err")" "state dir '$dir/no-state/state' is missing" "missing state diagnostic should name the selected home"
+  [ ! -s "$log" ] || fail "invalid --home still attempted a send"$'\n'"$(cat "$log")"
+  pass "fm-send --home: malformed, unsafe, missing, and incomplete homes fail before target resolution"
+}
+
+test_home_argument_takes_precedence_over_ambient_home() {
+  local dir fb ambient selected err log rc got
+  dir="$TMP_ROOT/home-precedence"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ambient=$(setup_home ambient); selected=$(setup_home selected)
+  err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$ambient/state/shared.meta" "window=ambient:fm-shared" "kind=ship"
+  fm_write_meta "$selected/state/shared.meta" "window=selected:fm-shared" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$ambient" FM_STATE_OVERRIDE="$ambient/state" FM_ROOT_OVERRIDE="$selected" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" --home "$selected" shared "selected home" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "--home should take precedence over ambient FM_HOME"
+  got=$(cat "$log")
+  assert_contains "$got" "target=selected:fm-shared literal=1 arg=selected home" "--home should resolve through the selected home"
+  assert_not_contains "$got" "target=ambient:fm-shared" "ambient FM_HOME or FM_STATE_OVERRIDE must not override --home"
+  pass "fm-send --home: argument precedence is explicit and ambient home state cannot redirect the send"
+}
+
+test_home_argument_supports_secondmate_home_callers() {
+  local dir fb primary second err log rc got
+  dir="$TMP_ROOT/home-secondmate"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); primary=$(setup_home primary-caller); second=$(setup_home second-caller)
+  err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  printf '%s\n' domain > "$second/.fm-secondmate-home"
+  fm_write_meta "$primary/state/child.meta" "window=primary:fm-child" "kind=ship"
+  fm_write_meta "$second/state/child.meta" "window=second:fm-child" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$primary" FM_ROOT_OVERRIDE="$second" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" --home "$second" child "secondmate steer" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a secondmate-shaped home should be accepted by --home"
+  got=$(cat "$log")
+  assert_contains "$got" "target=second:fm-child literal=1 arg=secondmate steer" "secondmate caller should resolve only its selected child metadata"
+  assert_not_contains "$got" "target=primary:fm-child" "secondmate caller must not fall back to the ambient primary home"
+  pass "fm-send --home: secondmate-home callers retain home-scoped selector routing"
+}
+
+test_help_documents_home_argument_contract() {
+  local out err rc
+  out="$TMP_ROOT/help.out"; err="$TMP_ROOT/help.err"
+  env -u FM_HOME "$SEND" --help >"$out" 2>"$err"; rc=$?
+  expect_code 0 "$rc" "--help should not require a home"
+  assert_contains "$(cat "$out")" "fm-send.sh --home <absolute-firstmate-home>" "help should show the approval-prefix-shaped invocation"
+  assert_contains "$(cat "$out")" "takes precedence over FM_HOME and operational-directory overrides" "help should define argument precedence"
+  assert_contains "$(cat "$out")" "never falls back to the repo root" "help should retain the no-ambient-fallback contract"
+  [ ! -s "$err" ] || fail "--help should not write an error"$'\n'"$(cat "$err")"
+  pass "fm-send help: home argument, precedence, and no-fallback contract are inspectable"
+}
+
 test_unset_fm_home_fails() {
   local dir fb err log rc
   dir="$TMP_ROOT/nohome"; mkdir -p "$dir"
@@ -172,13 +283,13 @@ test_fm_prefixed_herdr_session_is_an_explicit_target() {
   : > "$log"
   : > "$herdr_log"
 
-  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_HERDR_LOG="$herdr_log" FM_SEND_SETTLE=0 \
-    "$SEND" fm-remote:w1:p2 --key Enter >/dev/null 2>"$err"; rc=$?
-  expect_code 0 "$rc" "an fm-prefixed Herdr session target should be accepted as explicit"
+  env -u FM_HOME PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_HERDR_LOG="$herdr_log" FM_SEND_SETTLE=0 \
+    "$SEND" --home "$home" fm-remote:w1:p2 --key Enter >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "an fm-prefixed Herdr session target should be accepted with --home"
   assert_grep 'pane get w1:p2 --session fm-remote' "$herdr_log" "fm-prefixed Herdr target was not verified in its session"
   assert_grep 'pane send-keys w1:p2 enter --session fm-remote' "$herdr_log" "fm-prefixed Herdr target was not sent its key in its session"
   assert_no_grep '--session default' "$herdr_log" "fm-prefixed Herdr target fell back to the default session"
-  pass "fm-send strict: fm-prefixed Herdr sessions remain explicit backend targets"
+  pass "fm-send --home: fm-prefixed Herdr sessions remain explicit backend targets"
 }
 
 test_healthy_fm_id_send_still_works() {
@@ -226,6 +337,11 @@ test_key_send_exit_status_follows_delivery() {
 }
 
 test_exact_lane_id_send_still_works
+test_home_argument_selects_task_home_without_ambient_fallback
+test_home_argument_rejects_missing_and_unsafe_values
+test_home_argument_takes_precedence_over_ambient_home
+test_home_argument_supports_secondmate_home_callers
+test_help_documents_home_argument_contract
 test_key_send_exit_status_follows_delivery
 test_unset_fm_home_fails
 test_unresolvable_target_does_not_tmux_fallback

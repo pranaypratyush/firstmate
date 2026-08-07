@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Send one line of literal text to a crewmate endpoint, then Enter.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... <text...>
+# Usage: fm-send.sh [--home <absolute-firstmate-home>] <target> [--resolve-key <key>]... <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
-# Special keys instead of text: fm-send.sh <target> --key Enter
+# Special keys instead of text: fm-send.sh [--home <absolute-firstmate-home>] <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
 #
@@ -70,15 +70,73 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+fm_send_usage() {
+  cat <<'EOF'
+Usage:
+  fm-send.sh --home <absolute-firstmate-home> <target> [--resolve-key <key>]... <text...>
+  fm-send.sh --home <absolute-firstmate-home> <target> --key <key>
+
+--home must be the first argument and name an existing absolute home with a state directory.
+It takes precedence over FM_HOME and operational-directory overrides; FM_HOME remains supported for compatibility.
+If neither is explicit, fm-send refuses the call and never falls back to the repo root.
+EOF
+}
+
+case "${1:-}" in
+  -h|--help)
+    fm_send_usage
+    exit 0
+    ;;
+esac
+
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never steer
 # a crewmate (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 
+FM_SEND_HOME_ARGUMENT=0
+case "${1:-}" in
+  --home)
+    [ $# -ge 2 ] || { echo "error: --home requires an absolute firstmate home" >&2; exit 1; }
+    case "$2" in
+      -*) echo "error: --home requires an absolute firstmate home" >&2; exit 1 ;;
+    esac
+    FM_HOME=$2
+    FM_SEND_HOME_ARGUMENT=1
+    shift 2
+    ;;
+  --home=*)
+    echo "error: use '--home <absolute-firstmate-home>'; joined --home=value syntax is not supported" >&2
+    exit 1
+    ;;
+esac
+
+case "${1:-}" in
+  --home|--home=*)
+    echo "error: --home may be provided only once, as the first argument" >&2
+    exit 1
+    ;;
+esac
+
 if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
   echo "error: FM_HOME is not set; fm-send refuses to resolve targets without an explicit firstmate home" >&2
   exit 1
+fi
+if [ "$FM_SEND_HOME_ARGUMENT" -eq 1 ]; then
+  case "$FM_HOME" in
+    /*) ;;
+    *) echo "error: --home must be an absolute path, got '$FM_HOME'" >&2; exit 1 ;;
+  esac
+fi
+export FM_HOME
+
+if [ "$FM_SEND_HOME_ARGUMENT" -eq 1 ]; then
+  FM_STATE_OVERRIDE="$FM_HOME/state"
+  FM_DATA_OVERRIDE="$FM_HOME/data"
+  FM_CONFIG_OVERRIDE="$FM_HOME/config"
+  FM_PROJECTS_OVERRIDE="$FM_HOME/projects"
+  export FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
 fi
 
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -90,6 +148,7 @@ if [ ! -d "$STATE" ]; then
   echo "error: state dir '$STATE' is missing; fm-send cannot resolve targets for FM_HOME '$FM_HOME'" >&2
   exit 1
 fi
+[ "$#" -gt 0 ] || { echo "error: target is required" >&2; exit 1; }
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"

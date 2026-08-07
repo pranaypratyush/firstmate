@@ -574,7 +574,7 @@ test_view_renders_snapshot() {
     "view should render queued backlog row"
   assert_contains "$view" "| done-task | Done Task | alpha | ship | - | https://github.com/kunchenguid/firstmate/pull/7 |" \
     "view should render done backlog row"
-  assert_contains "$view" "bin/fm-send.sh fm-secondmate-task" \
+  assert_contains "$view" "bin/fm-send.sh --home <absolute-firstmate-home> fm-secondmate-task" \
     "view should show secondmate send guidance"
   assert_contains "$view" "| secondmate-task | working / status-log | secondmate | $home/secondmate-home | tmux | present / alive |" \
     "view should show secondmate endpoint agent liveness"
