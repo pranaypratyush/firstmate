@@ -2357,6 +2357,56 @@ SH
   pass "hostile remote Charted Next values fall back to a bounded disclosed capsule"
 }
 
+test_hostile_v1_and_v2_charted_caveats_fail_closed() {
+  local home fakebin sshbin canonical json
+  home=$(make_home hostile-charted-caveats)
+  cat > "$home/data/secondmates.md" <<'EOF'
+- hostile-v1 - fixture (host: hostile-v1-host; root: /remote/root; home: /remote/hostile-v1; scope: fixture; projects: sample; added 2026-07-11)
+- hostile-v2 - fixture (host: hostile-v2-host; root: /remote/root; home: /remote/hostile-v2; scope: fixture; projects: sample; added 2026-07-11)
+EOF
+  fakebin=$(make_fakebin "$home")
+  sshbin="$fakebin/fake-hostile-caveat-ssh"
+  cat > "$sshbin" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *hostile-v1-host*) schema=fm-secondmate-home-summary.v1; remote_home=/remote/hostile-v1 ;;
+  *) schema=fm-secondmate-home-summary.v2; remote_home=/remote/hostile-v2 ;;
+esac
+long=$(printf '%01200d' 0 | tr 0 c)
+jq -n --arg schema "$schema" --arg home "$remote_home" --arg long "$long" '{
+  schema:$schema,generated:"2026-07-11T18:00:00Z",home:$home,
+  valid:false,reason:"child current state unavailable: child",invalidity:{kind:"child_current_unavailable",ids:["child"]},
+  state:"unknown",charted_next:{context:"Current child state is unavailable",context_truncated:false,
+    context_backlog_truncated:false,context_byte_truncated:false,context_character_truncated:false,
+    context_report_count_omitted:false,context_projection_truncated:false,hold_reason_truncated:false,
+    next_action:"Restore current child state for child",next_action_truncated:false,
+    advance_when:"When current child state is available for child",advance_when_truncated:false,caveat:$long},
+  active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],
+  counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[]}'
+SH
+  chmod +x "$sshbin"
+  canonical=$(PATH="$fakebin:$PATH" FM_SSH_BIN="$sshbin" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "hostile v1/v2 caveats aborted the canonical snapshot"
+  printf '%s' "$canonical" | jq -e '
+    [.secondmate_current.records[] | select(.id == "hostile-v1" or .id == "hostile-v2")]
+    | length == 2
+      and all(.[]; .current.state == "unknown")
+      and all(.[]; .provenance.selected == "unknown")
+      and all(.[]; .invalidity.kind == "malformed_structured_home")
+      and all(.[]; (.charted_next.caveat | length) <= 320)
+  ' >/dev/null || fail "oversized v1/v2 caveats crossed the canonical validation boundary: $canonical"
+  json=$(FM_SSH_BIN="$sshbin" run "$home" "$fakebin" --json) \
+    || fail "hostile v1/v2 caveats aborted Bearings"
+  printf '%s' "$json" | jq -e '
+    [.secondmates[] | select(.id == "hostile-v1" or .id == "hostile-v2")]
+    | length == 2
+      and all(.[]; .state == "unknown" and .provenance == "unknown")
+      and all(.[]; (.caveat | length) <= 320)
+  ' >/dev/null || fail "Bearings trusted a peer with an oversized causal caveat: $json"
+  pass "oversized v1 and v2 causal caveats fail closed at canonical validation"
+}
+
 test_remote_semantic_schema_rejects_invalid_states_and_empty_capsules() {
   local home fakebin sshbin json
   home=$(make_home remote-semantic-schema)
@@ -2872,6 +2922,7 @@ test_landed_discloses_byte_character_and_projection_truncation
 test_report_count_and_decision_gate_projection_truncation_are_disclosed
 test_malformed_nested_cross_home_fields_fall_back_without_jq_abort
 test_hostile_remote_charted_capsule_is_bounded_and_disclosed
+test_hostile_v1_and_v2_charted_caveats_fail_closed
 test_remote_semantic_schema_rejects_invalid_states_and_empty_capsules
 test_remote_no_active_state_cannot_hide_working_child
 test_remote_state_invariants_respect_counts_and_omissions

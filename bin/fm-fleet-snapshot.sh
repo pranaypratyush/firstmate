@@ -1587,7 +1587,7 @@ secondmate_current_json() {  # <parent-tasks-json>
             and (.context_report_count_omitted | type) == "boolean"
             and (.context_projection_truncated | type) == "boolean"
             and (.hold_reason_truncated | type) == "boolean"
-            and (.caveat | nonempty_string);
+            and (.caveat | bounded_nonempty(320));
           def state_consistent:
             if .valid == false then .state == "unknown"
             elif .state == "unknown" then false
