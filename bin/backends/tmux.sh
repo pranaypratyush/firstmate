@@ -96,6 +96,54 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
   printf '%s\n' "$wid"
 }
 
+fm_backend_tmux_provisional_token_valid() {  # <16-lowercase-hex>
+  case "${1:-}" in *[!0-9a-f]*|'') return 1 ;; esac
+  [ "${#1}" -eq 16 ]
+}
+
+# Create the adopted window and install its pre-published transaction token in
+# one tmux command queue before the client returns. The token therefore survives
+# a caller SIGKILL before the stable window id reaches durable claim storage.
+fm_backend_tmux_create_adopted_task() {  # <session> <window-name> <proj-abs> <token>
+  local ses=$1 wname=$2 proj_abs=$3 token=$4 wid
+  fm_backend_tmux_provisional_token_valid "$token" || return 1
+  if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
+    echo "error: window $ses:$wname already exists" >&2
+    return 1
+  fi
+  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs" \
+    \; set-window-option -t "=$ses:=$wname" @firstmate_adoption_token "$token" \
+    \; set-window-option -t "=$ses:=$wname" automatic-rename off \
+    \; set-window-option -t "=$ses:=$wname" allow-rename off) || return 1
+  fm_backend_tmux_window_id_valid "$wid" || return 1
+  printf '%s\n' "$wid"
+}
+
+fm_backend_tmux_window_id_for_provisional_token() {  # <session> <token>
+  local expected_session=$1 token=$2 inventory line window_id session found=
+  fm_backend_tmux_provisional_token_valid "$token" || return 2
+  inventory=$(tmux list-windows -a -F '#{window_id}|#{session_name}|#{@firstmate_adoption_token}' 2>/dev/null) \
+    || return 2
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    window_id=${line%%|*}
+    [ "$line" != "$window_id" ] || return 2
+    line=${line#*|}
+    session=${line%%|*}
+    [ "$line" != "$session" ] || return 2
+    [ "${line#*|}" != "$token" ] || {
+      fm_backend_tmux_window_id_valid "$window_id" || return 2
+      [ "$session" = "$expected_session" ] || return 2
+      [ -z "$found" ] || return 2
+      found=$window_id
+    }
+  done <<EOF
+$inventory
+EOF
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
 # fm_backend_tmux_current_path: the live pane's current working directory, or
 # empty on any tmux error. Mirrors fm-spawn.sh's worktree-discovery poll:
 # `tmux display-message -p -t "$T" '#{pane_current_path}'`.
@@ -124,6 +172,23 @@ fm_backend_tmux_server_identity_valid() {  # <pid:start-time>
     *:*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+fm_backend_tmux_server_locator_valid() {  # <absolute-socket-path>
+  case "${1:-}" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+}
+
+# A server locator distinguishes concurrently live tmux servers even when the
+# caller's ambient `tmux` client can see only one of them.
+fm_backend_tmux_server_locator() {  # <target>
+  local locator
+  locator=$(tmux display-message -p -t "$1" '#{socket_path}' 2>/dev/null) || return 1
+  fm_backend_tmux_server_locator_valid "$locator" || return 1
+  printf '%s\n' "$locator"
 }
 
 # A stable window id is meaningful only inside one tmux server lifetime. Bind

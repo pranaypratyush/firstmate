@@ -182,8 +182,8 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend 
 
 ### Adopted-worktree endpoint placement
 
-Exact adopted-worktree CWD placement, server-wide live task-claim inventory, ambiguous renamed-window refusal, and server-lifetime-bound stable-window-id cleanup were verified on 2026-08-07 with tmux 3.7b on Linux.
-The real-socket guard waits until the pane foreground is structurally a shell without interrupting startup, uses shell-neutral command payloads, creates task windows in paths containing spaces, verifies their physical pane CWDs, detects a different-session task claim, refuses a descendant-CWD pane after its task-like name is removed, excludes only the exact same-session task window, refuses a stable id presented with another server lifetime, removes a separately renamed window only with its exact creation-time binding, and proves an independent control window remains.
+Exact adopted-worktree CWD placement, socket-scoped provisional endpoint discovery, server-wide live task-claim inventory, ambiguous renamed-window refusal, and server-lifetime-bound stable-window-id cleanup were verified on 2026-08-08 with tmux 3.7b on Linux.
+The real-socket guard waits until the pane foreground is structurally a shell without interrupting startup, uses shell-neutral command payloads, creates task windows in paths containing spaces, verifies their physical pane CWDs, installs and rediscovers an adopted endpoint's provisional token after its mutable name is removed, confirms its absolute private-server socket locator, detects a different-session task claim, refuses a descendant-CWD pane after its task-like name is removed, excludes only the exact same-session task window, refuses a stable id presented with another server lifetime, removes a separately renamed window only with its exact creation-time binding, and proves an independent control window remains.
 
 ```sh
 tmux -V
@@ -194,6 +194,7 @@ Observed bounded output:
 
 ```text
 tmux 3.7b
+ok - real tmux: adopted creation atomically exposes a socket-scoped provisional identity
 ok - real tmux: adopted CWD inventory detects cross-session and same-name/different-id claims and refuses renamed metadata-free occupancy
 ok - real tmux: adopted endpoint cleanup refuses server-lifetime and multi-pane ambiguity, then retires a renamed bound window
 ok - real tmux: adopted task creation reports exact cwd, live claims, and stable-id cleanup after a lost name

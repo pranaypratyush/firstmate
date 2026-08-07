@@ -52,7 +52,8 @@
 # local-state removal and removes the claim only after local metadata is gone.
 # Teardown also holds the task's spawn-generation lock before reading metadata
 # through final state retirement, so same-ID recovery cannot replace the
-# endpoint generation being retired.
+# endpoint generation being retired. If spawn already holds that lock, teardown
+# refuses immediately instead of waiting across and acting on the new generation.
 # Forced
 # recursive secondmate retirement refuses before mutation when descendant
 # metadata declares adoption or when a direct checkout under the home's projects/
@@ -196,6 +197,7 @@ TEARDOWN_ADOPTED_CLAIM_LOCK_HELD=0
 TEARDOWN_ADOPTED_CLAIM_FILE=
 TEARDOWN_ADOPTED_CLAIM_HOME=
 TEARDOWN_ADOPTED_ENDPOINT_SESSION=
+TEARDOWN_ADOPTED_SERVER_LOCATOR=
 
 teardown_release_task_lock() {
   if [ "$TEARDOWN_TASK_LOCK_HELD" = 1 ]; then
@@ -221,8 +223,8 @@ teardown_release_lifecycle_locks() {
 
 META="$STATE/$ID.meta"
 [ -d "$STATE" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
-fm_lock_acquire_wait "$TEARDOWN_TASK_LOCK" || {
-  echo "error: task generation lock could not be acquired for teardown of $ID" >&2
+fm_lock_try_acquire "$TEARDOWN_TASK_LOCK" || {
+  echo "error: task lifecycle is already creating $ID; teardown refused rather than crossing the in-progress spawn generation" >&2
   exit 1
 }
 TEARDOWN_TASK_LOCK_HELD=1
@@ -534,21 +536,36 @@ teardown_adopted_claim_lock_and_validate() {
   if fm_adopted_claim_matches "$TEARDOWN_ADOPTED_CLAIM_FILE" "$ID" \
     "$TEARDOWN_ADOPTED_CLAIM_HOME" "$WT" "$PROJ"; then
     case "$FM_ADOPTED_CLAIM_ENDPOINT_STATE" in
-      legacy)
+      legacy|legacy-bound)
+        if [ "$FM_ADOPTED_CLAIM_ENDPOINT_STATE" = legacy-bound ]; then
+          [ "$FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID" = "$TEARDOWN_ADOPTED_WINDOW_ID" ] \
+            && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY" = "$TEARDOWN_ADOPTED_SERVER_IDENTITY" ] \
+            && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SESSION" = "$TEARDOWN_ADOPTED_ENDPOINT_SESSION" ] || {
+              echo "error: legacy adopted-worktree claim and task metadata identify different endpoints; preserving endpoint and task state" >&2
+              return 1
+            }
+        fi
+        [ "$(fm_backend_tmux_server_identity "$TEARDOWN_ADOPTED_ENDPOINT_SESSION" 2>/dev/null || true)" \
+          = "$TEARDOWN_ADOPTED_SERVER_IDENTITY" ] || {
+            echo "error: legacy adopted endpoint server cannot be proven from the current tmux server; preserving endpoint and task state" >&2
+            return 1
+          }
         fm_adopted_claim_bind_endpoint "$TEARDOWN_ADOPTED_CLAIM_FILE" "$ID" \
           "$TEARDOWN_ADOPTED_CLAIM_HOME" "$WT" "$PROJ" \
-          "$TEARDOWN_ADOPTED_WINDOW_ID" "$TEARDOWN_ADOPTED_SERVER_IDENTITY" \
+          "$TEARDOWN_ADOPTED_SERVER_LOCATOR" "$TEARDOWN_ADOPTED_WINDOW_ID" \
+          "$TEARDOWN_ADOPTED_SERVER_IDENTITY" \
           "$TEARDOWN_ADOPTED_ENDPOINT_SESSION" || {
             echo "error: legacy adopted-worktree claim could not be upgraded for teardown; preserving endpoint and task state" >&2
             return 1
           }
         ;;
-      creating)
+      creating|legacy-creating)
         echo "error: adopted-worktree claim records an unresolved endpoint creation; preserving endpoint and task state" >&2
         return 1
         ;;
       bound)
-        [ "$FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID" = "$TEARDOWN_ADOPTED_WINDOW_ID" ] \
+        [ "$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_LOCATOR" = "$TEARDOWN_ADOPTED_SERVER_LOCATOR" ] \
+          && [ "$FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID" = "$TEARDOWN_ADOPTED_WINDOW_ID" ] \
           && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY" = "$TEARDOWN_ADOPTED_SERVER_IDENTITY" ] \
           && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SESSION" = "$TEARDOWN_ADOPTED_ENDPOINT_SESSION" ] || {
             echo "error: adopted-worktree claim and task metadata identify different endpoint generations; preserving endpoint and task state" >&2
@@ -573,7 +590,7 @@ teardown_adopted_claim_lock_and_validate() {
 }
 
 load_adopted_tmux_endpoint_identity() {  # <meta>
-  local meta=$1 window_id server_identity delivery endpoint_target
+  local meta=$1 window_id server_identity server_locator locator_count delivery endpoint_target current_locator
   fm_backend_source tmux || {
     echo "error: tmux endpoint validation is unavailable for adopted worktree metadata in $meta; preserving task state" >&2
     return 1
@@ -586,6 +603,21 @@ load_adopted_tmux_endpoint_identity() {  # <meta>
     echo "error: adopted worktree metadata in $meta lacks one exact tmux server identity; preserving task state" >&2
     return 1
   }
+  locator_count=$(grep -c '^adopted_tmux_server_locator=' "$meta" 2>/dev/null || true)
+  case "$locator_count" in
+    0) server_locator= ;;
+    1)
+      server_locator=$(fm_backend_meta_exact_value "$meta" adopted_tmux_server_locator) || server_locator=
+      fm_backend_tmux_server_locator_valid "$server_locator" || {
+        echo "error: adopted worktree metadata in $meta has an invalid tmux server locator; preserving task state" >&2
+        return 1
+      }
+      ;;
+    *)
+      echo "error: adopted worktree metadata in $meta has ambiguous tmux server locator fields; preserving task state" >&2
+      return 1
+      ;;
+  esac
   delivery=$(fm_backend_meta_exact_value "$meta" adopted_delivery) || {
     echo "error: adopted worktree metadata in $meta lacks one exact endpoint delivery state; preserving task state" >&2
     return 1
@@ -616,6 +648,15 @@ load_adopted_tmux_endpoint_identity() {  # <meta>
       return 1
       ;;
   esac
+  current_locator=$(fm_backend_tmux_server_locator "$TEARDOWN_ADOPTED_ENDPOINT_SESSION") || {
+    echo "error: current tmux server locator cannot be proven for adopted teardown; preserving task state" >&2
+    return 1
+  }
+  if [ -n "$server_locator" ] && [ "$server_locator" != "$current_locator" ]; then
+    echo "error: adopted endpoint belongs to a different tmux server locator; preserving task state" >&2
+    return 1
+  fi
+  TEARDOWN_ADOPTED_SERVER_LOCATOR=$current_locator
   TEARDOWN_ADOPTED_WINDOW_ID=$window_id
   TEARDOWN_ADOPTED_SERVER_IDENTITY=$server_identity
 }

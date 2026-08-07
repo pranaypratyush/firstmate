@@ -73,6 +73,28 @@ if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
 
+# Adopted endpoint creation publishes its random token before issuing the tmux
+# command queue. Prove the real server accepts that queue, exposes the exact
+# socket locator, and can rediscover the stable id after a mutable-name loss.
+ADOPTED_TOKEN=0123456789abcdef
+ADOPTED_WID=$(fm_backend_tmux_create_adopted_task \
+  "$SESSION" fm-provisional-adoption "$HOME" "$ADOPTED_TOKEN") \
+  || fail "real tmux: provisional adopted endpoint creation failed"
+ADOPTED_LOCATOR=$(fm_backend_tmux_server_locator "$ADOPTED_WID") \
+  || fail "real tmux: adopted endpoint server locator was unavailable"
+[ -S "$ADOPTED_LOCATOR" ] \
+  || fail "real tmux: adopted endpoint locator did not identify the private server socket"
+tmux rename-window -t "$ADOPTED_WID" lost-provisional-name \
+  || fail "real tmux: could not remove the provisional endpoint name"
+DISCOVERED_WID=$(fm_backend_tmux_window_id_for_provisional_token \
+  "$SESSION" "$ADOPTED_TOKEN") \
+  || fail "real tmux: provisional token could not rediscover the renamed endpoint"
+[ "$DISCOVERED_WID" = "$ADOPTED_WID" ] \
+  || fail "real tmux: provisional token resolved the wrong stable window id"
+fm_backend_tmux_kill_window_id "$ADOPTED_WID" \
+  || fail "real tmux: provisional endpoint cleanup failed"
+pass "real tmux: adopted creation atomically exposes a socket-scoped provisional identity"
+
 # --- send text + Enter -------------------------------------------------------
 
 # A newly-created interactive shell can exist while its startup files still run

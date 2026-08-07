@@ -53,8 +53,10 @@
 #   Git-common-directory claim record keyed by the physical worktree and a lock
 #   held from global claim inspection/publication through this home's metadata
 #   publication. Before endpoint creation that claim records a fail-closed
-#   creating state; immediately after creation it atomically binds the exact
-#   tmux window id, server lifetime, and session. A recovery spawn may reuse only
+#   creating state with the exact tmux socket, session, and a random provisional
+#   token installed in the window's creation command queue; immediately after
+#   creation it atomically binds the exact tmux window id and server lifetime.
+#   A recovery spawn may reuse only
 #   its own exact home/task claim when the path, project, ownership marker, and
 #   named branch still agree, and must retire the bound endpoint before creating
 #   its replacement.
@@ -704,16 +706,21 @@ ADOPTED_CLAIM_FILE=
 ADOPTED_CLAIM_HOME=
 ADOPTED_CLAIM_REMOVE_ON_ABORT=0
 ADOPTED_CLAIM_ENDPOINT_STATE=
+ADOPTED_CLAIM_UPGRADE_FROM_META=0
 ADOPTED_CLAIM_RESTORE_ON_ABORT=0
+ADOPTED_CLAIM_RESTORE_SERVER_LOCATOR=
 ADOPTED_CLAIM_RESTORE_WINDOW_ID=
 ADOPTED_CLAIM_RESTORE_SERVER_IDENTITY=
 ADOPTED_CLAIM_RESTORE_SESSION=
 ADOPTED_ENDPOINT_ABORT_CLEANUP=0
 ADOPTED_ENDPOINT_ID=
 ADOPTED_RECOVERY_ENDPOINT_ID=
+ADOPTED_RECOVERY_SERVER_LOCATOR=
 ADOPTED_RECOVERY_ENDPOINT_SESSION=
 ADOPTED_TMUX_SESSION=
+ADOPTED_TMUX_SERVER_LOCATOR=
 ADOPTED_TMUX_SERVER_IDENTITY=
+ADOPTED_PROVISIONAL_TOKEN=
 ADOPTED_RECOVERY_SERVER_IDENTITY=
 ADOPTED_BRIEF_ABORT_CLEANUP=0
 ADOPTED_BRIEF_PREVIOUS_TMP=
@@ -723,6 +730,7 @@ ADOPTED_DELIVERY_TMP=
 ADOPTED_PRIOR_META=0
 ADOPTED_PRIOR_DELIVERY=
 ADOPTED_PRIOR_ENDPOINT_ID=
+ADOPTED_PRIOR_SERVER_LOCATOR=
 ADOPTED_PRIOR_SERVER_IDENTITY=
 ADOPTED_PRIOR_ENDPOINT_SESSION=
 
@@ -809,6 +817,7 @@ spawn_abort_cleanup() {
     if [ "$adopted_endpoint_retired" = 1 ]; then
       fm_adopted_claim_bind_endpoint "$ADOPTED_CLAIM_FILE" "$ID" \
         "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" \
+        "$ADOPTED_CLAIM_RESTORE_SERVER_LOCATOR" \
         "$ADOPTED_CLAIM_RESTORE_WINDOW_ID" \
         "$ADOPTED_CLAIM_RESTORE_SERVER_IDENTITY" \
         "$ADOPTED_CLAIM_RESTORE_SESSION" || \
@@ -1627,9 +1636,9 @@ validate_retireable_home_adoption_project() {
 prepare_existing_worktree_adoption() {
   local requested=$EXISTING_WORKTREE_ARG
   local meta meta_id claim claim_real own project branch prior_meta=0 claim_status live_claim
-  local delivery_count endpoint_id_count server_id_count delivery endpoint_id server_id endpoint_target endpoint_session
+  local delivery_count endpoint_id_count server_id_count locator_count delivery endpoint_id server_id server_locator endpoint_target endpoint_session
   local adopted_brief_tmp status_file_q expected_path_q expected_branch_q expected_head_q brief_path
-  local claim_read_status claim_created=0
+  local claim_read_status claim_created=0 claim_absent=0 provisional_window_id provisional_status
 
   if ! fm_adopted_worktree_snapshot "$requested" "$PROJ_ABS_REAL"; then
     report_adopted_snapshot_refusal
@@ -1677,9 +1686,11 @@ prepare_existing_worktree_adoption() {
       delivery_count=$(grep -c '^adopted_delivery=' "$meta" 2>/dev/null || true)
       endpoint_id_count=$(grep -c '^adopted_window_id=' "$meta" 2>/dev/null || true)
       server_id_count=$(grep -c '^adopted_tmux_server_identity=' "$meta" 2>/dev/null || true)
+      locator_count=$(grep -c '^adopted_tmux_server_locator=' "$meta" 2>/dev/null || true)
       if [ "$delivery_count" -eq 0 ] && [ "$endpoint_id_count" -eq 0 ] && [ "$server_id_count" -eq 0 ]; then
         delivery=legacy
-      elif [ "$delivery_count" -eq 1 ] && [ "$endpoint_id_count" -eq 1 ] && [ "$server_id_count" -eq 1 ]; then
+      elif [ "$delivery_count" -eq 1 ] && [ "$endpoint_id_count" -eq 1 ] \
+        && [ "$server_id_count" -eq 1 ] && { [ "$locator_count" -eq 0 ] || [ "$locator_count" -eq 1 ]; }; then
         delivery=$(fm_backend_meta_exact_value "$meta" adopted_delivery) || delivery=
         endpoint_id=$(fm_backend_meta_exact_value "$meta" adopted_window_id) || endpoint_id=
         server_id=$(fm_backend_meta_exact_value "$meta" adopted_tmux_server_identity) || server_id=
@@ -1689,6 +1700,11 @@ prepare_existing_worktree_adoption() {
         esac
         fm_backend_tmux_window_id_valid "$endpoint_id" || delivery=
         fm_backend_tmux_server_identity_valid "$server_id" || delivery=
+        server_locator=
+        if [ "$locator_count" -eq 1 ]; then
+          server_locator=$(fm_backend_meta_exact_value "$meta" adopted_tmux_server_locator) || server_locator=
+          fm_backend_tmux_server_locator_valid "$server_locator" || delivery=
+        fi
         [ -n "$delivery" ] || {
           echo "error: existing metadata for task $ID has ambiguous adopted endpoint delivery identity" >&2
           return 1
@@ -1705,6 +1721,7 @@ prepare_existing_worktree_adoption() {
         }
         ADOPTED_PRIOR_DELIVERY=$delivery
         ADOPTED_PRIOR_ENDPOINT_ID=$endpoint_id
+        ADOPTED_PRIOR_SERVER_LOCATOR=$server_locator
         ADOPTED_PRIOR_SERVER_IDENTITY=$server_id
         ADOPTED_PRIOR_ENDPOINT_SESSION=$endpoint_session
       else
@@ -1753,24 +1770,26 @@ prepare_existing_worktree_adoption() {
       return 1
     fi
     case "$FM_ADOPTED_CLAIM_ENDPOINT_STATE" in
-      legacy)
+      legacy|legacy-bound)
         [ -n "$ADOPTED_PRIOR_ENDPOINT_ID" ] || {
           echo "error: legacy adopted-worktree claim for $ID has no exact metadata-backed endpoint identity; recovery refused" >&2
           return 1
         }
-        fm_adopted_claim_bind_endpoint "$ADOPTED_CLAIM_FILE" "$ID" \
-          "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" \
-          "$ADOPTED_PRIOR_ENDPOINT_ID" "$ADOPTED_PRIOR_SERVER_IDENTITY" \
-          "$ADOPTED_PRIOR_ENDPOINT_SESSION" || {
-            echo "error: legacy adopted-worktree claim for $ID could not be upgraded atomically" >&2
-            return 1
-          }
-        fm_adopted_claim_read "$ADOPTED_CLAIM_FILE" || return 1
+        if [ "$FM_ADOPTED_CLAIM_ENDPOINT_STATE" = legacy-bound ]; then
+          [ "$FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID" = "$ADOPTED_PRIOR_ENDPOINT_ID" ] \
+            && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY" = "$ADOPTED_PRIOR_SERVER_IDENTITY" ] \
+            && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SESSION" = "$ADOPTED_PRIOR_ENDPOINT_SESSION" ] || {
+              echo "error: legacy adopted-worktree claim and local metadata identify different endpoints" >&2
+              return 1
+            }
+        fi
+        ADOPTED_CLAIM_UPGRADE_FROM_META=1
         ;;
-      creating)
+      legacy-creating)
         echo "error: adopted-worktree claim for $ID records an unresolved endpoint creation without exact endpoint identity; recovery refused" >&2
         return 1
         ;;
+      creating) ;;
       bound) ;;
       *)
         echo "error: adopted-worktree global claim has an unsupported endpoint state; recovery refused" >&2
@@ -1783,43 +1802,32 @@ prepare_existing_worktree_adoption() {
       echo "error: adopted-worktree global claim is ambiguous (${FM_ADOPTED_CLAIM_ERROR:-unknown}); adoption refused" >&2
       return 1
     fi
-    fm_adopted_claim_publish "$ADOPTED_CLAIM_FILE" "$ID" \
-      "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" || {
-        echo "error: adopted-worktree global claim could not be published atomically" >&2
-        return 1
-      }
-    claim_created=1
+    claim_absent=1
     if [ "$prior_meta" -eq 1 ]; then
       [ -n "$ADOPTED_PRIOR_ENDPOINT_ID" ] || {
         echo "error: existing adopted metadata for $ID has no endpoint identity for global claim upgrade" >&2
         return 1
       }
-      fm_adopted_claim_bind_endpoint "$ADOPTED_CLAIM_FILE" "$ID" \
-        "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" \
-        "$ADOPTED_PRIOR_ENDPOINT_ID" "$ADOPTED_PRIOR_SERVER_IDENTITY" \
-        "$ADOPTED_PRIOR_ENDPOINT_SESSION" || {
-          echo "error: adopted-worktree endpoint claim could not be upgraded atomically" >&2
-          return 1
-      }
-      fm_adopted_claim_read "$ADOPTED_CLAIM_FILE" || return 1
+      ADOPTED_CLAIM_UPGRADE_FROM_META=1
     else
-      FM_ADOPTED_CLAIM_ENDPOINT_STATE=creating
+      FM_ADOPTED_CLAIM_ENDPOINT_STATE=absent
     fi
-  fi
-  if [ "$claim_created" -eq 1 ] && [ "$prior_meta" -eq 0 ]; then
-    ADOPTED_CLAIM_REMOVE_ON_ABORT=1
   fi
   ADOPTED_CLAIM_ENDPOINT_STATE=$FM_ADOPTED_CLAIM_ENDPOINT_STATE
   if [ "$ADOPTED_CLAIM_ENDPOINT_STATE" = bound ]; then
     if [ "$prior_meta" -eq 1 ]; then
-      [ "$FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID" = "$ADOPTED_PRIOR_ENDPOINT_ID" ] \
+      { [ -z "$ADOPTED_PRIOR_SERVER_LOCATOR" ] \
+          || [ "$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_LOCATOR" = "$ADOPTED_PRIOR_SERVER_LOCATOR" ]; } \
+        && [ "$FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID" = "$ADOPTED_PRIOR_ENDPOINT_ID" ] \
         && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY" = "$ADOPTED_PRIOR_SERVER_IDENTITY" ] \
         && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SESSION" = "$ADOPTED_PRIOR_ENDPOINT_SESSION" ] || {
           echo "error: adopted-worktree global claim and local task metadata identify different endpoint generations" >&2
           return 1
         }
+      ADOPTED_PRIOR_SERVER_LOCATOR=$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_LOCATOR
     fi
     if [ "$prior_meta" -eq 0 ] || [ "$ADOPTED_PRIOR_DELIVERY" = pending ]; then
+      ADOPTED_RECOVERY_SERVER_LOCATOR=$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_LOCATOR
       ADOPTED_RECOVERY_ENDPOINT_ID=$FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID
       ADOPTED_RECOVERY_SERVER_IDENTITY=$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY
       ADOPTED_RECOVERY_ENDPOINT_SESSION=$FM_ADOPTED_CLAIM_ENDPOINT_SESSION
@@ -1830,23 +1838,115 @@ prepare_existing_worktree_adoption() {
     echo "error: live tmux task inventory is ambiguous; adoption could not resolve its exact session" >&2
     return 1
   }
+  ADOPTED_TMUX_SERVER_LOCATOR=$(fm_backend_tmux_server_locator "$ADOPTED_TMUX_SESSION") || {
+    echo "error: live tmux task inventory is ambiguous; adoption could not bind the current tmux server locator" >&2
+    return 1
+  }
   ADOPTED_TMUX_SERVER_IDENTITY=$(fm_backend_tmux_server_identity "$ADOPTED_TMUX_SESSION") || {
     echo "error: live tmux task inventory is ambiguous; adoption could not bind the current tmux server lifetime" >&2
     return 1
   }
+  if [ "$claim_absent" -eq 1 ]; then
+    ADOPTED_PROVISIONAL_TOKEN=$(fm_trace_context_hex 8) || {
+      echo "error: adopted endpoint provisional identity could not be generated" >&2
+      return 1
+    }
+    fm_adopted_claim_publish "$ADOPTED_CLAIM_FILE" "$ID" \
+      "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" \
+      "$ADOPTED_TMUX_SERVER_LOCATOR" "$ADOPTED_TMUX_SESSION" \
+      "$ADOPTED_PROVISIONAL_TOKEN" || {
+        echo "error: adopted-worktree global claim could not be published atomically" >&2
+        return 1
+      }
+    claim_created=1
+    fm_adopted_claim_read "$ADOPTED_CLAIM_FILE" || return 1
+    ADOPTED_CLAIM_ENDPOINT_STATE=creating
+    if [ "$prior_meta" -eq 0 ]; then
+      ADOPTED_CLAIM_REMOVE_ON_ABORT=1
+    fi
+  fi
+  if [ "$ADOPTED_CLAIM_UPGRADE_FROM_META" = 1 ]; then
+    [ "$ADOPTED_PRIOR_SERVER_IDENTITY" = "$ADOPTED_TMUX_SERVER_IDENTITY" ] || {
+      echo "error: legacy adopted endpoint server cannot be proven from the current tmux server; recovery refused" >&2
+      return 1
+    }
+    fm_adopted_claim_bind_endpoint "$ADOPTED_CLAIM_FILE" "$ID" \
+      "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" \
+      "$ADOPTED_TMUX_SERVER_LOCATOR" "$ADOPTED_PRIOR_ENDPOINT_ID" \
+      "$ADOPTED_PRIOR_SERVER_IDENTITY" "$ADOPTED_PRIOR_ENDPOINT_SESSION" || {
+        echo "error: legacy adopted-worktree claim for $ID could not be upgraded atomically" >&2
+        return 1
+      }
+    fm_adopted_claim_read "$ADOPTED_CLAIM_FILE" || return 1
+    ADOPTED_CLAIM_ENDPOINT_STATE=bound
+    ADOPTED_PRIOR_SERVER_LOCATOR=$ADOPTED_TMUX_SERVER_LOCATOR
+    if [ "$prior_meta" -eq 0 ] || [ "$ADOPTED_PRIOR_DELIVERY" = pending ]; then
+      ADOPTED_RECOVERY_SERVER_LOCATOR=$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_LOCATOR
+      ADOPTED_RECOVERY_ENDPOINT_ID=$FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID
+      ADOPTED_RECOVERY_SERVER_IDENTITY=$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY
+      ADOPTED_RECOVERY_ENDPOINT_SESSION=$FM_ADOPTED_CLAIM_ENDPOINT_SESSION
+    fi
+  fi
+  if [ "$ADOPTED_CLAIM_ENDPOINT_STATE" = creating ]; then
+    [ "$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_LOCATOR" = "$ADOPTED_TMUX_SERVER_LOCATOR" ] \
+      && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SESSION" = "$ADOPTED_TMUX_SESSION" ] || {
+        echo "error: provisional adopted endpoint belongs to a different tmux server locator or session; recovery refused" >&2
+        return 1
+      }
+    ADOPTED_PROVISIONAL_TOKEN=$FM_ADOPTED_CLAIM_ENDPOINT_PROVISIONAL_TOKEN
+    if provisional_window_id=$(fm_backend_tmux_window_id_for_provisional_token \
+      "$ADOPTED_TMUX_SESSION" "$ADOPTED_PROVISIONAL_TOKEN"); then
+      fm_adopted_claim_bind_endpoint "$ADOPTED_CLAIM_FILE" "$ID" \
+        "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" \
+        "$ADOPTED_TMUX_SERVER_LOCATOR" "$provisional_window_id" \
+        "$ADOPTED_TMUX_SERVER_IDENTITY" "$ADOPTED_TMUX_SESSION" || {
+          echo "error: provisional adopted endpoint could not be bound for recovery" >&2
+          return 1
+        }
+      fm_adopted_claim_read "$ADOPTED_CLAIM_FILE" || return 1
+      ADOPTED_CLAIM_ENDPOINT_STATE=bound
+      ADOPTED_RECOVERY_SERVER_LOCATOR=$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_LOCATOR
+      ADOPTED_RECOVERY_ENDPOINT_ID=$FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID
+      ADOPTED_RECOVERY_SERVER_IDENTITY=$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY
+      ADOPTED_RECOVERY_ENDPOINT_SESSION=$FM_ADOPTED_CLAIM_ENDPOINT_SESSION
+    else
+      provisional_status=$?
+      if [ "$provisional_status" -ne 1 ]; then
+        echo "error: provisional adopted endpoint inventory is ambiguous; recovery refused" >&2
+        return 1
+      fi
+      [ "$claim_created" -eq 1 ] || {
+        echo "error: provisional adopted endpoint is missing but prior creation cannot be disproven; recovery refused" >&2
+        return 1
+      }
+    fi
+  fi
+  if [ "$ADOPTED_CLAIM_ENDPOINT_STATE" = bound ] \
+     && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_LOCATOR" != "$ADOPTED_TMUX_SERVER_LOCATOR" ]; then
+    echo "error: bound tmux server locator differs from the current server; recovery refused" >&2
+    return 1
+  fi
   if [ "$ADOPTED_CLAIM_ENDPOINT_STATE" = bound ] \
      && [ "$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY" != "$ADOPTED_TMUX_SERVER_IDENTITY" ]; then
     ADOPTED_CLAIM_RESTORE_ON_ABORT=1
+    ADOPTED_CLAIM_RESTORE_SERVER_LOCATOR=$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_LOCATOR
     ADOPTED_CLAIM_RESTORE_WINDOW_ID=$FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID
     ADOPTED_CLAIM_RESTORE_SERVER_IDENTITY=$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY
     ADOPTED_CLAIM_RESTORE_SESSION=$FM_ADOPTED_CLAIM_ENDPOINT_SESSION
+    ADOPTED_PROVISIONAL_TOKEN=$(fm_trace_context_hex 8) || {
+      echo "error: replacement adopted endpoint provisional identity could not be generated" >&2
+      return 1
+    }
     fm_adopted_claim_mark_creating "$ADOPTED_CLAIM_FILE" "$ID" \
-      "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" || {
+      "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" \
+      "$ADOPTED_TMUX_SERVER_LOCATOR" "$ADOPTED_TMUX_SESSION" \
+      "$ADOPTED_PROVISIONAL_TOKEN" || {
         echo "error: adopted-worktree endpoint generation could not be advanced after tmux server restart" >&2
         return 1
       }
     ADOPTED_CLAIM_ENDPOINT_STATE=creating
     ADOPTED_RECOVERY_ENDPOINT_ID=
+    ADOPTED_RECOVERY_SERVER_LOCATOR=
     ADOPTED_RECOVERY_SERVER_IDENTITY=
     ADOPTED_RECOVERY_ENDPOINT_SESSION=
   fi
@@ -1997,11 +2097,18 @@ if [ -n "$ADOPTED_RECOVERY_ENDPOINT_ID" ]; then
       exit 1
     }
   ADOPTED_CLAIM_RESTORE_ON_ABORT=1
+  ADOPTED_CLAIM_RESTORE_SERVER_LOCATOR=$ADOPTED_RECOVERY_SERVER_LOCATOR
   ADOPTED_CLAIM_RESTORE_WINDOW_ID=$ADOPTED_RECOVERY_ENDPOINT_ID
   ADOPTED_CLAIM_RESTORE_SERVER_IDENTITY=$ADOPTED_RECOVERY_SERVER_IDENTITY
   ADOPTED_CLAIM_RESTORE_SESSION=$ADOPTED_RECOVERY_ENDPOINT_SESSION
+  ADOPTED_PROVISIONAL_TOKEN=$(fm_trace_context_hex 8) || {
+    echo "error: replacement adopted endpoint provisional identity could not be generated" >&2
+    exit 1
+  }
   fm_adopted_claim_mark_creating "$ADOPTED_CLAIM_FILE" "$ID" \
-    "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" || {
+    "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" \
+    "$ADOPTED_TMUX_SERVER_LOCATOR" "$ADOPTED_TMUX_SESSION" \
+    "$ADOPTED_PROVISIONAL_TOKEN" || {
       echo "error: pending adopted endpoint retired but its claim generation could not be advanced" >&2
       exit 1
     }
@@ -2026,11 +2133,18 @@ elif [ "$EXISTING_WORKTREE_SET" -eq 1 ] \
     exit 1
   }
   ADOPTED_CLAIM_RESTORE_ON_ABORT=1
+  ADOPTED_CLAIM_RESTORE_SERVER_LOCATOR=$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_LOCATOR
   ADOPTED_CLAIM_RESTORE_WINDOW_ID=$FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID
   ADOPTED_CLAIM_RESTORE_SERVER_IDENTITY=$FM_ADOPTED_CLAIM_ENDPOINT_SERVER_IDENTITY
   ADOPTED_CLAIM_RESTORE_SESSION=$FM_ADOPTED_CLAIM_ENDPOINT_SESSION
+  ADOPTED_PROVISIONAL_TOKEN=$(fm_trace_context_hex 8) || {
+    echo "error: replacement adopted endpoint provisional identity could not be generated" >&2
+    exit 1
+  }
   fm_adopted_claim_mark_creating "$ADOPTED_CLAIM_FILE" "$ID" \
-    "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" || {
+    "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" \
+    "$ADOPTED_TMUX_SERVER_LOCATOR" "$ADOPTED_TMUX_SESSION" \
+    "$ADOPTED_PROVISIONAL_TOKEN" || {
       echo "error: adopted endpoint claim generation could not be advanced for recovery" >&2
       exit 1
     }
@@ -2050,7 +2164,17 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$TASK_CWD") || exit 1
+    if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
+      # Once the create request is dispatched, a client-side failure cannot
+      # prove that the server did not create the token-bound window. Preserve
+      # the provisional claim until success returns its stable id.
+      ADOPTED_CLAIM_REMOVE_ON_ABORT=0
+      WID=$(fm_backend_tmux_create_adopted_task \
+        "$SES" "$W" "$TASK_CWD" "$ADOPTED_PROVISIONAL_TOKEN") || exit 1
+      [ "$ADOPTED_PRIOR_META" -eq 1 ] || ADOPTED_CLAIM_REMOVE_ON_ABORT=1
+    else
+      WID=$(fm_backend_tmux_create_task "$SES" "$W" "$TASK_CWD") || exit 1
+    fi
     WT_TARGET="$WID"
     if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
       ADOPTED_ENDPOINT_ID=$WID
@@ -2061,7 +2185,8 @@ case "$BACKEND" in
       }
       fm_adopted_claim_bind_endpoint "$ADOPTED_CLAIM_FILE" "$ID" \
         "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" \
-        "$ADOPTED_ENDPOINT_ID" "$ADOPTED_TMUX_SERVER_IDENTITY" \
+        "$ADOPTED_TMUX_SERVER_LOCATOR" "$ADOPTED_ENDPOINT_ID" \
+        "$ADOPTED_TMUX_SERVER_IDENTITY" \
         "$ADOPTED_TMUX_SESSION" || {
           echo "error: created adopted endpoint identity could not be published durably" >&2
           exit 1
@@ -2788,6 +2913,7 @@ fi
     echo "adopted_branch=$ADOPTED_WORKTREE_BRANCH"
     echo "adopted_head=$ADOPTED_WORKTREE_HEAD"
     echo "adopted_window_id=$ADOPTED_ENDPOINT_ID"
+    echo "adopted_tmux_server_locator=$ADOPTED_TMUX_SERVER_LOCATOR"
     echo "adopted_tmux_server_identity=$ADOPTED_TMUX_SERVER_IDENTITY"
     echo "adopted_delivery=pending"
   fi
@@ -2830,7 +2956,7 @@ fi
     while IFS= read -r prior_line || [ -n "$prior_line" ]; do
       case "$prior_line" in
         window=*|endpoint_task_id=*|worktree=*|project=*|harness=*|kind=*|mode=*|yolo=*|tasktmp=*|model=*|effort=*|\
-        worktree_ownership=*|adopted_branch=*|adopted_head=*|adopted_window_id=*|adopted_tmux_server_identity=*|adopted_delivery=*|busy_gen=*|traceparent=*|backend=*|\
+        worktree_ownership=*|adopted_branch=*|adopted_head=*|adopted_window_id=*|adopted_tmux_server_locator=*|adopted_tmux_server_identity=*|adopted_delivery=*|busy_gen=*|traceparent=*|backend=*|\
         herdr_session=*|herdr_workspace_id=*|herdr_tab_id=*|herdr_pane_id=*|\
         zellij_session=*|zellij_tab_id=*|zellij_pane_id=*|orca_worktree_id=*|terminal=*|\
         cmux_workspace_id=*|cmux_surface_id=*|home=*|projects=*) ;;

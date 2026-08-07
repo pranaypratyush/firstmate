@@ -28,6 +28,14 @@ case "$*" in
     fi
     exit 0
     ;;
+  display-message*"#{socket_path}"*)
+    if [ -n "${FM_ADOPT_SERVER_LOCATOR_STATE:-}" ] && [ -s "$FM_ADOPT_SERVER_LOCATOR_STATE" ]; then
+      cat "$FM_ADOPT_SERVER_LOCATOR_STATE"
+    else
+      printf '%s\n' '/tmp/fm-adopt-tmux.sock'
+    fi
+    exit 0
+    ;;
   display-message*"#{window_id}"*)
     case "$*" in
       *"-t %1"*) printf '%s\n' @1 ;;
@@ -39,7 +47,7 @@ case "$*" in
     esac
     exit 0
     ;;
-  *"#{session_name}"*)
+  display-message*"#{session_name}"*)
     case "$*" in
       *"-t %777"*) printf '%s\n' "${FM_ADOPT_LIVE_SESSION:-firstmate}" ;;
       *) printf '%s\n' firstmate ;;
@@ -70,6 +78,21 @@ case "${1:-}" in
   display-message) printf '%s\n' firstmate ;;
   list-windows)
     case "$*" in
+      *"#{window_id}|#{window_name}"*)
+        if [ -n "${FM_ADOPT_WINDOW_STATE:-}" ] && [ -s "$FM_ADOPT_WINDOW_STATE" ]; then
+          while IFS= read -r listed_window; do
+            [ -n "$listed_window" ] || continue
+            printf '@123|%s\n' "$listed_window"
+          done < "$FM_ADOPT_WINDOW_STATE"
+        fi
+        ;;
+      *"#{window_id}|#{session_name}|#{@firstmate_adoption_token}"*)
+        if [ -n "${FM_ADOPT_WINDOW_STATE:-}" ] && [ -s "$FM_ADOPT_WINDOW_STATE" ] \
+           && [ -n "${FM_ADOPT_PROVISIONAL_TOKEN_STATE:-}" ] \
+           && [ -s "$FM_ADOPT_PROVISIONAL_TOKEN_STATE" ]; then
+          printf '@123|firstmate|%s\n' "$(cat "$FM_ADOPT_PROVISIONAL_TOKEN_STATE")"
+        fi
+        ;;
       *"#{window_id}"*"#{window_panes}"*)
         [ "${FM_ADOPT_INVENTORY_ERROR:-0}" != 1 ] || exit 2
         printf '@1|firstmate|1\n'
@@ -100,12 +123,32 @@ case "${1:-}" in
     ;;
   new-window)
     window=
+    provisional_token=
     while [ "$#" -gt 0 ]; do
       if [ "$1" = -n ]; then window=${2:-}; break; fi
       shift
     done
+    for arg in "$@"; do
+      if [ "$arg" = @firstmate_adoption_token ]; then
+        provisional_token_next=1
+      elif [ "${provisional_token_next:-0}" = 1 ]; then
+        provisional_token=$arg
+        provisional_token_next=0
+      fi
+    done
     [ -z "${FM_ADOPT_WINDOW_STATE:-}" ] || printf '%s\n' "$window" > "$FM_ADOPT_WINDOW_STATE"
+    [ -z "${FM_ADOPT_PROVISIONAL_TOKEN_STATE:-}" ] \
+      || printf '%s\n' "$provisional_token" > "$FM_ADOPT_PROVISIONAL_TOKEN_STATE"
     printf '%s\n' @123
+    if [ "${FM_ADOPT_SIGKILL_AFTER_CREATE:-0}" = 1 ]; then
+      spawn_pid=$(ps -o ppid= -p "$PPID" | tr -d '[:space:]')
+      case "$spawn_pid" in ''|*[!0-9]*) exit 2 ;; esac
+      kill -KILL "$spawn_pid"
+      sleep 0.1
+    fi
+    ;;
+  rename-window)
+    [ -z "${FM_ADOPT_WINDOW_STATE:-}" ] || printf '%s\n' "${4:-}" > "$FM_ADOPT_WINDOW_STATE"
     ;;
   kill-window)
     [ "${FM_ADOPT_FAIL_KILL:-0}" != 1 ] || exit 1
@@ -159,6 +202,8 @@ setup_case() {  # <name> <task-id> <ship|scout> [project-suffix] [worktree-suffi
   TREELOG="$CASE/treehouse.log"
   WINDOW_STATE="$CASE/window.state"
   SERVER_IDENTITY_STATE="$CASE/server-identity.state"
+  SERVER_LOCATOR_STATE="$CASE/server-locator.state"
+  PROVISIONAL_TOKEN_STATE="$CASE/provisional-token.state"
   SEND_COUNT="$CASE/send.count"
   FAKEBIN=$(make_fakebin "$CASE/fakes")
   mkdir -p "$HOME_DIR/data/$id" "$HOME_DIR/state" "$HOME_DIR/config" "$HOME_DIR/projects"
@@ -166,6 +211,8 @@ setup_case() {  # <name> <task-id> <ship|scout> [project-suffix] [worktree-suffi
   : > "$TREELOG"
   : > "$WINDOW_STATE"
   printf '%s\n' '4242:123456' > "$SERVER_IDENTITY_STATE"
+  printf '%s\n' '/tmp/fm-adopt-tmux-a.sock' > "$SERVER_LOCATOR_STATE"
+  : > "$PROVISIONAL_TOKEN_STATE"
   : > "$SEND_COUNT"
   git init -q -b main "$PROJ"
   printf '%s\n' baseline > "$PROJ/base.txt"
@@ -195,6 +242,9 @@ run_spawn_command() {
     FM_ADOPT_LIVE_WINDOW_ID="${FM_ADOPT_LIVE_WINDOW_ID:-@777}" \
     FM_ADOPT_SERVER_IDENTITY="${FM_ADOPT_SERVER_IDENTITY:-4242:123456}" \
     FM_ADOPT_SERVER_IDENTITY_STATE="$SERVER_IDENTITY_STATE" \
+    FM_ADOPT_SERVER_LOCATOR_STATE="$SERVER_LOCATOR_STATE" \
+    FM_ADOPT_PROVISIONAL_TOKEN_STATE="$PROVISIONAL_TOKEN_STATE" \
+    FM_ADOPT_SIGKILL_AFTER_CREATE="${FM_ADOPT_SIGKILL_AFTER_CREATE:-0}" \
     FM_ADOPT_BASE_PANE_PATH="${FM_ADOPT_BASE_PANE_PATH:-$PROJ}" \
     FM_ADOPT_GIT_COUNT="${FM_ADOPT_GIT_COUNT:-}" FM_ADOPT_GIT_MUTATE_AT="${FM_ADOPT_GIT_MUTATE_AT:-0}" \
     FM_ADOPT_MUTATE_WT="${FM_ADOPT_MUTATE_WT:-}" FM_ADOPT_REAL_GIT="$REAL_GIT" \
@@ -223,6 +273,7 @@ run_teardown() {
     FM_PROJECTS_OVERRIDE="$task_home/projects" FM_CONFIG_OVERRIDE="$task_home/config" \
     FM_TEARDOWN_GUARD_DONE=1 FM_ADOPT_TMUX_LOG="$TLOG" \
     FM_ADOPT_TREEHOUSE_LOG="$TREELOG" FM_ADOPT_WINDOW_STATE="$WINDOW_STATE" \
+    FM_ADOPT_SERVER_LOCATOR_STATE="$SERVER_LOCATOR_STATE" \
     FM_FAKE_PANE_PATH="${FM_ADOPT_FAKE_PANE_PATH:-$WT}" \
     FM_ADOPT_NAME_KILL_FAIL="${FM_ADOPT_NAME_KILL_FAIL:-0}" \
     FM_ADOPT_SEND_COUNT="$SEND_COUNT" PATH="$FAKEBIN:$PATH" \
@@ -598,6 +649,72 @@ test_unresolved_prepublication_endpoint_blocks_duplicate_retry() {
   pass "fm-spawn persists unresolved pre-publication endpoint identity and refuses duplicate retry"
 }
 
+test_cross_server_retry_refuses_unproven_original_endpoint() {
+  local id=adopt-cross-server-k5 out status old_window new_windows kills common claim
+  setup_case cross-server "$id" ship
+  run_spawn "$id" ship "$WT" >/dev/null \
+    || fail "cross-server fixture could not publish its server-A adoption"
+  common=$(git -C "$PROJ" rev-parse --path-format=absolute --git-common-dir)
+  claim=$(find "$common/firstmate-adopted-worktree-claims-v1" -type f -name '*.claim' -print -quit)
+  assert_grep 'endpoint_server_locator=/tmp/fm-adopt-tmux-a.sock' "$claim" \
+    "server-A claim did not persist its exact tmux socket locator"
+  assert_grep 'adopted_tmux_server_locator=/tmp/fm-adopt-tmux-a.sock' "$HOME_DIR/state/$id.meta" \
+    "server-A metadata did not persist its exact tmux socket locator"
+  old_window=$(cat "$WINDOW_STATE")
+  : > "$WINDOW_STATE"
+  printf '%s\n' '9001:654321' > "$SERVER_IDENTITY_STATE"
+  printf '%s\n' '/tmp/fm-adopt-tmux-b.sock' > "$SERVER_LOCATOR_STATE"
+
+  out=$(run_spawn "$id" ship "$WT")
+  status=$?
+  expect_code 1 "$status" "server-B retry must refuse while server-A endpoint absence is unproven"
+  assert_contains "$out" 'bound tmux server locator differs from the current server; recovery refused' \
+    "cross-server retry did not name the exact server-locator boundary"
+  [ "$old_window" = "fm-$id" ] || fail "cross-server fixture lost server A's live endpoint marker"
+  new_windows=$(grep -c 'tmux new-window ' "$TLOG" || true)
+  kills=$(grep -c 'tmux kill-window ' "$TLOG" || true)
+  [ "$new_windows" -eq 1 ] || fail "cross-server retry created a duplicate endpoint on server B (new_windows=$new_windows)"
+  [ "$kills" -eq 0 ] || fail "cross-server retry killed an endpoint through the wrong server (kills=$kills)"
+  assert_present "$HOME_DIR/state/$id.meta" "cross-server retry erased server A's durable metadata"
+  pass "fm-spawn refuses cross-server recovery without proof about the bound original endpoint"
+}
+
+test_sigkill_creation_gap_recovers_provisional_endpoint() {
+  local id=adopt-sigkill-gap-k6 first_out first_rc retry_out retry_status
+  local common claim new_windows kills
+  setup_case sigkill-gap "$id" ship
+  first_out="$CASE/first.out"
+  first_rc="$CASE/first.rc"
+  (
+    FM_ADOPT_SIGKILL_AFTER_CREATE=1 run_spawn "$id" ship "$WT" > "$first_out"
+    printf '%s\n' "$?" > "$first_rc"
+  ) 2>/dev/null
+  [ -s "$first_rc" ] || fail "SIGKILL fixture did not report the killed spawn status"
+  expect_code 137 "$(cat "$first_rc")" "spawn should be SIGKILLed immediately after endpoint creation"
+  assert_absent "$HOME_DIR/state/$id.meta" "SIGKILL gap unexpectedly published local task metadata"
+  [ -s "$WINDOW_STATE" ] || fail "SIGKILL gap did not leave the created endpoint live"
+  common=$(git -C "$PROJ" rev-parse --path-format=absolute --git-common-dir)
+  claim=$(find "$common/firstmate-adopted-worktree-claims-v1" -type f -name '*.claim' -print -quit)
+  [ -n "$claim" ] || fail "SIGKILL gap lost the durable global claim"
+  assert_grep 'endpoint_state=creating' "$claim" "SIGKILL gap did not retain the creation transaction"
+  assert_grep 'endpoint_server_locator=/tmp/fm-adopt-tmux-a.sock' "$claim" \
+    "SIGKILL gap claim lost its exact tmux socket locator"
+  assert_grep 'endpoint_provisional_token=' "$claim" "SIGKILL gap claim cannot rediscover the created endpoint"
+  assert_grep "endpoint_provisional_token=$(cat "$PROVISIONAL_TOKEN_STATE")" "$claim" \
+    "SIGKILL gap claim token does not identify the created endpoint"
+
+  retry_out=$(FM_ADOPT_LIVE_WINDOW_ID=@123 run_spawn "$id" ship "$WT")
+  retry_status=$?
+  expect_code 0 "$retry_status" "same-task retry should reconcile and replace the provisional endpoint"
+  assert_contains "$retry_out" "spawned $id" "SIGKILL gap retry did not relaunch"
+  new_windows=$(grep -c 'tmux new-window ' "$TLOG" || true)
+  kills=$(grep -c 'tmux kill-window ' "$TLOG" || true)
+  [ "$new_windows" -eq 2 ] || fail "SIGKILL recovery did not create exactly one replacement (new_windows=$new_windows)"
+  [ "$kills" -eq 1 ] || fail "SIGKILL recovery did not retire exactly the provisional endpoint (kills=$kills)"
+  assert_present "$HOME_DIR/state/$id.meta" "SIGKILL recovery did not publish task metadata"
+  pass "fm-spawn recovers a SIGKILL between endpoint creation and durable stable-id binding"
+}
+
 test_teardown_serializes_against_same_id_recovery() {
   local id=adopt-teardown-generation-k4 ready release teardown_out teardown_rc_file
   local teardown_pid spawn_out spawn_status teardown_status new_windows
@@ -646,11 +763,73 @@ SH
   expect_code 1 "$spawn_status" "same-ID recovery must not publish while teardown owns the task generation"
   assert_contains "$spawn_out" "another spawn is already creating task $id" \
     "concurrent recovery did not refuse on the shared task-generation lock"
-  expect_code 0 "$teardown_status" "serialized teardown should complete after the pause clears"
+  [ "$teardown_status" -eq 0 ] || fail "serialized teardown should complete after the pause clears (output: $(cat "$teardown_out"))"
   assert_absent "$HOME_DIR/state/$id.meta" "serialized teardown retained its retired generation metadata"
   new_windows=$(grep -c 'tmux new-window ' "$TLOG" || true)
   [ "$new_windows" -eq 1 ] || fail "concurrent recovery created a replacement endpoint during teardown (new_windows=$new_windows)"
   pass "fm-teardown serializes old-generation retirement against same-ID recovery publication"
+}
+
+test_teardown_refuses_spawn_generation_in_progress() {
+  local id=adopt-spawn-first-k7 ready release spawn_out spawn_rc teardown_out teardown_rc
+  local spawn_pid teardown_pid teardown_finished=0 new_windows
+  setup_case spawn-first "$id" ship
+  ready="$CASE/spawn.ready"
+  release="$CASE/spawn.release"
+  spawn_out="$CASE/spawn.out"
+  spawn_rc="$CASE/spawn.rc"
+  teardown_out="$CASE/teardown.out"
+  teardown_rc="$CASE/teardown.rc"
+  cat > "$FAKEBIN/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_ADOPT_SPAWN_PAUSE_READY:-}" ] \
+   && printf '%s\n' "$*" | grep -q 'worktree list'; then
+  : > "$FM_ADOPT_SPAWN_PAUSE_READY"
+  while [ ! -e "$FM_ADOPT_SPAWN_PAUSE_RELEASE" ]; do sleep 0.05; done
+fi
+exec "$FM_ADOPT_REAL_GIT" "$@"
+SH
+  chmod +x "$FAKEBIN/git"
+
+  (
+    FM_ADOPT_SPAWN_PAUSE_READY="$ready" FM_ADOPT_SPAWN_PAUSE_RELEASE="$release" \
+      FM_ADOPT_REAL_GIT="$REAL_GIT" run_spawn "$id" ship "$WT" > "$spawn_out"
+    printf '%s\n' "$?" > "$spawn_rc"
+  ) &
+  spawn_pid=$!
+  for _ in $(seq 1 200); do
+    [ -e "$ready" ] && break
+    sleep 0.05
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$spawn_pid" || true
+    fail "spawn-first fixture did not pause while holding the task generation lock"
+  fi
+
+  (
+    run_teardown "$id" > "$teardown_out"
+    printf '%s\n' "$?" > "$teardown_rc"
+  ) &
+  teardown_pid=$!
+  for _ in $(seq 1 40); do
+    if [ -s "$teardown_rc" ]; then teardown_finished=1; break; fi
+    sleep 0.05
+  done
+  : > "$release"
+  wait "$spawn_pid" || true
+  wait "$teardown_pid" || true
+
+  [ "$teardown_finished" -eq 1 ] || fail "teardown waited across the in-progress spawn generation"
+  expect_code 1 "$(cat "$teardown_rc")" "teardown must refuse rather than cross a spawn generation boundary"
+  assert_contains "$(cat "$teardown_out")" "task lifecycle is already creating $id" \
+    "spawn-first teardown refusal did not name the generation owner"
+  expect_code 0 "$(cat "$spawn_rc")" "spawn should complete after the teardown refusal"
+  assert_present "$HOME_DIR/state/$id.meta" "spawn-first teardown erased the newly published generation"
+  new_windows=$(grep -c 'tmux new-window ' "$TLOG" || true)
+  [ "$new_windows" -eq 1 ] || fail "spawn-first race created or destroyed the wrong endpoint generation"
+  pass "fm-teardown refuses an in-progress spawn instead of crossing its generation boundary"
 }
 
 test_recovery_reuses_claim_and_recaptures_head() {
@@ -722,7 +901,7 @@ test_metadata_backed_legacy_claim_upgrades_on_recovery() {
   status=$?
   expect_code 0 "$status" "metadata-backed version-1 claim should upgrade during same-task recovery"
   assert_contains "$out" "spawned $id" "legacy claim recovery did not relaunch"
-  assert_grep 'version=2' "$claim" "legacy claim recovery did not publish the current schema"
+  assert_grep 'version=3' "$claim" "legacy claim recovery did not publish the current schema"
   assert_grep 'endpoint_state=bound' "$claim" "legacy claim recovery did not bind the replacement endpoint"
   pass "fm-spawn upgrades metadata-backed path-only claims without losing recovery"
 }
@@ -1139,7 +1318,10 @@ test_adoption_safe_harnesses_preserve_worktree_end_to_end
 test_retireable_secondmate_home_requires_discoverable_project
 test_endpoint_cwd_mismatch_refuses_unbound_cleanup
 test_teardown_serializes_against_same_id_recovery
+test_teardown_refuses_spawn_generation_in_progress
 test_unresolved_prepublication_endpoint_blocks_duplicate_retry
+test_cross_server_retry_refuses_unproven_original_endpoint
+test_sigkill_creation_gap_recovers_provisional_endpoint
 test_recovery_reuses_claim_and_recaptures_head
 test_metadata_backed_legacy_claim_upgrades_on_recovery
 test_identity_change_before_publication_refuses_atomically
