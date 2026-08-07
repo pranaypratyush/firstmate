@@ -19,7 +19,7 @@
 # Usage:
 #   fm-decision-hold.sh id <origin-id> <decision-key>
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
-#     --title <title> --reason <reason> [--repo <repo>] \
+#     --title <title> --reason <reason> [--repo <repo>] [--evidence <findings>] \
 #     [--action <review-changes|merge-decision|missing-choice>...]
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
@@ -33,6 +33,8 @@
 # complete against the surviving report and holds without recreating task state.
 # `verify` is read-only and is called by scout teardown so teardown cannot erase a
 # source before this gate has succeeded.
+# `--evidence` persists the concrete findings behind the captain action and is
+# capped at 240 characters so the canonical snapshot can carry it without loss.
 #
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
 # It writes the captain decision and routed identities into the hold body, clears
@@ -79,6 +81,13 @@ validate_one_line() {  # <label> <value>
   case "$value" in
     *$'\n'*|*$'\r'*) fail "$label must be one line" ;;
   esac
+}
+
+validate_optional_bounded_line() {  # <label> <max-characters> <value>
+  local label=$1 max=$2 value=$3
+  [ -z "$value" ] && return 0
+  validate_one_line "$label" "$value"
+  [ "${#value}" -le "$max" ] || fail "$label exceeds $max characters"
 }
 
 sha256_text() {  # <text>
@@ -230,7 +239,7 @@ command_id() {
 }
 
 command_hold() {
-  local origin=${1:-} key=${2:-} title='' reason='' repo='' actions='' action='' id show state kind existing_title existing_body existing_actions='' body
+  local origin=${1:-} key=${2:-} title='' reason='' repo='' evidence='' actions='' action='' id show state kind existing_title existing_body existing_evidence='' existing_actions='' body
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -238,6 +247,7 @@ command_hold() {
       --title) shift; title=${1:-} ;;
       --reason) shift; reason=${1:-} ;;
       --repo) shift; repo=${1:-} ;;
+      --evidence) shift; evidence=${1:-} ;;
       --action)
         shift
         action=${1:-}
@@ -258,6 +268,7 @@ command_hold() {
   validate_slug decision-key "$key"
   validate_one_line title "$title"
   validate_one_line reason "$reason"
+  validate_optional_bounded_line evidence 240 "$evidence"
   case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
   require_tasks_axi
   actions=$(printf '%s\n' "$actions" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd+ -)
@@ -272,6 +283,12 @@ command_hold() {
     [ "$kind" = captain ] || fail "existing backlog identity $id is not kind captain"
     [ "$existing_title" = "$title" ] || fail "existing captain hold $id has a different title"
     case "$existing_body" in
+      *"Decision evidence: "*)
+        existing_evidence=${existing_body#*Decision evidence: }
+        existing_evidence=${existing_evidence%%\\n*}
+        ;;
+    esac
+    case "$existing_body" in
       *"Captain action: "*)
         existing_actions=${existing_body#*Captain action: }
         existing_actions=${existing_actions%%\\n*}
@@ -279,6 +296,8 @@ command_hold() {
     esac
     [ "$existing_actions" = "$actions" ] \
       || fail "existing captain hold $id has different structured captain action intent"
+    [ "$existing_evidence" = "$evidence" ] \
+      || fail "existing captain hold $id has different structured decision evidence"
   else
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
@@ -288,6 +307,9 @@ command_hold() {
     [ -n "$repo" ] || repo=firstmate
     validate_one_line repo "$repo"
     body=$(printf 'Origin: %s\nDecision key: %s' "$origin" "$key")
+    if [ -n "$evidence" ]; then
+      body=$(printf '%s\nDecision evidence: %s' "$body" "$evidence")
+    fi
     if [ -n "$actions" ]; then
       body=$(printf '%s\nCaptain action: %s' "$body" "$actions")
     fi
@@ -395,7 +417,7 @@ EOF
 }
 
 command_resolve() {
-  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' action_intent='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
+  local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' evidence_intent='' action_intent='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -431,6 +453,12 @@ command_resolve() {
   hold_show=$(task_show "$id")
   hold_body=$(show_field "$hold_show" body)
   case "$hold_body" in
+    *"Decision evidence: "*)
+      evidence_intent=${hold_body#*Decision evidence: }
+      evidence_intent=${evidence_intent%%\\n*}
+      ;;
+  esac
+  case "$hold_body" in
     *"Captain action: "*)
       action_intent=${hold_body#*Captain action: }
       action_intent=${action_intent%%\\n*}
@@ -464,6 +492,9 @@ command_resolve() {
   done
 
   body=$(printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: %s' "$decision_digest" "$routed_csv")
+  if [ -n "$evidence_intent" ]; then
+    body=$(printf '%s\nDecision evidence: %s' "$body" "$evidence_intent")
+  fi
   if [ -n "$action_intent" ]; then
     body=$(printf '%s\nCaptain action: %s' "$body" "$action_intent")
   fi

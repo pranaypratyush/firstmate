@@ -401,6 +401,9 @@ EOF
     (.secondmates | any(.[]; .id == "domain-alpha" and .state == "captain_decision"))
       and (.decisions_open | any(.[]; .id == "domain-alpha/phase8-decision-release"
         and .key == "phase8-decision-release" and .verb == "captain-hold"
+        and .evidence == null
+        and (.evidence_gap | contains("no bounded decision evidence"))
+        and (.evidence_caveat | contains("no bounded decision evidence"))
         and .review_changes_required == false
         and .merge_decision_required == false
         and .missing_choice_required == true
@@ -2407,6 +2410,210 @@ SH
   pass "oversized v1 and v2 causal caveats fail closed at canonical validation"
 }
 
+test_remote_v2_nested_evidence_gaps_fail_closed_for_every_record_kind() {
+  local home fakebin sshbin canonical json
+  home=$(make_home nested-evidence-gap-types)
+  cat > "$home/data/secondmates.md" <<'EOF'
+- bad-active-gap - fixture (host: bad-active-gap-host; root: /remote/root; home: /remote/bad-active-gap; scope: fixture; projects: sample; added 2026-07-11)
+- bad-decision-gap - fixture (host: bad-decision-gap-host; root: /remote/root; home: /remote/bad-decision-gap; scope: fixture; projects: sample; added 2026-07-11)
+- bad-hold-gap - fixture (host: bad-hold-gap-host; root: /remote/root; home: /remote/bad-hold-gap; scope: fixture; projects: sample; added 2026-07-11)
+- bad-queue-gap - fixture (host: bad-queue-gap-host; root: /remote/root; home: /remote/bad-queue-gap; scope: fixture; projects: sample; added 2026-07-11)
+- bad-landed-gap - fixture (host: bad-landed-gap-host; root: /remote/root; home: /remote/bad-landed-gap; scope: fixture; projects: sample; added 2026-07-11)
+- bad-endpoint-gap - fixture (host: bad-endpoint-gap-host; root: /remote/root; home: /remote/bad-endpoint-gap; scope: fixture; projects: sample; added 2026-07-11)
+EOF
+  fakebin=$(make_fakebin "$home")
+  sshbin="$fakebin/fake-nested-evidence-gap-ssh"
+  cat > "$sshbin" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *bad-active-gap-host*) case_id=active ;;
+  *bad-decision-gap-host*) case_id=decision ;;
+  *bad-hold-gap-host*) case_id=hold ;;
+  *bad-queue-gap-host*) case_id=queue ;;
+  *bad-landed-gap-host*) case_id=landed ;;
+  *) case_id=endpoint ;;
+esac
+remote_home="/remote/bad-$case_id-gap"
+jq -n --arg case_id "$case_id" --arg home "$remote_home" '
+  def flags: {context_backlog_truncated:false,context_byte_truncated:false,
+    context_character_truncated:false,context_report_count_omitted:false,context_projection_truncated:false};
+  def capsule: {context:"Recorded hold context",context_truncated:false,
+    context_backlog_truncated:false,context_byte_truncated:false,context_character_truncated:false,
+    context_report_count_omitted:false,context_projection_truncated:false,hold_reason_truncated:false,
+    next_action:"Wait for the hold",next_action_truncated:false,
+    advance_when:"When the hold clears",advance_when_truncated:false,
+    caveat:"Structured child work is externally held"};
+  {schema:"fm-secondmate-home-summary.v2",generated:"2026-07-11T18:00:00Z",home:$home,
+    valid:true,reason:null,invalidity:{kind:null,ids:[]},state:"no_active_work",charted_next:null,
+    active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],
+    counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[]}
+  | if $case_id == "active" then .state = "active_child_work"
+      | .active_children = [{id:"child",kind:"ship",state:"working",source:"current-harness",
+          objective:"Ship child",doing:"working",milestone:"started",next_action:"Run tests",
+          next_action_evidence_gap:null,next_action_truncated:false,context:"Recorded context",
+          context_evidence_gap:{bad:true}} + flags]
+      | .endpoints = [{id:"child",state:"working",source:"current-harness",objective:"Ship child",
+          milestone:"started",endpoint:{exists:true,agent_alive:"alive",target:"remote:child"}}]
+      | .counts.active_children = 1 | .counts.endpoints = 1
+    elif $case_id == "decision" then .state = "captain_decision"
+      | .decisions_open = [{id:"choice",key:"choice",verb:"captain-hold",summary:"Choose route",
+          reason:"route choice pending",source:"backlog",action_types:["missing-choice"],
+          action_type_missing:false,action_type_invalid:false,context:"Recorded evidence",
+          context_evidence_gap:{bad:true}} + flags] | .counts.decisions_open = 1
+    elif $case_id == "hold" then .state = "externally_held" | .charted_next = capsule
+      | .holds = [{id:"held",title:"Held work",reason:"external release",source:"backlog",
+          blocked_by_ids:[],unresolved_blocker_ids:[],context:"Recorded hold context",
+          context_evidence_gap:{bad:true},hold_reason_truncated:false,blocked_reason_truncated:false} + flags]
+      | .counts.holds = 1
+    elif $case_id == "queue" then .queued = [{id:"queued",title:"Queued work",blocked_by:null,
+          blocked_by_ids:[],unresolved_blocker_ids:[],blocked_reason:null,hold_reason:null,hold_kind:null,
+          captain_actionable:false,context:"Recorded rationale",context_evidence_gap:{bad:true},
+          blocked_reason_truncated:false,hold_reason_truncated:false} + flags] | .counts.queued = 1
+    elif $case_id == "landed" then .landed = [{id:"landed",title:"Landed work",pr_url:null,
+          report_path:null,local_note:null,completion:{verb:"done",date:"2026-07-11"},
+          context:"Recorded outcome",context_evidence_gap:{bad:true}} + flags] | .counts.landed = 1
+    else .endpoints = [{id:"ended",state:"done",source:"current-harness",objective:"Finished work",
+          milestone:"done",context_evidence_gap:{bad:true},
+          endpoint:{exists:false,agent_alive:"dead",target:"remote:ended"}}] | .counts.endpoints = 1 end'
+SH
+  chmod +x "$sshbin"
+  canonical=$(PATH="$fakebin:$PATH" FM_SSH_BIN="$sshbin" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "malformed nested evidence gaps aborted the canonical snapshot"
+  printf '%s' "$canonical" | jq -e '
+    [.secondmate_current.records[] | select(.id | startswith("bad-"))]
+    | length == 6
+      and all(.[]; .provenance.selected == "unknown")
+      and all(.[]; .invalidity.kind == "malformed_structured_home")
+  ' >/dev/null || fail "nested evidence-gap types crossed the canonical boundary: $canonical"
+  json=$(FM_SSH_BIN="$sshbin" run "$home" "$fakebin" --json) \
+    || fail "malformed nested evidence gaps aborted Bearings"
+  printf '%s' "$json" | jq -e '
+    [.secondmates[] | select(.id | startswith("bad-"))]
+    | length == 6 and all(.[]; .state == "unknown" and .provenance == "unknown")
+  ' >/dev/null || fail "malformed nested evidence gaps did not fail closed: $json"
+  pass "every remote v2 record kind validates nested evidence-gap fields"
+}
+
+test_remote_unknown_remediation_is_bound_to_invalidity() {
+  local home fakebin sshbin canonical json
+  home=$(make_home invalidity-bound-remediation)
+  printf '%s\n' '- remediation - fixture (host: remediation-host; root: /remote/root; home: /remote/remediation; scope: fixture; projects: sample; added 2026-07-11)' > "$home/data/secondmates.md"
+  fakebin=$(make_fakebin "$home")
+  sshbin="$fakebin/fake-remediation-ssh"
+  cat > "$sshbin" <<'SH'
+#!/usr/bin/env bash
+jq -n '{
+  schema:"fm-secondmate-home-summary.v2",generated:"2026-07-11T18:00:00Z",home:"/remote/remediation",
+  valid:false,reason:"child current state unavailable: unavailable-child",
+  invalidity:{kind:"child_current_unavailable",ids:["unavailable-child"]},state:"unknown",
+  charted_next:{context:"A child is unavailable",context_truncated:false,context_backlog_truncated:false,
+    context_byte_truncated:false,context_character_truncated:false,context_report_count_omitted:false,
+    context_projection_truncated:false,hold_reason_truncated:false,
+    next_action:"Repair unrelated backlog",next_action_truncated:false,
+    advance_when:"When unrelated backlog changes",advance_when_truncated:false,
+    caveat:"Structured home state unavailable"},
+  active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],
+  counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[]}'
+SH
+  chmod +x "$sshbin"
+  canonical=$(PATH="$fakebin:$PATH" FM_SSH_BIN="$sshbin" FM_HOME="$home" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "invalidity remediation fixture aborted the canonical snapshot"
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "remediation")
+    | .provenance.selected == "structured-home"
+      and .invalidity == {kind:"child_current_unavailable",ids:["unavailable-child"]}
+      and (.charted_next.next_action | contains("Restore current child state for unavailable-child"))
+      and (.charted_next.advance_when | contains("current child state is available for unavailable-child"))
+      and (.charted_next.next_action | contains("unrelated") | not)
+  ' >/dev/null || fail "cross-home remediation was not derived from canonical invalidity: $canonical"
+  json=$(FM_SSH_BIN="$sshbin" run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .secondmates[] | select(.id == "remediation")
+    | (.next_action | contains("Restore current child state for unavailable-child"))
+      and (.advance_when | contains("current child state is available for unavailable-child"))
+  ' >/dev/null || fail "Bearings did not project invalidity-bound remediation: $json"
+  pass "unknown cross-home remediation is derived from invalidity kind and ids"
+}
+
+test_empty_captain_action_is_one_item_level_evidence_gap() {
+  local home mate fakebin canonical json
+  home=$(make_home empty-captain-action)
+  mate="$TMP_ROOT/empty-captain-action-mate"
+  make_valid_secondmate_home empty-action "$mate"
+  append_secondmate_registry "$home" empty-action "$mate"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] choose-route - Choose the release route (repo: sample) (kind: captain) (hold: captain route choice pending) (hold-kind: captain)
+  Captain action:
+  Decision evidence: The implementation is complete and the release route remains unselected.
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "empty-action")
+    | .provenance.selected == "structured-home" and .current.state == "captain_decision"
+      and (.decisions_open[] | select(.id == "choose-route")
+        | .action_types == [] and .action_type_missing == true and .action_type_invalid == false)
+  ' >/dev/null || fail "empty Captain action invalidated the readable child home: $canonical"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .decisions_open[] | select(.id == "empty-action/choose-route")
+    | .action_types == []
+      and (.action_type_evidence_gap | contains("No structured captain action"))
+  ' >/dev/null || fail "empty Captain action did not remain an item-level evidence gap: $json"
+  pass "empty Captain action has one canonical missing classification"
+}
+
+test_composite_externally_held_projection_limits_are_disclosed() {
+  local home mate fakebin canonical json id
+  home=$(make_home composite-held-truncation)
+  mate="$TMP_ROOT/composite-held-truncation-mate"
+  make_valid_secondmate_home held-capsule "$mate"
+  append_secondmate_registry "$home" held-capsule "$mate"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+EOF
+  for id in $(seq 1 20); do
+    printf -- '- [ ] held-%02d - Held work %02d (repo: sample) (kind: ship) (hold: %s) (hold-kind: external)\n' \
+      "$id" "$id" "$(printf '%0140d' 0 | tr 0 h)" >> "$mate/data/backlog.md"
+    printf '  %s\n' "$(printf '%0200d' 0 | tr 0 c)" >> "$mate/data/backlog.md"
+  done
+  printf '\n## Done\n' >> "$mate/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "held-capsule") | .charted_next
+    | .context_truncated == true
+      and .context_projection_truncated == true
+      and .next_action_truncated == true
+      and .advance_when_truncated == true
+      and (.caveat | contains("final projection limit reached"))
+      and (.caveat | contains("next-action projection limit reached"))
+      and (.caveat | contains("gate condition projection limit reached"))
+  ' >/dev/null || fail "composite hold limits were absent from the canonical caveat: $canonical"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .secondmates[] | select(.id == "held-capsule")
+    | .context_projection_truncated == true
+      and .next_action_truncated == true
+      and .advance_when_truncated == true
+      and (.caveat | contains("final projection limit reached"))
+      and (.caveat | contains("next-action projection limit reached"))
+      and (.caveat | contains("gate condition projection limit reached"))
+  ' >/dev/null || fail "Bearings dropped composite hold projection caveats: $json"
+  pass "composite externally-held projection limits remain machine- and captain-visible"
+}
+
 test_remote_semantic_schema_rejects_invalid_states_and_empty_capsules() {
   local home fakebin sshbin json
   home=$(make_home remote-semantic-schema)
@@ -2785,14 +2992,18 @@ jq -n '{
   valid:true,reason:null,invalidity:{kind:null,ids:[]},state:"active_child_work",charted_next:null,
   active_children:[{id:"visible-child",state:"working",source:"current-harness",objective:"Ship visible work",
     doing:"shipping",next_action:"Run visible tests",next_action_truncated:false,milestone:"visible milestone",
-    context:null,context_backlog_truncated:false,context_byte_truncated:false,
+    next_action_evidence_gap:null,context:"Evidence gap: remote fixture omitted causal context",
+    context_evidence_gap:"Evidence gap: remote fixture omitted causal context",
+    context_backlog_truncated:false,context_byte_truncated:false,
     context_character_truncated:false,context_report_count_omitted:false,context_projection_truncated:false}],
   decisions_open:[{id:"visible-child",key:"status-note",verb:"blocked",summary:"status-only blocker",
     reason:null,source:"status"}],
   holds:[],queued:[{id:"visible-queue",title:"Visible queued work",blocked_by:null,blocked_by_ids:[],
     unresolved_blocker_ids:[],blocked_reason:null,blocked_reason_truncated:false,hold_reason:null,
     hold_reason_truncated:false,hold_kind:null,captain_actionable:false,repo:"sample",kind:"ship",
-    context:null,context_backlog_truncated:false,context_byte_truncated:false,
+    context:"Evidence gap: remote fixture omitted queue rationale",
+    context_evidence_gap:"Evidence gap: remote fixture omitted queue rationale",
+    context_backlog_truncated:false,context_byte_truncated:false,
     context_character_truncated:false,context_report_count_omitted:false,context_projection_truncated:false}],
   landed:[],endpoints:[{id:"visible-child",state:"working",source:"current-harness",
     objective:"Ship visible work",milestone:"visible milestone",
@@ -2923,6 +3134,10 @@ test_report_count_and_decision_gate_projection_truncation_are_disclosed
 test_malformed_nested_cross_home_fields_fall_back_without_jq_abort
 test_hostile_remote_charted_capsule_is_bounded_and_disclosed
 test_hostile_v1_and_v2_charted_caveats_fail_closed
+test_remote_v2_nested_evidence_gaps_fail_closed_for_every_record_kind
+test_remote_unknown_remediation_is_bound_to_invalidity
+test_empty_captain_action_is_one_item_level_evidence_gap
+test_composite_externally_held_projection_limits_are_disclosed
 test_remote_semantic_schema_rejects_invalid_states_and_empty_capsules
 test_remote_no_active_state_cannot_hide_working_child
 test_remote_state_invariants_respect_counts_and_omissions

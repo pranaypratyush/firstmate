@@ -521,7 +521,8 @@ EOF
     "$SNAPSHOT" --json)
   printf '%s' "$char_out" | jq -e '
     .scout_reports[] | select(.id == "report-a")
-    | .summary_excerpt == "# Report A T"
+    | .summary_excerpt == "# Report A …"
+      and (.summary_excerpt | length) == 12
       and .summary_byte_truncated == false
       and .summary_character_truncated == true
       and .summary_omitted_by_count == false

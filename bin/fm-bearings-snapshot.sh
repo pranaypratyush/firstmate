@@ -110,7 +110,7 @@ Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
 Default fields: schema, home, generated, prs,
   in_flight{id,kind,state,objective,doing,milestone,state_caveat,context,context_evidence_gap,context_backlog_truncated,context_byte_truncated,context_character_truncated,context_report_count_omitted,context_projection_truncated,next_action,next_action_evidence_gap,next_action_truncated,*_omitted,caveat,next_owner,owner},
   secondmates{id,state,objective,doing,milestone,state_caveat,context,context_truncated,context_backlog_truncated,context_byte_truncated,context_character_truncated,context_report_count_omitted,context_projection_truncated,hold_reason_truncated,next_action,next_action_truncated,advance_when,advance_when_truncated,*_omitted,caveat,provenance,freshness,age_seconds,contradiction,reason,reason_truncated,owner},
-  decisions_open{id,key,verb,object,requested_action,evidence,evidence_*_truncated,evidence_report_count_omitted,source_decisions_omitted,evidence_caveat,action_types,action_type_evidence_gap,review_changes_required,merge_decision_required,missing_choice_required,owner},
+  decisions_open{id,key,verb,object,requested_action,evidence,evidence_gap,evidence_*_truncated,evidence_report_count_omitted,source_decisions_omitted,evidence_caveat,action_types,action_type_evidence_gap,review_changes_required,merge_decision_required,missing_choice_required,owner},
   landed{id,what,outcome,outcome_evidence_available,outcome_evidence_gap,context,context_*_truncated,context_report_count_omitted,caveat,next_action,next_owner,artifact,owner},
   gates{id,title,context,context_evidence_gap,context_*_truncated,context_report_count_omitted,source_queued_omitted,source_holds_omitted,blocked_by,reason,advance_when,advance_when_source_truncated,advance_when_truncated,caveat,owner}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
@@ -349,9 +349,6 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ")
      | if length > $n then .[:($n - 1)] + "…" else . end) end;
-  def bounded($n): if . == null then null else
-    (tostring | gsub("\\s+"; " ")
-     | if length > $n then .[:($n - 1)] + "…" else . end) end;
   def omission_label:
     if . == "active_children" then "active children"
     elif . == "decisions_open" then "decisions"
@@ -490,7 +487,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ if .secondmate_current.registry.available == false then
          {id:"(registry)",state:"unknown",objective:"Registered secondmate inventory",doing:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
           milestone:"",state_caveat:(.secondmate_current.registry.reason // "Registered secondmate table unavailable"),
-          context:((.secondmate_current.registry.reason // "Registered secondmate table unavailable") | bounded(800)),
+          context:((.secondmate_current.registry.reason // "Registered secondmate table unavailable") | trunc(800)),
           context_truncated:false,
           context_backlog_truncated:false,context_byte_truncated:false,
           context_character_truncated:false,context_report_count_omitted:false,
@@ -499,11 +496,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           next_action_truncated:false,
           advance_when:"When the registered secondmate inventory is readable",
           advance_when_truncated:false,
-          caveat:(("Registered secondmate table unavailable: " + (.secondmate_current.registry.reason // "reason not recorded")) | bounded(320)),
+          caveat:(("Registered secondmate table unavailable: " + (.secondmate_current.registry.reason // "reason not recorded")) | trunc(320)),
           provenance:(.secondmate_current.registry.provenance // "registered-table"),
           freshness:(.secondmate_current.registry.freshness.status // "unavailable"),
           age_seconds:null,contradiction:false,
-          reason:((.secondmate_current.registry.reason // "Registered secondmate table unavailable") | bounded(800)),
+          reason:((.secondmate_current.registry.reason // "Registered secondmate table unavailable") | trunc(800)),
           reason_truncated:(((.secondmate_current.registry.reason // "Registered secondmate table unavailable") | length) > 800),
           owner:"(main)"}
        else empty end ]
@@ -519,8 +516,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                   elif .bearings_state == "no_active_work" then "No active child work"
                   else (.current.reason // "Current home state unavailable") end) | trunc(120)),
           milestone:([.endpoints[]? | .milestone // empty | select(. != "")] | join("; ") | trunc(240)),
-          state_caveat:(if .bearings_state == "unknown" then ((.current.reason // "Current home state unavailable") | bounded(180)) else null end),
-          context:((.bearings_charted_next.context // null) | bounded(800)),
+          state_caveat:(if .bearings_state == "unknown" then ((.current.reason // "Current home state unavailable") | trunc(180)) else null end),
+          context:((.bearings_charted_next.context // null) | trunc(800)),
           context_truncated:(.bearings_charted_next.context_truncated // false),
           context_backlog_truncated:(.bearings_charted_next.context_backlog_truncated // false),
           context_byte_truncated:(.bearings_charted_next.context_byte_truncated // false),
@@ -528,9 +525,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           context_report_count_omitted:(.bearings_charted_next.context_report_count_omitted // false),
           context_projection_truncated:(.bearings_charted_next.context_projection_truncated // false),
           hold_reason_truncated:(.bearings_charted_next.hold_reason_truncated // false),
-          next_action:((.bearings_charted_next.next_action // null) | bounded(320)),
+          next_action:((.bearings_charted_next.next_action // null) | trunc(320)),
           next_action_truncated:(.bearings_charted_next.next_action_truncated // false),
-          advance_when:((.bearings_charted_next.advance_when // null) | bounded(320)),
+          advance_when:((.bearings_charted_next.advance_when // null) | trunc(320)),
           advance_when_truncated:(.bearings_charted_next.advance_when_truncated // false),
           active_children_omitted:([.bearings_source_omissions[] | select(.surface == "active_children") | .count] | add // 0),
           decisions_omitted:([.bearings_source_omissions[] | select(.surface == "decisions_open") | .count] | add // 0),
@@ -539,10 +536,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
           landed_omitted:([.bearings_source_omissions[] | select(.surface == "landed") | .count] | add // 0),
           endpoints_omitted:([.bearings_source_omissions[] | select(.surface == "endpoints") | .count] | add // 0),
           caveat:(combine_caveats((.bearings_charted_next.caveat // null); .bearings_omission_caveat)
-            | bounded(320)),
+            | trunc(320)),
           provenance:.provenance.selected,freshness:.freshness.status,
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
-          reason:((.current.reason // "-") | bounded(800)),
+          reason:((.current.reason // "-") | trunc(800)),
           reason_truncated:(.current.reason_truncated // false),owner:.id} ]) as $secondmates_all
   | ([ .tasks[]
        | select(.kind != "secondmate")
@@ -569,14 +566,14 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         milestone:((.hints.last_event_text // "") | trunc(240)),
         state_caveat:(if .current_state.state == "unknown" then
           (("Current harness state unavailable: " + (.current_state.detail // "reason not recorded")) | trunc(180)) else null end),
-        context:($context_raw | bounded(800)),
+        context:($context_raw | trunc(800)),
         context_evidence_gap:$context_gap,
         context_backlog_truncated:(.backlog.body_excerpt_truncated // false),
         context_byte_truncated:report_byte_truncated($source; .id),
         context_character_truncated:report_character_truncated($source; .id),
         context_report_count_omitted:report_count_omitted($source; .id),
         context_projection_truncated:(($context_raw | length) > 800),
-        next_action:($next_raw | bounded(320)),
+        next_action:($next_raw | trunc(320)),
         next_action_evidence_gap:$next_gap,
         next_action_truncated:(($next_raw | length) > 320),
         caveat:combine_caveats(
@@ -602,15 +599,15 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(180)),
             milestone:([.active_children[] | .milestone // empty | select(. != "")] | join("; ") | trunc(240)),
             state_caveat:null,
-            context:($effective_context_raw | bounded(800)),
-            context_evidence_gap:(if $context_gaps == "" then null else ($context_gaps | bounded(320)) end),
+            context:($effective_context_raw | trunc(800)),
+            context_evidence_gap:(if $context_gaps == "" then null else ($context_gaps | trunc(320)) end),
             context_byte_truncated:any(.active_children[]; .context_byte_truncated == true),
             context_character_truncated:any(.active_children[]; .context_character_truncated == true),
             context_backlog_truncated:any(.active_children[]; .context_backlog_truncated == true),
             context_report_count_omitted:any(.active_children[]; .context_report_count_omitted == true),
             context_projection_truncated:(any(.active_children[]; .context_projection_truncated == true) or (($effective_context_raw | length) > 800)),
-            next_action:(("Continue active child work: " + $next_raw) | bounded(320)),
-            next_action_evidence_gap:(if $next_gaps == "" then null else ($next_gaps | bounded(320)) end),
+            next_action:(("Continue active child work: " + $next_raw) | trunc(320)),
+            next_action_evidence_gap:(if $next_gaps == "" then null else ($next_gaps | trunc(320)) end),
             next_action_truncated:(any(.active_children[]; .next_action_truncated == true)
               or (("Continue active child work: " + $next_raw) | length) > 320),
             active_children_omitted:([.bearings_source_omissions[] | select(.surface == "active_children") | .count] | add // 0),
@@ -638,18 +635,25 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | select(.structured and .captain_actionable == true)
          | (.title | trunc(180)) as $object
          | (.hold_reason | trunc(180)) as $requested
-         | (joined_context(.body_excerpt; report_context($source; .id)) | trunc(800)) as $evidence
+         | joined_context_raw(.body_excerpt; report_context($source; .id)) as $evidence_raw
+         | (if $evidence_raw == null then
+              "Evidence gap: no bounded decision evidence was recorded for " + .id
+            else null end) as $evidence_gap
+         | ($evidence_raw | trunc(800)) as $evidence
          | ({id,key:.id,verb:"captain-hold",object:$object,requested_action:$requested,
-             evidence:$evidence,summary:(($object + ": " + $requested) | trunc(180)),
+             evidence:$evidence,evidence_gap:$evidence_gap,
+             summary:(($object + ": " + $requested) | trunc(180)),
              evidence_backlog_truncated:(.body_excerpt_truncated // false),
              evidence_byte_truncated:report_byte_truncated($source; .id),
              evidence_character_truncated:report_character_truncated($source; .id),
              evidence_report_count_omitted:report_count_omitted($source; .id),
              evidence_projection_truncated:joined_context_projection_truncated(.body_excerpt; report_context($source; .id)),
-             evidence_caveat:evidence_caveat((.body_excerpt_truncated // false);
-               report_byte_truncated($source; .id); report_character_truncated($source; .id);
-               report_count_omitted($source; .id);
-               joined_context_projection_truncated(.body_excerpt; report_context($source; .id))),
+             evidence_caveat:combine_caveats(
+               evidence_caveat((.body_excerpt_truncated // false);
+                 report_byte_truncated($source; .id); report_character_truncated($source; .id);
+                 report_count_omitted($source; .id);
+                 joined_context_projection_truncated(.body_excerpt; report_context($source; .id)));
+               $evidence_gap),
              owner:"(main)",action_owner:"captain"}
             + captain_actions(.captain_action_types;
                 (.captain_action_type_missing // false); (.captain_action_type_invalid // false))) ]
@@ -659,10 +663,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | ((.summary // .id) | trunc(180)) as $object
          | ((.reason // "captain decision pending") | trunc(180)) as $requested
          | (.context // null) as $evidence_raw
-         | ($evidence_raw | bounded(800)) as $evidence
+         | (.context_evidence_gap // (if $evidence_raw == null then
+              "Evidence gap: no bounded decision evidence was recorded for " + .id else null end)) as $evidence_gap
+         | ($evidence_raw | trunc(800)) as $evidence
          | ((.context_projection_truncated // false) or (($evidence_raw | length) > 800)) as $evidence_projection_cut
          | ({id:($m.id + "/" + .id),key,verb,object:$object,
-             requested_action:$requested,evidence:$evidence,
+             requested_action:$requested,evidence:$evidence,evidence_gap:$evidence_gap,
              evidence_backlog_truncated:(.context_backlog_truncated // false),
              evidence_byte_truncated:(.context_byte_truncated // false),
              evidence_character_truncated:(.context_character_truncated // false),
@@ -670,9 +676,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
              evidence_projection_truncated:$evidence_projection_cut,
              source_decisions_omitted:([$source_omissions[].count] | add // 0),
              evidence_caveat:combine_caveats(
-               evidence_caveat((.context_backlog_truncated // false);
-                 (.context_byte_truncated // false); (.context_character_truncated // false);
-                 (.context_report_count_omitted // false); $evidence_projection_cut);
+               combine_caveats(
+                 evidence_caveat((.context_backlog_truncated // false);
+                   (.context_byte_truncated // false); (.context_character_truncated // false);
+                   (.context_report_count_omitted // false); $evidence_projection_cut);
+                 $evidence_gap);
                omission_caveat($source_omissions)),
              summary:(($object + ": " + $requested) | trunc(180)),owner:$m.id,action_owner:"captain"}
             + captain_actions((.action_types // []);
@@ -707,7 +715,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | (if $gate_context == null then
               "Evidence gap: no bounded queue rationale was recorded for " + .id
             else null end) as $gate_context_gap
-         | {id, title:(.title | trunc(120)),context:(($gate_context // $gate_context_gap) | bounded(800)),
+         | {id, title:(.title | trunc(120)),context:(($gate_context // $gate_context_gap) | trunc(800)),
             context_evidence_gap:$gate_context_gap,
             context_backlog_truncated:(.body_excerpt_truncated // false),
             context_byte_truncated:report_byte_truncated($source; .id),
@@ -736,7 +744,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | (.context_evidence_gap // (if .context == null then
               "Evidence gap: no bounded queue rationale was recorded for " + .id else null end)) as $context_gap
          | ((.context_projection_truncated // false) or (($context_raw | length) > 800)) as $context_projection_cut
-         | {id,title:(.title | trunc(120)),context:($context_raw | bounded(800)),
+         | {id,title:(.title | trunc(120)),context:($context_raw | trunc(800)),
             context_evidence_gap:$context_gap,
             context_backlog_truncated:(.context_backlog_truncated // false),
             context_byte_truncated:(.context_byte_truncated // false),
@@ -745,7 +753,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             context_projection_truncated:$context_projection_cut,
             blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
             reason:((.hold_reason // .blocked_reason // "-") | trunc(40)),
-            advance_when:(gate_advance | bounded(240)),
+            advance_when:(gate_advance | trunc(240)),
             advance_when_source_truncated:((.hold_reason_truncated // false) or (.blocked_reason_truncated // false)),
             advance_when_truncated:(((.hold_reason_truncated // false) or (.blocked_reason_truncated // false))
               or ((gate_advance | length) > 240)),
@@ -777,12 +785,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map((.context != null) as $outcome_evidence
                            | (.context // .title // .id) as $context_raw
-                           | ($context_raw | bounded(800)) as $context
+                           | ($context_raw | trunc(800)) as $context
                            | ((.context_projection_truncated // false)
                               or (($context_raw | length) > 800)) as $context_projection_cut
                            | (explicit_next($context; "No follow-up recorded")) as $next
                            | {id, what:(.title | trunc(180)),
-                            outcome:(if $outcome_evidence then (.context | bounded(800)) else null end),
+                            outcome:(if $outcome_evidence then (.context | trunc(800)) else null end),
                             outcome_evidence_available:$outcome_evidence,
                             outcome_evidence_gap:(if $outcome_evidence then null
                               else "No bounded completion outcome evidence was recorded" end),
@@ -797,7 +805,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                                                    (.context_character_truncated // false);
                                                    (.context_report_count_omitted // false);
                                                    $context_projection_cut),
-                            next_action:($next | bounded(320)),
+                            next_action:($next | trunc(320)),
                             next_owner:(if $next == "No follow-up recorded" then "unassigned"
                                         else explicit_owner($next; "unassigned") end),
                             artifact:(.pr_url // .report_path // .local_note // "-"),owner:.home_id})),

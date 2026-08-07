@@ -119,7 +119,7 @@ write_origin_meta() {  # <home> <id> [kind]
 }
 
 test_structured_holds_survive_teardown_and_route_resolution() {
-  local home id route_hold access_hold before after json open show
+  local home id route_hold access_hold before after json open show route_evidence oversized_evidence help
   home=$(make_home durable-lifecycle)
   id=sample-systems-review
   mkdir -p "$home/data/$id"
@@ -137,6 +137,10 @@ EOF
 Two choices remain unresolved: the route and the sample access level.
 A separate recommendation is already resolved and requires no captain action.
 EOF
+  route_evidence="Queue isolation review found cross-thread wake leakage and missing restart coverage; both are fixed, while Windows evidence remains unavailable."
+  help=$(run_decisions "$home" --help)
+  assert_contains "$help" "--evidence <findings>" "decision hold help omitted structured evidence input"
+  assert_contains "$help" "capped at 240 characters" "decision hold help omitted the evidence bound"
 
   if run_decisions "$home" complete "$id" route access > "$home/early-complete.out" 2> "$home/early-complete.err"; then
     fail "completion succeeded before unresolved decisions had captain holds"
@@ -146,6 +150,7 @@ EOF
 
   route_hold=$(run_decisions "$home" hold "$id" route \
     --title "Choose the sample route" --reason "captain route choice pending" --repo sample \
+    --evidence "$route_evidence" \
     --action review-changes --action merge-decision) \
     || fail "could not register route hold"
   [ "$route_hold" = "$id-decision-route" ] || fail "route hold identity was not deterministic: $route_hold"
@@ -159,12 +164,20 @@ EOF
     --action review-changes --action review-changes > "$home/invalid-duplicate.out" 2> "$home/invalid-duplicate.err"; then
     fail "decision hold accepted a duplicate captain action"
   fi
+  oversized_evidence=$(printf '%0241d' 0 | tr 0 e)
+  if run_decisions "$home" hold "$id" invalid-evidence \
+    --title "Invalid oversized evidence" --reason "invalid evidence fixture" --repo sample \
+    --evidence "$oversized_evidence" > "$home/invalid-evidence.out" 2> "$home/invalid-evidence.err"; then
+    fail "decision hold accepted evidence beyond its durable 240-character bound"
+  fi
   run_decisions "$home" hold "$id" route \
     --title "Choose the sample route" --reason "captain route choice pending" --repo sample \
+    --evidence "$route_evidence" \
     --action review-changes --action merge-decision >/dev/null \
     || fail "idempotent hold retry failed"
   if run_decisions "$home" hold "$id" route \
     --title "Choose the sample route" --reason "captain route choice pending" --repo sample \
+    --evidence "$route_evidence" \
     --action review-changes > "$home/reduced-action-retry.out" 2> "$home/reduced-action-retry.err"; then
     fail "captain hold accepted a reduced structured action set on retry"
   fi
@@ -192,14 +205,19 @@ EOF
   json=$(run_bearings "$home") || fail "Bearings failed with captain-held decisions"
   after=$(shasum -a 256 "$home/data/backlog.md" | awk '{print $1}')
   [ "$before" = "$after" ] || fail "Bearings mutated the authoritative backlog"
-  printf '%s' "$json" | jq -e --arg route "$route_hold" --arg access "$access_hold" '
+  printf '%s' "$json" | jq -e --arg route "$route_hold" --arg access "$access_hold" --arg evidence "$route_evidence" '
     (.decisions_open | any(.id == $route and .verb == "captain-hold" and .owner == "(main)"
+      and .evidence == $evidence
+      and .evidence_caveat == null
       and .action_types == ["merge-decision", "review-changes"]
       and .action_type_evidence_gap == null
       and .review_changes_required == true
       and .merge_decision_required == true
       and .missing_choice_required == false))
       and (.decisions_open | any(.id == $access and .verb == "captain-hold" and .owner == "(main)"
+        and .evidence == null
+        and (.evidence_gap | contains("no bounded decision evidence"))
+        and (.evidence_caveat | contains("no bounded decision evidence"))
         and .action_types == []
         and (.action_type_evidence_gap | contains("No structured captain action"))))
       and (.gates | any(.id == $route or .id == $access) | not)
@@ -214,8 +232,9 @@ EOF
   grep -E "^- \[x\] $id -" "$home/data/done-archive.md" >/dev/null \
     || fail "origin was not durably archived"
   json=$(run_bearings "$home") || fail "Bearings failed after source teardown and archival"
-  printf '%s' "$json" | jq -e --arg route "$route_hold" --arg access "$access_hold" '
-    (.decisions_open | any(.id == $route and .verb == "captain-hold"))
+  printf '%s' "$json" | jq -e --arg route "$route_hold" --arg access "$access_hold" --arg evidence "$route_evidence" '
+    (.decisions_open | any(.id == $route and .verb == "captain-hold"
+      and .evidence == $evidence and .evidence_caveat == null))
       and (.decisions_open | any(.id == $access and .verb == "captain-hold"))
       and (.in_flight | any(.id == "sample-systems-review") | not)
   ' >/dev/null || fail "teardown or archival erased a captain-held decision: $json"

@@ -406,7 +406,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     | .records |= map(
         if (.body_lines | length) > 0 then
           ([.body_lines[] | select(test("^Captain action:[[:space:]]*") | not)] | join(" ")) as $body
-          | .body_excerpt = ($body[:240])
+          | .body_excerpt = (if ($body | length) > 240 then $body[:239] + "…" else $body end)
           | .body_excerpt_truncated = (($body | length) > 240)
         else . end)
     | .records as $records
@@ -433,6 +433,18 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
           | ([.body_lines[]?
               | capture("^Captain action:[[:space:]]*(?<value>.*)$")?
               | .value]) as $captain_action_lines
+          | ([.body_lines[]?
+              | select(test("^Captain action:[[:space:]]*") | not)
+              | select(test("^(Origin|Decision key|State):[[:space:]]*") | not)
+              | if test("^Decision evidence:[[:space:]]*")
+                then sub("^Decision evidence:[[:space:]]*"; "") else . end]
+             | join(" ")) as $captain_context
+          | if .kind == "captain" then
+              .body_excerpt = (if $captain_context == "" then null
+                elif ($captain_context | length) > 240 then $captain_context[:239] + "…"
+                else $captain_context end)
+              | .body_excerpt_truncated = (($captain_context | length) > 240)
+            else . end
           | ($captain_action_lines[0] // null) as $captain_action
           | .captain_action = $captain_action
           | (($captain_action // "") | split("+")) as $declared_actions
@@ -444,9 +456,14 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
           | .captain_action_types =
               (if .kind != "captain" or ($action_valid | not) then []
                else ($declared_actions | unique | sort) end)
-          | .captain_action_type_missing = (.kind == "captain" and ($captain_action == null or $captain_action == ""))
+          | .captain_action_type_missing = (.kind == "captain"
+              and (($captain_action_lines | length) == 0
+                or (($captain_action_lines | length) == 1 and $captain_action == "")))
           | .captain_action_type_invalid =
-              (.kind == "captain" and ($captain_action_lines | length) > 0 and ($action_valid | not))
+              (.kind == "captain"
+                and ((($captain_action_lines | length) > 1)
+                  or (($captain_action_lines | length) == 1 and $captain_action != ""
+                    and ($action_valid | not))))
         else . end)
     | del(.section,.order)
   ' < "$backlog"
@@ -731,8 +748,7 @@ secondmate_causal_capsule_json() {
       | if length == 0 then null else join("; ") end;
     def state: (.state // .current.state // "unknown");
     def reason: (.reason // .current.reason // "Current home state unavailable");
-    if .charted_next != null then .
-    elif state == "externally_held" then
+    if state == "externally_held" then
       ([.holds[]? | .context // empty | select(. != "")] | join("; ")) as $recorded_context
       | ([.holds[]? | .context_evidence_gap // empty | select(. != "")] | join("; ")) as $gaps
       | (if $recorded_context == "" then
@@ -746,6 +762,9 @@ secondmate_causal_capsule_json() {
           if ((.unresolved_blocker_ids // []) | length) > 0
           then "After " + (.unresolved_blocker_ids | join(", ")) + " are done"
           else "When hold clears for " + .id + ": " + (.reason // "held") end] | join("; ")) as $advance
+      | (($context | length) > 800) as $context_cut
+      | (($next | length) > 320) as $next_cut
+      | (($advance | length) > 320) as $advance_cut
       | (any(.holds[]?; (.context_backlog_truncated // false) == true)) as $backlog_cut
       | (any(.holds[]?; (.context_byte_truncated // false) == true)) as $byte_cut
       | (any(.holds[]?; (.context_character_truncated // false) == true)) as $character_cut
@@ -753,15 +772,17 @@ secondmate_causal_capsule_json() {
       | (any(.holds[]?; (.context_projection_truncated // false) == true)) as $projection_cut
       | (any(.holds[]?; (.hold_reason_truncated // false) or (.blocked_reason_truncated // false))) as $hold_cut
       | .charted_next = {
-          context:($context | bounded(800)),context_truncated:(($context | length) > 800),
+          context:($context | bounded(800)),context_truncated:$context_cut,
           context_backlog_truncated:$backlog_cut,context_byte_truncated:$byte_cut,
           context_character_truncated:$character_cut,context_report_count_omitted:$count_cut,
-          context_projection_truncated:$projection_cut,hold_reason_truncated:$hold_cut,
-          next_action:($next | bounded(320)),next_action_truncated:(($next | length) > 320),
-          advance_when:($advance | bounded(320)),advance_when_truncated:(($advance | length) > 320),
+          context_projection_truncated:($projection_cut or $context_cut),hold_reason_truncated:$hold_cut,
+          next_action:($next | bounded(320)),next_action_truncated:$next_cut,
+          advance_when:($advance | bounded(320)),advance_when_truncated:$advance_cut,
           caveat:(["Structured child work is externally held",
-            source_caveat($backlog_cut;$byte_cut;$character_cut;$count_cut;$projection_cut;$hold_cut;
-              (if $gaps == "" then null else $gaps end)) // empty]
+            source_caveat($backlog_cut;$byte_cut;$character_cut;$count_cut;($projection_cut or $context_cut);$hold_cut;
+              (if $gaps == "" then null else $gaps end)) // empty,
+            if $next_cut then "next-action projection limit reached" else empty end,
+            if $advance_cut then "gate condition projection limit reached" else empty end]
             | join("; ") | bounded(320))}
     elif state == "unknown" then
       reason as $context
@@ -800,9 +821,6 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
     def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:($n - 1)] + "…" else . end;
-    def bounded($n):
-      tostring | gsub("\\s+"; " ")
-      | if length > $n then .[:($n - 1)] + "…" else . end;
     def report_context($id):
       ([ $reports[]? | select(.id == $id) | .summary_excerpt // empty ][0]) // null;
     def report_byte_truncated($id):
@@ -815,7 +833,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
       ([ $body, $report ] | map(select(. != null and . != "")) | join(" "));
     def context_value($body; $report):
       (joined_context($body; $report)) as $context
-      | if $context == "" then null else ($context | bounded(800)) end;
+      | if $context == "" then null else ($context | trunc(800)) end;
     def context_gap($kind; $id; $body; $report):
       if (joined_context($body; $report)) == "" then
         "Evidence gap: no bounded " + $kind + " was recorded for " + $id
@@ -851,6 +869,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),
             context:context_value(.body_excerpt; report_context(.id)),
+            context_evidence_gap:context_gap("completion outcome"; .id; .body_excerpt; report_context(.id)),
             context_backlog_truncated:(.body_excerpt_truncated // false),
             context_byte_truncated:report_byte_truncated(.id),
             context_character_truncated:report_character_truncated(.id),
@@ -897,7 +916,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
             doing:((.current_state.detail // "") | trunc(160)),
             next_action:(if context_value($work.body_excerpt; report_context(.id)) == null
               then ("Evidence gap: record the immediate next step for " + .id)
-              else ("Continue objective: " + ($work.title // .id)) end | bounded(320)),
+              else ("Continue objective: " + ($work.title // .id)) end | trunc(320)),
             next_action_evidence_gap:context_gap("immediate next step"; .id; $work.body_excerpt; report_context(.id)),
             next_action_truncated:((if context_value($work.body_excerpt; report_context(.id)) == null
               then ("Evidence gap: record the immediate next step for " + .id)
@@ -998,6 +1017,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
         endpoints:([$tasks[] | . as $task | {id,state:.current_state.state,source:.current_state.source,
           objective:(([ $owned_in_flight[] | select(.id == $task.id) | .title ][0] // .id) | trunc(160)),
           milestone:((.hints.last_event_text // "") | trunc(200)),
+          context_evidence_gap:null,
           endpoint:(.endpoint + {target:((.endpoint.target // null) | if . == null then null else trunc(240) end)})}][:$child_n]),
         counts:{
           active_children:($active_all | length),
@@ -1479,6 +1499,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           def string_or_null: . == null or type == "string";
           def nonempty_string: type == "string" and length > 0;
           def bounded_nonempty($n): nonempty_string and length <= $n;
+          def evidence_gap: . == null or bounded_nonempty(320);
           def string_array:
             type == "array" and all(.[]; nonempty_string) and (unique | length) == length;
           def legacy_context:
@@ -1490,6 +1511,10 @@ secondmate_current_json() {  # <parent-tasks-json>
             and (.context_character_truncated | type) == "boolean"
             and (.context_report_count_omitted | type) == "boolean"
             and (.context_projection_truncated | type) == "boolean";
+          def causal_context:
+            modern_context
+            and (.context_evidence_gap | evidence_gap)
+            and ((.context | nonempty_string) or (.context_evidence_gap | bounded_nonempty(320)));
           def action_types:
             type == "array" and all(.[];
               type == "string" and (. == "review-changes" or . == "merge-decision" or . == "missing-choice"))
@@ -1517,7 +1542,8 @@ secondmate_current_json() {  # <parent-tasks-json>
             and (.objective | nonempty_string) and (.milestone | type) == "string"
             and (.next_action_truncated | type) == "boolean"
             and (.next_action | bounded_nonempty(320))
-            and modern_context;
+            and (.next_action_evidence_gap | evidence_gap)
+            and causal_context;
           def valid_decision_legacy:
             type == "object" and (.id | nonempty_string) and (.key | nonempty_string)
             and (.summary | nonempty_string)
@@ -1534,7 +1560,7 @@ secondmate_current_json() {  # <parent-tasks-json>
               and (if .action_type_missing then (.action_types | length) == 0 and (.action_type_invalid | not)
                    elif .action_type_invalid then (.action_types | length) == 0
                    else (.action_types | length) > 0 end)
-              and modern_context
+              and causal_context
             else true end);
           def valid_hold_legacy:
             type == "object" and (.id | nonempty_string) and (.title | nonempty_string)
@@ -1544,7 +1570,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           def valid_hold_modern:
             valid_hold_legacy
             and (.hold_reason_truncated | type) == "boolean"
-            and (.blocked_reason_truncated | type) == "boolean" and modern_context;
+            and (.blocked_reason_truncated | type) == "boolean" and causal_context;
           def valid_queued_legacy:
             type == "object" and (.id | nonempty_string) and (.title | nonempty_string)
             and (.blocked_by_ids | string_array) and (.unresolved_blocker_ids | string_array)
@@ -1553,7 +1579,7 @@ secondmate_current_json() {  # <parent-tasks-json>
           def valid_queued_modern:
             valid_queued_legacy
             and (.blocked_reason_truncated | type) == "boolean"
-            and (.hold_reason_truncated | type) == "boolean" and modern_context;
+            and (.hold_reason_truncated | type) == "boolean" and causal_context;
           def valid_landed_legacy:
             type == "object" and (.id | nonempty_string) and (.title | nonempty_string)
             and (.pr_url | string_or_null) and (.report_path | string_or_null)
@@ -1562,7 +1588,7 @@ secondmate_current_json() {  # <parent-tasks-json>
               or .completion.verb == "reported" or .completion.verb == "done")
             and (.completion.date == null or (.completion.date | nonempty_string)) and legacy_context;
           def valid_landed_modern:
-            valid_landed_legacy and modern_context;
+            valid_landed_legacy and causal_context;
           def valid_endpoint_legacy:
             type == "object" and (.id | nonempty_string)
             and (.state == "working" or .state == "unknown" or .state == "parked" or .state == "paused"
@@ -1572,7 +1598,8 @@ secondmate_current_json() {  # <parent-tasks-json>
             and (.endpoint.agent_alive | nonempty_string) and (.endpoint.target | string_or_null);
           def valid_endpoint_modern:
             valid_endpoint_legacy and (.objective | nonempty_string)
-            and (.milestone | type) == "string";
+            and (.milestone | type) == "string"
+            and (.context_evidence_gap | evidence_gap);
           def valid_charted:
             type == "object"
             and (.context_truncated | type) == "boolean"
@@ -1914,7 +1941,8 @@ scout_report_lines() {  # <backlog-json> <tasks-json>
           truncated=true
         fi
         excerpt=$(printf '%s' "$normalized" | jq -R -s -r \
-          --argjson chars "$FM_SNAPSHOT_REPORT_SUMMARY_CHARS" '.[:$chars]')
+          --argjson chars "$FM_SNAPSHOT_REPORT_SUMMARY_CHARS" \
+          'if length > $chars then .[:($chars - 1)] + "…" else . end')
         summarized=$((summarized + 1))
       elif [ "$relevant" = true ]; then
         omitted_by_count=true
