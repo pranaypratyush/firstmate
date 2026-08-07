@@ -85,7 +85,7 @@ SH
 make_herdr_statefake() {  # <dir> -> echoes fakebin dir; seeds an empty state file
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
-  printf '{"next":1,"workspaces":[],"tabs":[],"agent_status":{}}\n' > "$dir/state.json"
+  printf '{"next":1,"workspaces":[],"tabs":[],"agent_status":{},"agent":{},"focused_workspace":"","focused_tab":""}\n' > "$dir/state.json"
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -101,12 +101,13 @@ jq_state() { jq "$@" "$STATE"; }
 save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
 
 cmd=${1:-}; sub=${2:-}
-ws=""; label=""
+ws=""; label=""; cwd=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
     --workspace) ws=${args[$((i+1))]:-} ;;
     --label) label=${args[$((i+1))]:-} ;;
+    --cwd) cwd=${args[$((i+1))]:-} ;;
   esac
 done
 
@@ -115,30 +116,47 @@ case "$cmd $sub" in
     printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
     ;;
   "workspace list")
-    jq_state '{result:{workspaces:.workspaces}}'
+    jq_state '. as $s | {result:{workspaces:[$s.workspaces[] | . + {focused:(.workspace_id == $s.focused_workspace),active_tab_id:($s.focused_tab)}]}}'
     ;;
   "workspace create")
     n=$(jq_state -r '.next'); wsid="w$n"; dn=$((n + 1))
-    jq_state --arg wsid "$wsid" --arg wlabel "$label" \
+    jq_state --arg wsid "$wsid" --arg wlabel "$label" --arg cwd "$cwd" \
       --arg tabid "$wsid:t$dn" --arg paneid "$wsid:p$dn" \
       '.workspaces += [{workspace_id:$wsid, label:$wlabel}]
-       | .tabs += [{tab_id:$tabid, label:"1", workspace_id:$wsid, pane_id:$paneid}]
+       | .tabs += [{tab_id:$tabid, label:"1", workspace_id:$wsid, pane_id:$paneid, cwd:$cwd}]
+       | if .focused_workspace == "" then .focused_workspace=$wsid | .focused_tab=$tabid else . end
        | .next = (.next + 2)' | save
     printf '{"result":{"workspace":{"workspace_id":"%s","label":"%s"},"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' \
       "$wsid" "$label" "$wsid:t$dn" "$wsid:p$dn"
     ;;
   "tab list")
-    jq_state --arg w "$ws" '{result:{tabs:[.tabs[]|select(.workspace_id==$w)]}}'
+    jq_state --arg w "$ws" '. as $s | {result:{tabs:[$s.tabs[]|select(.workspace_id==$w)|. + {focused:(.tab_id == $s.focused_tab)}]}}'
+    ;;
+  "tab get")
+    tab=${3:-}
+    jq_state --arg t "$tab" '{result:{tab:([.tabs[]|select(.tab_id==$t)][0] // null)}}'
     ;;
   "tab create")
     n=$(jq_state -r '.next'); tabid="$ws:t$n"; paneid="$ws:p$n"
-    jq_state --arg w "$ws" --arg wlabel "$label" --arg tabid "$tabid" --arg paneid "$paneid" \
-      '.tabs += [{tab_id:$tabid, label:$wlabel, workspace_id:$w, pane_id:$paneid}]
+    jq_state --arg w "$ws" --arg wlabel "$label" --arg cwd "$cwd" --arg tabid "$tabid" --arg paneid "$paneid" \
+      '.tabs += [{tab_id:$tabid, label:$wlabel, workspace_id:$w, pane_id:$paneid, cwd:$cwd}]
        | .next = (.next + 1)' | save
-    printf '{"result":{"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' "$tabid" "$paneid"
+    if [ "${FM_FAKE_HERDR_PARTIAL_CREATE:-0}" = 1 ]; then
+      printf '{"result":{"tab":{"tab_id":"%s"}}}\n' "$tabid"
+    else
+      printf '{"result":{"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' "$tabid" "$paneid"
+    fi
     ;;
   "pane list")
-    jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
+    jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id, workspace_id:.workspace_id}]}}'
+    ;;
+  "pane get")
+    pane=${3:-}
+    if [ "$(jq_state -r --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length')" = 1 ]; then
+      jq_state --arg p "$pane" '{result:{pane:([.tabs[]|select(.pane_id==$p)][0] | {pane_id:.pane_id,tab_id:.tab_id,workspace_id:.workspace_id,cwd:.cwd,foreground_cwd:.cwd})}}'
+    else
+      printf '{"error":{"code":"pane_not_found"}}\n'
+    fi
     ;;
   "pane close")
     pane=${3:-}
@@ -152,10 +170,21 @@ case "$cmd $sub" in
     pane=${3:-}
     status=$(jq_state -r --arg p "$pane" '.agent_status[$p] // empty')
     if [ -n "$status" ]; then
-      printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status"
+      agent=$(jq_state -r --arg p "$pane" '.agent[$p] // "codex"')
+      printf '{"result":{"agent":{"agent":"%s","agent_status":"%s"}}}\n' "$agent" "$status"
     else
       printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$pane"
     fi
+    ;;
+  "session list")
+    printf '{"sessions":[{"name":"%s","running":true,"socket_path":"%s"}]}\n' \
+      "${HERDR_SESSION:-default}" "${FM_FAKE_HERDR_SOCKET:-/tmp/fm-fake-herdr.sock}"
+    ;;
+  "tab focus")
+    tab=${3:-}
+    jq_state --arg t "$tab" '
+      ([.tabs[]|select(.tab_id==$t)][0]) as $tab
+      | .focused_tab=$t | .focused_workspace=$tab.workspace_id' | save
     ;;
   *) : ;;
 esac
@@ -833,6 +862,115 @@ test_create_task_creates_with_no_focus_flag() {
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--label'$'\x1f''fm-newtask'$'\x1f''--no-focus' \
     "create_task's tab create did not pass --no-focus"
   pass "fm_backend_herdr_create_task: tab create passes --no-focus"
+}
+
+# --- existing-worktree adoption primitives ---------------------------------
+
+test_adopted_runtime_identity_uses_exact_launcher() {
+  local dir fb state log socket other launcher out status
+  dir="$TMP_ROOT/adopted-runtime-identity"; mkdir -p "$dir/socket-dir"; log="$dir/log"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  state="$dir/state.json"
+  socket="$dir/socket-dir/herdr.sock"
+  other="$dir/other"; launcher="$dir/launcher"; mkdir -p "$other" "$launcher"
+  printf '%s\n' "{\"next\":9,\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\"},{\"workspace_id\":\"w7\",\"label\":\"firstmate\"}],\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"other\",\"workspace_id\":\"w1\",\"pane_id\":\"w1:p1\",\"cwd\":\"$other\"},{\"tab_id\":\"w7:t7\",\"label\":\"launcher\",\"workspace_id\":\"w7\",\"pane_id\":\"w7:p7\",\"cwd\":\"$launcher\"}],\"agent_status\":{},\"agent\":{},\"focused_workspace\":\"w1\",\"focused_tab\":\"w1:t1\"}" > "$state"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
+    FM_FAKE_HERDR_SOCKET="$socket" HERDR_SESSION=fmtest HERDR_SOCKET_PATH="$socket" \
+    HERDR_PANE_ID=w7:p7 bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_adopted_runtime_identity fmtest
+      printf "%s\t%s\t%s\n" "$FM_BACKEND_HERDR_ADOPT_SESSION" "$FM_BACKEND_HERDR_ADOPT_PARENT_WORKSPACE_ID" "$FM_BACKEND_HERDR_ADOPT_PARENT_PANE_ID"
+    ' "$ROOT")
+  [ "$out" = $'fmtest\tw7\tw7:p7' ] || fail "adopted runtime identity did not bind the launcher's exact workspace: $out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
+    FM_FAKE_HERDR_SOCKET="$socket" HERDR_SESSION=fmtest bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_adopted_runtime_identity fmtest
+    ' "$ROOT" 2>&1)
+  status=$?
+  expect_code 1 "$status" "an outside-herdr caller must not adopt a parent by label"
+  assert_contains "$out" "requires the launcher's own injected pane/socket identity" "outside-herdr refusal did not name the authoritative identity requirement"
+  pass "herdr adoption runtime identity resolves the exact launcher and refuses label/focus fallback"
+}
+
+test_adopted_worktree_claim_scans_the_exact_session() {
+  local dir fb state log wt other out status
+  dir="$TMP_ROOT/adopted-worktree-claim"; mkdir -p "$dir"; log="$dir/log"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  state="$dir/state.json"
+  wt="$dir/worktree"; other="$dir/other"; mkdir -p "$wt/sub" "$other"
+  printf '%s\n' "{\"next\":5,\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\"},{\"workspace_id\":\"w2\",\"label\":\"firstmate\"}],\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"launcher\",\"workspace_id\":\"w1\",\"pane_id\":\"w1:p1\",\"cwd\":\"$other\"},{\"tab_id\":\"w2:t2\",\"label\":\"fm-other-task\",\"workspace_id\":\"w2\",\"pane_id\":\"w2:p2\",\"cwd\":\"$wt/sub\"}],\"agent_status\":{},\"agent\":{},\"focused_workspace\":\"w1\",\"focused_tab\":\"w1:t1\"}" > "$state"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
+    HERDR_SESSION=fmtest bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_worktree_claim fmtest "$1"' "$ROOT" "$wt")
+  status=$?
+  expect_code 1 "$status" "a different live Herdr task in the worktree must claim it"
+  [ "$out" = other-task ] || fail "live Herdr claimant was not identified exactly: $out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" \
+    HERDR_SESSION=fmtest bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_worktree_claim fmtest "$1" w2:p2' "$ROOT" "$wt")
+  status=$?
+  expect_code 0 "$status" "the exact journal-bound pane should be excludable on retry"
+  [ -z "$out" ] || fail "exact retry exclusion returned unexpected output: $out"
+  pass "herdr adoption live-claim inspection spans duplicate-labeled workspaces and excludes only the exact retry pane"
+}
+
+test_adopted_endpoint_transaction_verifies_and_closes_exactly() {
+  local dir fb state log socket wt parent out status created_tab created_pane
+  dir="$TMP_ROOT/adopted-endpoint-transaction"; mkdir -p "$dir/socket-dir"; log="$dir/log"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  state="$dir/state.json"
+  socket="$dir/socket-dir/herdr.sock"
+  wt="$dir/worktree"; parent="$dir/parent"; mkdir -p "$wt" "$parent"
+  printf '%s\n' "{\"next\":2,\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\"}],\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"launcher\",\"workspace_id\":\"w1\",\"pane_id\":\"w1:p1\",\"cwd\":\"$parent\"}],\"agent_status\":{},\"agent\":{},\"focused_workspace\":\"w1\",\"focused_tab\":\"w1:t1\"}" > "$state"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" FM_FAKE_HERDR_SOCKET="$socket" \
+    HERDR_SESSION=fmtest bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_create_adopted_task fmtest "$1" w1 fm-adopt "$2"
+      printf "%s\t%s\t%s\t%s\n" "$FM_BACKEND_HERDR_ADOPT_CREATED_WORKSPACE_ID" "$FM_BACKEND_HERDR_ADOPT_CREATED_TAB_ID" "$FM_BACKEND_HERDR_ADOPT_CREATED_PANE_ID" "$FM_BACKEND_HERDR_ADOPT_CLEANUP_SAFE"
+    ' "$ROOT" "$socket" "$wt")
+  IFS=$'\t' read -r _ created_tab created_pane _ <<EOF
+$out
+EOF
+  [ "$out" = $'w1\t'"$created_tab"$'\t'"$created_pane"$'\t1' ] || fail "adopted endpoint create did not return complete verified identity: $out"
+  [ "$(jq -r '.focused_tab' "$state")" = w1:t1 ] || fail "adopted endpoint create changed the captain's active tab"
+  jq --arg p "$created_pane" '.agent_status[$p]="working" | .agent[$p]="codex"' "$state" > "$state.tmp" && mv "$state.tmp" "$state"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" FM_FAKE_HERDR_SOCKET="$socket" \
+    HERDR_SESSION=fmtest bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_wait_adopted_agent fmtest "$1" w1 "$2" "$3" fm-adopt "$4" codex 1 0
+      printf "%s\t%s\n" "$FM_BACKEND_HERDR_ADOPT_AGENT" "$FM_BACKEND_HERDR_ADOPT_AGENT_STATUS"
+    ' "$ROOT" "$socket" "$created_tab" "$created_pane" "$wt")
+  [ "$out" = $'codex\tworking' ] || fail "adopted endpoint did not verify response-derived agent identity: $out"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" FM_FAKE_HERDR_SOCKET="$socket" \
+    HERDR_SESSION=fmtest bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_close_adopted_endpoint fmtest "$1" w1 "$2" "$3" fm-adopt "$4" any muse
+    ' "$ROOT" "$socket" "$created_tab" "$created_pane" "$wt" && status=0 || status=$?
+  expect_code 1 "$status" "a changed adopted Herdr agent identity must refuse cleanup"
+  [ "$(jq --arg p "$created_pane" '[.tabs[]|select(.pane_id==$p)]|length' "$state")" = 1 ] \
+    || fail "changed-agent refusal closed the adopted endpoint"
+  jq --arg p "$created_pane" 'del(.agent_status[$p]) | del(.agent[$p])' "$state" > "$state.tmp" && mv "$state.tmp" "$state"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" FM_FAKE_HERDR_SOCKET="$socket" \
+    HERDR_SESSION=fmtest bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_close_adopted_endpoint fmtest "$1" w1 "$2" "$3" fm-adopt "$4" no-agent
+    ' "$ROOT" "$socket" "$created_tab" "$created_pane" "$wt" || fail "exact no-agent adopted endpoint should close"
+  [ "$(jq --arg p "$created_pane" '[.tabs[]|select(.pane_id==$p)]|length' "$state")" = 0 ] || fail "exact adopted endpoint close left the pane"
+  [ "$(jq -r '.focused_tab' "$state")" = w1:t1 ] || fail "adopted endpoint cleanup changed the captain's active tab"
+
+  # A partial create response may have created an object, but grants no cleanup
+  # identity and must report CLEANUP_SAFE=0.
+  : > "$log"
+  printf '%s\n' "{\"next\":2,\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\"}],\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"launcher\",\"workspace_id\":\"w1\",\"pane_id\":\"w1:p1\",\"cwd\":\"$parent\"}],\"agent_status\":{},\"agent\":{},\"focused_workspace\":\"w1\",\"focused_tab\":\"w1:t1\"}" > "$state"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" FM_FAKE_HERDR_SOCKET="$socket" \
+    FM_FAKE_HERDR_PARTIAL_CREATE=1 HERDR_SESSION=fmtest bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_create_adopted_task fmtest "$1" w1 fm-partial "$2"
+      rc=$?
+      printf "%s\t%s\n" "$rc" "$FM_BACKEND_HERDR_ADOPT_CLEANUP_SAFE"
+    ' "$ROOT" "$socket" "$wt")
+  [ "$out" = $'1\t0' ] || fail "partial response did not fail without cleanup authority: $out"
+  assert_not_contains "$(cat "$log")" $'pane\x1fclose' "partial response cleanup must not guess a pane to close"
+  pass "herdr adopted endpoint creation, agent binding, exact cleanup, focus preservation, and partial-response refusal are transactional"
 }
 
 # --- default-on disposable presentation projection --------------------------
@@ -4247,6 +4385,9 @@ test_create_task_refuses_when_agent_state_ambiguous
 test_create_task_husk_replacement_creates_before_closing
 test_create_task_creates_and_parses_ids
 test_create_task_creates_with_no_focus_flag
+test_adopted_runtime_identity_uses_exact_launcher
+test_adopted_worktree_claim_scans_the_exact_session
+test_adopted_endpoint_transaction_verifies_and_closes_exactly
 test_presentation_defaults_on_at_or_above_the_floor
 test_presentation_default_falls_back_below_the_floor
 test_presentation_unreadable_release_falls_back

@@ -67,6 +67,46 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
+## Existing-worktree adoption
+
+An ordinary ship or scout may pass `--existing-worktree <absolute-path>` to use Herdr as the endpoint provider without asking Treehouse or Herdr to own the supplied Git worktree.
+The shared adoption preflight still owns physical path, isolated worktree, Git common-directory, named branch, durable claim, branch and HEAD snapshot, generated brief addendum, and final identity validation.
+Herdr adds runtime checks without creating a second adoption path.
+
+The caller must itself be running inside one exact Herdr pane with an injected pane id, named session, and socket identity that agree with fresh pane, tab, workspace, and running-session reads.
+The current parent workspace comes only from that live topology.
+Duplicate workspace labels, `HERDR_SESSION` without pane and socket identity, and the globally focused pane are never placement evidence.
+An outside-Herdr caller, duplicated running session record, changed socket, stale pane, contradictory topology, or missing parent refuses before endpoint creation.
+
+While the home-wide adoption lock and named-session presentation lock are held, Firstmate scans every workspace and pane in that exact session for a live CWD at or below the supplied worktree.
+A different `fm-<task>` claimant refuses by task id, while a renamed occupant, unreadable CWD, duplicate id, or contradictory inventory refuses as ambiguity.
+The exact pane already bound by this task's transaction is the only retry exclusion.
+
+Before asking Herdr to create anything, Firstmate atomically creates `state/<id>.adopted-endpoint` with a random attempt token and phase `creating`.
+A flat endpoint is created only in the launcher's exact parent workspace, and a projected endpoint uses the existing presentation-space creator while retaining that exact parent as its non-authoritative visual anchor.
+Only a complete create response followed by independent workspace, tab, pane, label, topology, exact foreground-CWD, and absent-agent reads may advance the journal to `endpoint`.
+Only the expected native agent identity for the selected adoption-safe harness may advance it to `agent`.
+The forward-only journal never infers identity from labels and never skips or regresses a phase.
+
+Task metadata remains unpublished until the journal is in `agent`, the exact agent still exists in the recorded pane, and the complete Git worktree identity passes its final validation.
+Herdr adoption records `adopted_herdr_socket_identity=`, `adopted_herdr_parent_workspace_id=`, `adopted_herdr_agent=`, and `adopted_delivery=complete` alongside the ordinary Herdr endpoint and adopted-worktree fields.
+The presentation journal remains visual correlation only and cannot replace any of those task or transaction fields.
+
+An interrupted retry with a complete `endpoint` phase resumes that exact agent-free pane, and a retry that finds the expected live agent advances or reuses the same identity without typing into it again.
+A `creating` phase with no complete response identity, stale or contradictory metadata, a missing journal, a changed agent, or an identity mismatch fails closed without creating another pane.
+Concurrent same-task attempts are serialized by the ordinary task spawn lock before either can create an endpoint.
+
+Abort cleanup may close only a complete response-derived pane from the current attempt while the journal still proves phase `endpoint` and native state `no-agent`.
+A partial response, live or changed agent, active target tab, changed socket, focus ambiguity, or failed exact close retains the transaction for inspection.
+Successful spawn, refusal, retry, abort cleanup, and normal teardown all use the existing named-session focus snapshot and exact-tab restore contract.
+
+Normal teardown requires complete metadata and the matching phase-`agent` journal, rechecks the same named-session socket under the session lock, and closes only the exact recorded endpoint after verifying its label, topology, worktree CWD, and recorded native agent identity.
+A structured absent pane can retire durable task state only when the named-session socket identity is unchanged.
+The adopted worktree is never moved, detached, reset, cleaned, returned, deleted, or scanned for unrelated processes, and its normal report, landed-work, Git-lock, and secondmate-descendant safety gates remain unchanged.
+
+`tests/fm-spawn-existing-worktree.test.sh` covers the deterministic transaction, refusal, retry, presentation, secondmate-home, concurrency, worktree-preservation, and teardown matrix.
+`tests/fm-spawn-existing-worktree-herdr-e2e.test.sh` drives a real named-session lab from an actual launcher pane, verifies the native worker CWD and recorded endpoint identity, preserves the captain control tab, and tears down under the default-fleet tripwire.
+
 ## Presentation spaces
 
 Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
@@ -323,6 +363,8 @@ tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
+tests/fm-spawn-existing-worktree.test.sh
+tests/fm-spawn-existing-worktree-herdr-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh

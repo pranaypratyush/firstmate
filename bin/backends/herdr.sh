@@ -1623,6 +1623,158 @@ fm_backend_herdr_launcher_identity() {  # <session>
   return 0
 }
 
+# fm_backend_herdr_adopted_runtime_identity: resolve the one running named
+# session and the launcher's CURRENT parent workspace for existing-worktree
+# adoption.
+#
+# Adoption is intentionally stricter than the ordinary container resolver.
+# A launcher outside Herdr has no authoritative parent and is refused instead
+# of falling back to a mutable home label.
+# On success these response-derived globals are set:
+#   FM_BACKEND_HERDR_ADOPT_SESSION
+#   FM_BACKEND_HERDR_ADOPT_SOCKET
+#   FM_BACKEND_HERDR_ADOPT_PARENT_WORKSPACE_ID
+#   FM_BACKEND_HERDR_ADOPT_PARENT_TAB_ID
+#   FM_BACKEND_HERDR_ADOPT_PARENT_PANE_ID
+fm_backend_herdr_adopted_runtime_identity() {  # <session>
+  local session=${1:-} status
+  FM_BACKEND_HERDR_ADOPT_SESSION=""
+  FM_BACKEND_HERDR_ADOPT_SOCKET=""
+  FM_BACKEND_HERDR_ADOPT_PARENT_WORKSPACE_ID=""
+  FM_BACKEND_HERDR_ADOPT_PARENT_TAB_ID=""
+  FM_BACKEND_HERDR_ADOPT_PARENT_PANE_ID=""
+  [ -n "$session" ] || {
+    echo "error: existing-worktree adoption requires one exact running herdr session" >&2
+    return 1
+  }
+  fm_backend_herdr_version_check || return 1
+  # shellcheck disable=SC2034  # caller consumes the verified runtime binding
+  FM_BACKEND_HERDR_ADOPT_SOCKET=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
+    echo "error: existing-worktree adoption could not resolve the exact socket for herdr session '$session'" >&2
+    return 1
+  }
+  fm_backend_herdr_launcher_identity "$session" && status=0 || status=$?
+  case "$status" in
+    0) ;;
+    2)
+      echo "error: existing-worktree adoption on herdr requires the launcher's own injected pane/socket identity; an outside-herdr caller cannot choose a parent workspace by label or focus" >&2
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+  # shellcheck disable=SC2034  # caller consumes the verified runtime binding
+  FM_BACKEND_HERDR_ADOPT_SESSION=$session
+  # shellcheck disable=SC2034  # caller consumes the verified runtime binding
+  FM_BACKEND_HERDR_ADOPT_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID
+  # shellcheck disable=SC2034  # caller consumes the verified runtime binding
+  FM_BACKEND_HERDR_ADOPT_PARENT_TAB_ID=$FM_BACKEND_HERDR_LAUNCHER_TAB_ID
+  # shellcheck disable=SC2034  # caller consumes the verified runtime binding
+  FM_BACKEND_HERDR_ADOPT_PARENT_PANE_ID=$FM_BACKEND_HERDR_LAUNCHER_PANE_ID
+}
+
+fm_backend_herdr_path_within_worktree() {  # <physical-path> <physical-worktree>
+  case "$1" in
+    "$2"|"$2"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_herdr_worktree_claim: inspect every pane in one exact named
+# session while the caller holds the session-scoped lock.
+#
+# Returns 0 when clear, 1 printing another fm-<task-id> owner, and 2 printing a
+# bounded ambiguity reason.
+# The optional own pane is excluded only by its exact response-derived id.
+fm_backend_herdr_worktree_claim() {  # <session> <worktree> [own-pane]
+  local session=$1 worktree=$2 own_pane=${3:-} workspaces workspace_ids ws tabs panes
+  local records pane tab label pane_path pane_real seen_workspaces=$'\n' seen_panes=$'\n'
+  workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
+    printf '%s\n' workspace-inventory
+    return 2
+  }
+  workspace_ids=$(printf '%s' "$workspaces" | jq -r '
+    if (.result.workspaces | type) == "array"
+    then .result.workspaces[] | .workspace_id
+    else error("missing result.workspaces")
+    end
+  ' 2>/dev/null) || {
+    printf '%s\n' workspace-inventory
+    return 2
+  }
+  [ -n "$workspace_ids" ] || {
+    printf '%s\n' empty-workspace-inventory
+    return 2
+  }
+  while IFS= read -r ws || [ -n "$ws" ]; do
+    case "$ws" in ''|*$'\n'*|*$'\r'*|*$'\t'*) printf '%s\n' workspace-id; return 2 ;; esac
+    case "$seen_workspaces" in
+      *$'\n'"$ws"$'\n'*) printf '%s\n' duplicate-workspace-id; return 2 ;;
+    esac
+    seen_workspaces="$seen_workspaces$ws"$'\n'
+    tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$ws" 2>/dev/null) || {
+      printf 'tab-inventory:%s\n' "$ws"
+      return 2
+    }
+    panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$ws" 2>/dev/null) || {
+      printf 'pane-inventory:%s\n' "$ws"
+      return 2
+    }
+    records=$(jq -nr --argjson tabs "$tabs" --argjson panes "$panes" --arg ws "$ws" '
+      ($tabs.result.tabs // null) as $ts
+      | ($panes.result.panes // null) as $ps
+      | if (($ts | type) != "array" or ($ps | type) != "array")
+        then error("invalid inventory")
+        else $ps[]
+          | . as $p
+          | ($ts | map(select(.tab_id == $p.tab_id))) as $matches
+          | if (($p.workspace_id != $ws) or ($matches | length) != 1
+                or ($matches[0].workspace_id != $ws))
+            then error("contradictory inventory")
+            else [$p.pane_id, $p.tab_id, $matches[0].label] | @tsv
+            end
+        end
+    ' 2>/dev/null) || {
+      printf 'pane-records:%s\n' "$ws"
+      return 2
+    }
+    while IFS=$'\t' read -r pane tab label || [ -n "$pane$tab$label" ]; do
+      [ -n "$pane" ] && [ -n "$tab" ] && [ -n "$label" ] || {
+        printf 'pane-record:%s\n' "$ws"
+        return 2
+      }
+      case "$pane$tab$label" in *$'\n'*|*$'\r'*) printf 'pane-record:%s\n' "$ws"; return 2 ;; esac
+      case "$seen_panes" in
+        *$'\n'"$pane"$'\n'*) printf '%s\n' duplicate-pane-id; return 2 ;;
+      esac
+      seen_panes="$seen_panes$pane"$'\n'
+      [ -z "$own_pane" ] || [ "$pane" != "$own_pane" ] || continue
+      pane_path=$(fm_backend_herdr_current_path "$session:$pane") || {
+        printf 'cwd:%s\n' "$pane"
+        return 2
+      }
+      [ -n "$pane_path" ] || {
+        printf 'cwd:%s\n' "$pane"
+        return 2
+      }
+      pane_real=$(cd -- "$pane_path" 2>/dev/null && pwd -P) || {
+        printf 'cwd:%s\n' "$pane"
+        return 2
+      }
+      if fm_backend_herdr_path_within_worktree "$pane_real" "$worktree"; then
+        case "$label" in
+          fm-) printf '%s\n' task-tab; return 2 ;;
+          fm-*) printf '%s\n' "${label#fm-}"; return 1 ;;
+          *) printf 'occupancy:%s:%s\n' "$ws" "$pane"; return 2 ;;
+        esac
+      fi
+    done <<EOF
+$records
+EOF
+  done <<EOF
+$workspace_ids
+EOF
+}
+
 # fm_backend_herdr_workspace_prune_seeded_default_tab: close EXACTLY
 # <seeded_tab_id>, the auto-created default tab id that THIS SAME
 # fm_backend_herdr_workspace_ensure call captured straight from its own
@@ -2045,6 +2197,174 @@ EOF
     fi
   fi
   printf '%s %s' "$tab_id" "$pane_id"
+}
+
+# fm_backend_herdr_adopted_endpoint_inspect: verify one exact adopted task
+# endpoint from immutable response-derived ids plus the expected task label and
+# physical worktree.
+#
+# The current named-session socket is part of the identity, and workspace, tab,
+# pane, label, topology, and live foreground cwd must all agree.
+# On success these globals are set:
+#   FM_BACKEND_HERDR_ADOPT_ENDPOINT_STATE=no-agent|live
+#   FM_BACKEND_HERDR_ADOPT_AGENT
+#   FM_BACKEND_HERDR_ADOPT_AGENT_STATUS
+fm_backend_herdr_adopted_endpoint_inspect() {  # <session> <socket> <workspace> <tab> <pane> <label> <worktree> [exact-cwd]
+  local session=$1 expected_socket=$2 workspace=$3 tab=$4 pane=$5 label=$6 worktree=$7 exact_cwd=${8:-within}
+  local actual_socket workspaces tab_out pane_out panes pane_path pane_real agent_out code agent status
+  FM_BACKEND_HERDR_ADOPT_ENDPOINT_STATE=""
+  FM_BACKEND_HERDR_ADOPT_AGENT=""
+  FM_BACKEND_HERDR_ADOPT_AGENT_STATUS=""
+  actual_socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
+  [ "$actual_socket" = "$expected_socket" ] || return 1
+  workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$workspaces" | jq -e --arg workspace "$workspace" '
+    (.result.workspaces | type) == "array"
+    and ([.result.workspaces[] | select(.workspace_id == $workspace)] | length) == 1
+  ' >/dev/null 2>&1 || return 1
+  tab_out=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+  printf '%s' "$tab_out" | jq -e --arg tab "$tab" --arg workspace "$workspace" --arg label "$label" '
+    .result.tab.tab_id == $tab
+    and .result.tab.workspace_id == $workspace
+    and .result.tab.label == $label
+  ' >/dev/null 2>&1 || return 1
+  pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  printf '%s' "$pane_out" | jq -e --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+    .result.pane.pane_id == $pane
+    and .result.pane.tab_id == $tab
+    and .result.pane.workspace_id == $workspace
+    and ((.result.pane.foreground_cwd // "") | type) == "string"
+  ' >/dev/null 2>&1 || return 1
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+    (.result.panes | type) == "array"
+    and ([.result.panes[] | select(.tab_id == $tab)] | length) == 1
+    and ([.result.panes[] | select(.tab_id == $tab and .pane_id == $pane and .workspace_id == $workspace)] | length) == 1
+  ' >/dev/null 2>&1 || return 1
+  pane_path=$(printf '%s' "$pane_out" | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null)
+  [ -n "$pane_path" ] || return 1
+  pane_real=$(cd -- "$pane_path" 2>/dev/null && pwd -P) || return 1
+  if [ "$exact_cwd" = exact ]; then
+    [ "$pane_real" = "$worktree" ] || return 1
+  else
+    fm_backend_herdr_path_within_worktree "$pane_real" "$worktree" || return 1
+  fi
+  agent_out=$(fm_backend_herdr_cli "$session" agent get "$pane" 2>&1)
+  code=$(printf '%s' "$agent_out" | jq -r '.error.code // empty' 2>/dev/null)
+  if [ "$code" = agent_not_found ]; then
+    FM_BACKEND_HERDR_ADOPT_ENDPOINT_STATE=no-agent
+    return 0
+  fi
+  [ -z "$code" ] || return 1
+  agent=$(printf '%s' "$agent_out" | jq -r '.result.agent.agent // empty' 2>/dev/null)
+  status=$(printf '%s' "$agent_out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+  [ -n "$agent" ] || return 1
+  case "$status" in working|idle|done|blocked) ;; *) return 1 ;; esac
+  FM_BACKEND_HERDR_ADOPT_ENDPOINT_STATE=live
+  FM_BACKEND_HERDR_ADOPT_AGENT=$agent
+  # shellcheck disable=SC2034  # caller consumes the verified native-agent state
+  FM_BACKEND_HERDR_ADOPT_AGENT_STATUS=$status
+}
+
+# Create one adoption endpoint inside an already verified parent workspace.
+# This path never creates or selects a workspace and never replaces a same-label
+# tab, including a restored husk.
+# CLEANUP_SAFE becomes 1 only after the create response and independent reads
+# prove the complete exact endpoint.
+fm_backend_herdr_create_adopted_task() {  # <session> <socket> <parent-workspace> <label> <worktree>
+  local session=$1 socket=$2 workspace=$3 label=$4 worktree=$5 before list out
+  FM_BACKEND_HERDR_ADOPT_CREATED_WORKSPACE_ID=""
+  FM_BACKEND_HERDR_ADOPT_CREATED_TAB_ID=""
+  FM_BACKEND_HERDR_ADOPT_CREATED_PANE_ID=""
+  FM_BACKEND_HERDR_ADOPT_CLEANUP_SAFE=0
+  [ "$(fm_backend_herdr_presentation_session_socket_path "$session" 2>/dev/null || true)" = "$socket" ] || return 1
+  before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
+    echo "error: adopted herdr endpoint create could not capture the exact active workspace and tab" >&2
+    return 1
+  }
+  list=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+  if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
+    return 1
+  fi
+  if printf '%s' "$list" | jq -e --arg label "$label" 'any(.result.tabs[]; .label == $label)' >/dev/null 2>&1; then
+    echo "error: herdr tab '$label' already exists in the launcher's exact workspace; adoption will not replace it by label" >&2
+    return 1
+  fi
+  if out=$(fm_backend_herdr_cli "$session" tab create --workspace "$workspace" --cwd "$worktree" --label "$label" --no-focus 2>/dev/null); then
+    :
+  else
+    fm_backend_herdr_projection_focus_restore "$session" "$before" "adopted task-tab create" || true
+    return 1
+  fi
+  fm_backend_herdr_projection_focus_restore "$session" "$before" "adopted task-tab create" || return 1
+  # shellcheck disable=SC2034  # caller consumes the response-derived endpoint identity
+  FM_BACKEND_HERDR_ADOPT_CREATED_WORKSPACE_ID=$workspace
+  FM_BACKEND_HERDR_ADOPT_CREATED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  FM_BACKEND_HERDR_ADOPT_CREATED_PANE_ID=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  [ -n "$FM_BACKEND_HERDR_ADOPT_CREATED_TAB_ID" ] \
+    && [ -n "$FM_BACKEND_HERDR_ADOPT_CREATED_PANE_ID" ] || {
+      echo "error: adopted herdr endpoint create returned incomplete response identity" >&2
+      return 1
+    }
+  fm_backend_herdr_adopted_endpoint_inspect \
+    "$session" "$socket" "$workspace" \
+    "$FM_BACKEND_HERDR_ADOPT_CREATED_TAB_ID" \
+    "$FM_BACKEND_HERDR_ADOPT_CREATED_PANE_ID" "$label" "$worktree" exact || {
+      echo "error: adopted herdr endpoint response identity could not be verified" >&2
+      return 1
+    }
+  [ "$FM_BACKEND_HERDR_ADOPT_ENDPOINT_STATE" = no-agent ] || return 1
+  # shellcheck disable=SC2034  # caller consumes this exact-attempt cleanup proof
+  FM_BACKEND_HERDR_ADOPT_CLEANUP_SAFE=1
+}
+
+fm_backend_herdr_expected_agent_for_harness() {  # <harness>
+  case "$1" in
+    codex) printf '%s\n' codex ;;
+    pi|pi-signed) printf '%s\n' pi ;;
+    muse) printf '%s\n' muse ;;
+    *) return 1 ;;
+  esac
+}
+
+# Wait for the response-derived pane to register the expected Herdr agent.
+# The caller controls the bounded deterministic poll window.
+fm_backend_herdr_wait_adopted_agent() {  # <session> <socket> <workspace> <tab> <pane> <label> <worktree> <expected-agent> [polls] [interval]
+  local session=$1 socket=$2 workspace=$3 tab=$4 pane=$5 label=$6 worktree=$7 expected=$8
+  local polls=${9:-60} interval=${10:-0.5} i=0
+  while [ "$i" -lt "$polls" ]; do
+    if fm_backend_herdr_adopted_endpoint_inspect \
+      "$session" "$socket" "$workspace" "$tab" "$pane" "$label" "$worktree" exact \
+      && [ "$FM_BACKEND_HERDR_ADOPT_ENDPOINT_STATE" = live ]; then
+      [ "$FM_BACKEND_HERDR_ADOPT_AGENT" = "$expected" ] || return 2
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$polls" ] || sleep "$interval"
+  done
+  return 1
+}
+
+# Close one exact adopted endpoint while preserving the captain's exact active
+# workspace/tab.
+# The caller supplies the response-derived identity from the attempt journal;
+# labels alone never reach this function.
+fm_backend_herdr_close_adopted_endpoint() {  # <session> <socket> <workspace> <tab> <pane> <label> <worktree> [required-state] [expected-agent]
+  local session=$1 socket=$2 workspace=$3 tab=$4 pane=$5 label=$6 worktree=$7 required=${8:-any} expected_agent=${9:-}
+  local state
+  fm_backend_herdr_adopted_endpoint_inspect \
+    "$session" "$socket" "$workspace" "$tab" "$pane" "$label" "$worktree" || return 1
+  state=$FM_BACKEND_HERDR_ADOPT_ENDPOINT_STATE
+  [ "$required" = any ] || [ "$state" = "$required" ] || return 1
+  if [ "$state" = live ] && [ -n "$expected_agent" ]; then
+    [ "$FM_BACKEND_HERDR_ADOPT_AGENT" = "$expected_agent" ] || return 1
+  fi
+  if [ "$required" = no-agent ]; then
+    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane" no-agent || return 1
+  else
+    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane" || return 1
+  fi
+  [ "$(fm_backend_herdr_pane_presence_state "$session" "$pane")" = dead ]
 }
 
 # fm_backend_herdr_projection_create_task: create one disposable presentation

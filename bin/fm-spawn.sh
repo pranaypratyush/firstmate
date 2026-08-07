@@ -52,21 +52,17 @@
 #   durable Firstmate task in any home. The shared identity library owns a
 #   Git-common-directory claim record keyed by the physical worktree and a lock
 #   held from global claim inspection/publication through this home's metadata
-#   publication. Before endpoint creation that claim records a fail-closed
-#   creating state with the exact tmux socket, session, and a random provisional
-#   token installed in the window's creation command queue; immediately after
-#   creation it atomically binds the exact tmux window id and server lifetime.
-#   A recovery spawn may reuse only
-#   its own exact home/task claim when the path, project, ownership marker, and
-#   named branch still agree, and must retire the bound endpoint before creating
-#   its replacement.
+#   publication. tmux records fail-closed endpoint generations in that claim;
+#   Herdr binds the claim to its separate exact transaction journal. A recovery
+#   spawn may reuse only its own exact home/task claim when the path, project,
+#   ownership marker, named branch, and backend-specific identity still agree.
 #   Recovery atomically replaces only spawn-owned meta fields, retains every
 #   other durable field, and rolls the generated addendum back if refusal occurs
 #   before the matching metadata publication.
-#   While holding that lock, adoption also reads every live tmux fm-<task-id>
-#   endpoint and its exact physical CWD. A different live task at the requested
-#   worktree, or any unreadable/ambiguous task inventory, refuses before creation.
-#   The first supported runtime is tmux only. Herdr, zellij, cmux, Orca,
+#   While holding that lock, adoption also reads the selected runtime's complete
+#   live task inventory and each endpoint's exact physical CWD. A different live
+#   task at the requested worktree, or any unreadable/ambiguous inventory,
+#   refuses before creation. tmux and Herdr are supported; zellij, cmux, Orca,
 #   --secondmate, and batch dispatch are refused before endpoint creation. The
 #   supported harnesses are codex, pi, pi-signed, and muse because their spawn
 #   wiring writes nothing inside the worktree; raw commands and adapters that
@@ -84,13 +80,21 @@
 #   worktree_ownership=adopted are recorded in task meta. Absence of that marker
 #   retains the historical Firstmate-owned allocation contract byte-for-byte.
 #   The complete worktree identity is revalidated immediately before atomic meta
-#   publication. Until launch delivery succeeds, abort cleanup binds the endpoint
+#   publication. Until tmux launch delivery succeeds, abort cleanup binds the endpoint
 #   to its creation-time tmux server, session, sole pane, and worktree CWD before
 #   removing it by stable window id. Publication records that id with pending
 #   delivery, and successful brief delivery atomically marks it complete. A
 #   later send refusal retains aligned durable metadata and addendum state; if
 #   abort cleanup also fails, same-id retry verifies and retires only that exact
 #   pending endpoint before creating its replacement, avoiding a name collision.
+#   Herdr publishes state/<id>.adopted-endpoint before creation, advances its
+#   token-bound transaction only through creating -> endpoint -> agent, and
+#   publishes task metadata only after exact response-derived workspace, tab,
+#   pane, foreground CWD, and expected native agent identity are independently
+#   verified. A complete interrupted endpoint or agent resumes in place; a lost
+#   response, stale identity, or contradictory transaction fails closed without
+#   another pane. Herdr abort cleanup may close only the current attempt's exact
+#   complete no-agent pane, and normal teardown rechecks the same socket and agent.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -100,6 +104,9 @@
 #   outside herdr has no workspace to inherit and uses this home's own labeled
 #   workspace, which must then match exactly one. --secondmate is the deliberate
 #   exception: it stands up that secondmate home's own workspace.
+#   Existing-worktree adoption is stricter and refuses an outside-Herdr caller,
+#   because its transaction must bind one authoritative launcher parent rather
+#   than choose a mutable label as ownership-adjacent recovery state.
 #   Herdr additionally uses a presentation-only layout by default when the
 #   selected client and running server meet the Herdr 0.8.0 floor. The local
 #   config/herdr-presentation-spaces file can say off to disable it or on to
@@ -674,9 +681,14 @@ if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
   echo "error: backend=cmux does not support --secondmate spawns yet" >&2
   exit 1
 fi
-if [ "$EXISTING_WORKTREE_SET" -eq 1 ] && [ "$BACKEND" != tmux ]; then
-  echo "error: --existing-worktree currently supports backend=tmux only; '$BACKEND' may own or mutate worktree lifecycle in ways adoption does not authorize" >&2
-  exit 1
+if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
+  case "$BACKEND" in
+    tmux|herdr) ;;
+    *)
+      echo "error: --existing-worktree supports backend=tmux or backend=herdr only; '$BACKEND' may own or mutate worktree lifecycle in ways adoption does not authorize" >&2
+      exit 1
+      ;;
+  esac
 fi
 if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
   # shellcheck source=bin/fm-adopted-worktree-lib.sh
@@ -722,6 +734,21 @@ ADOPTED_TMUX_SERVER_LOCATOR=
 ADOPTED_TMUX_SERVER_IDENTITY=
 ADOPTED_PROVISIONAL_TOKEN=
 ADOPTED_RECOVERY_SERVER_IDENTITY=
+ADOPTED_HERDR_SESSION=
+ADOPTED_HERDR_SOCKET_IDENTITY=
+ADOPTED_HERDR_PARENT_WORKSPACE_ID=
+ADOPTED_HERDR_LAYOUT=
+ADOPTED_HERDR_WORKSPACE_ID=
+ADOPTED_HERDR_TAB_ID=
+ADOPTED_HERDR_PANE_ID=
+ADOPTED_HERDR_AGENT=
+ADOPTED_HERDR_EXPECTED_AGENT=
+ADOPTED_HERDR_JOURNAL=
+ADOPTED_HERDR_TOKEN=
+ADOPTED_HERDR_RESUME=0
+ADOPTED_HERDR_LAUNCH_REQUIRED=1
+ADOPTED_HERDR_CLEANUP_SAFE=0
+ADOPTED_HERDR_META_COMPLETE=0
 ADOPTED_BRIEF_ABORT_CLEANUP=0
 ADOPTED_BRIEF_PREVIOUS_TMP=
 ADOPTED_BRIEF_PREVIOUS_PRESENT=0
@@ -801,7 +828,7 @@ spawn_abort_cleanup() {
   fi
   if [ "$ADOPTED_ENDPOINT_ABORT_CLEANUP" = 1 ]; then
     ADOPTED_ENDPOINT_ABORT_CLEANUP=0
-    if [ -n "$ADOPTED_ENDPOINT_ID" ]; then
+    if [ "${BACKEND:-}" = tmux ] && [ -n "$ADOPTED_ENDPOINT_ID" ]; then
       if adopted_cleanup=$(fm_backend_tmux_retire_adopted_window \
         "$ADOPTED_ENDPOINT_ID" "$ADOPTED_TMUX_SERVER_IDENTITY" \
         "$ADOPTED_TMUX_SESSION" "$WT"); then
@@ -809,6 +836,23 @@ spawn_abort_cleanup() {
       else
         adopted_endpoint_retired=0
         echo "warning: failed to retire adopted task endpoint $ADOPTED_ENDPOINT_ID safely after spawn refusal (${adopted_cleanup:-unknown})" >&2
+      fi
+    fi
+    if [ "${BACKEND:-}" = herdr ]; then
+      if [ "$ADOPTED_HERDR_CLEANUP_SAFE" = 1 ] \
+         && fm_adopted_endpoint_journal_load "$ADOPTED_HERDR_JOURNAL" \
+         && [ "$FM_ADOPTED_ENDPOINT_TOKEN" = "$ADOPTED_HERDR_TOKEN" ] \
+         && [ "$FM_ADOPTED_ENDPOINT_PHASE" = endpoint ] \
+         && fm_backend_herdr_close_adopted_endpoint \
+           "$ADOPTED_HERDR_SESSION" "$ADOPTED_HERDR_SOCKET_IDENTITY" \
+           "$ADOPTED_HERDR_WORKSPACE_ID" "$ADOPTED_HERDR_TAB_ID" \
+           "$ADOPTED_HERDR_PANE_ID" "$W" "$WT" no-agent; then
+        rm -f -- "$ADOPTED_HERDR_JOURNAL"
+        [ "$ADOPTED_HERDR_LAYOUT" != projected ] || rm -f -- "$STATE/$ID.herdr-presentation"
+        ADOPTED_CLAIM_REMOVE_ON_ABORT=1
+      else
+        adopted_endpoint_retired=0
+        echo "warning: retaining adopted herdr endpoint transaction after spawn refusal because exact no-agent cleanup was not proven" >&2
       fi
     fi
   fi
@@ -1635,8 +1679,10 @@ validate_retireable_home_adoption_project() {
 
 prepare_existing_worktree_adoption() {
   local requested=$EXISTING_WORKTREE_ARG
-  local meta meta_id claim claim_real own project branch prior_meta=0 claim_status live_claim
+  local meta meta_id claim claim_real own project branch prior_meta=0 claim_status live_claim recorded_backend
   local delivery_count endpoint_id_count server_id_count locator_count delivery endpoint_id server_id server_locator endpoint_target endpoint_session
+  local herdr_session herdr_workspace herdr_tab herdr_pane herdr_socket herdr_parent herdr_agent
+  local home_real journal_state expected_agent
   local adopted_brief_tmp status_file_q expected_path_q expected_branch_q expected_head_q brief_path
   local claim_read_status claim_created=0 claim_absent=0 provisional_window_id provisional_status
 
@@ -1683,51 +1729,78 @@ prepare_existing_worktree_adoption() {
         echo "error: existing metadata for task $ID does not prove the same adopted worktree, project, and branch" >&2
         return 1
       }
-      delivery_count=$(grep -c '^adopted_delivery=' "$meta" 2>/dev/null || true)
-      endpoint_id_count=$(grep -c '^adopted_window_id=' "$meta" 2>/dev/null || true)
-      server_id_count=$(grep -c '^adopted_tmux_server_identity=' "$meta" 2>/dev/null || true)
-      locator_count=$(grep -c '^adopted_tmux_server_locator=' "$meta" 2>/dev/null || true)
-      if [ "$delivery_count" -eq 0 ] && [ "$endpoint_id_count" -eq 0 ] && [ "$server_id_count" -eq 0 ]; then
-        delivery=legacy
-      elif [ "$delivery_count" -eq 1 ] && [ "$endpoint_id_count" -eq 1 ] \
-        && [ "$server_id_count" -eq 1 ] && { [ "$locator_count" -eq 0 ] || [ "$locator_count" -eq 1 ]; }; then
-        delivery=$(fm_backend_meta_exact_value "$meta" adopted_delivery) || delivery=
-        endpoint_id=$(fm_backend_meta_exact_value "$meta" adopted_window_id) || endpoint_id=
-        server_id=$(fm_backend_meta_exact_value "$meta" adopted_tmux_server_identity) || server_id=
-        case "$delivery" in
-          pending|complete) ;;
-          *) delivery= ;;
-        esac
-        fm_backend_tmux_window_id_valid "$endpoint_id" || delivery=
-        fm_backend_tmux_server_identity_valid "$server_id" || delivery=
-        server_locator=
-        if [ "$locator_count" -eq 1 ]; then
-          server_locator=$(fm_backend_meta_exact_value "$meta" adopted_tmux_server_locator) || server_locator=
-          fm_backend_tmux_server_locator_valid "$server_locator" || delivery=
-        fi
-        [ -n "$delivery" ] || {
-          echo "error: existing metadata for task $ID has ambiguous adopted endpoint delivery identity" >&2
-          return 1
-        }
-        endpoint_target=$(fm_backend_meta_exact_value "$meta" window) || endpoint_target=
-        case "$endpoint_target" in
-          *:*) endpoint_session=${endpoint_target%%:*} ;;
-          *) endpoint_session= ;;
-        esac
-        case "$endpoint_session" in ''|*$'\n'*|*$'\r'*|*$'\t'*) endpoint_session= ;; esac
-        [ -n "$endpoint_session" ] || {
-          echo "error: existing metadata for task $ID has ambiguous adopted endpoint session identity" >&2
-          return 1
-        }
-        ADOPTED_PRIOR_DELIVERY=$delivery
-        ADOPTED_PRIOR_ENDPOINT_ID=$endpoint_id
-        ADOPTED_PRIOR_SERVER_LOCATOR=$server_locator
-        ADOPTED_PRIOR_SERVER_IDENTITY=$server_id
-        ADOPTED_PRIOR_ENDPOINT_SESSION=$endpoint_session
-      else
-        echo "error: existing metadata for task $ID has ambiguous adopted endpoint delivery identity" >&2
+      recorded_backend=$(fm_backend_of_meta "$meta")
+      [ "$recorded_backend" = "$BACKEND" ] || {
+        echo "error: existing metadata for task $ID belongs to backend=$recorded_backend, not the selected backend=$BACKEND" >&2
         return 1
-      fi
+      }
+      case "$BACKEND" in
+        tmux)
+          delivery_count=$(grep -c '^adopted_delivery=' "$meta" 2>/dev/null || true)
+          endpoint_id_count=$(grep -c '^adopted_window_id=' "$meta" 2>/dev/null || true)
+          server_id_count=$(grep -c '^adopted_tmux_server_identity=' "$meta" 2>/dev/null || true)
+          locator_count=$(grep -c '^adopted_tmux_server_locator=' "$meta" 2>/dev/null || true)
+          if [ "$delivery_count" -eq 0 ] && [ "$endpoint_id_count" -eq 0 ] && [ "$server_id_count" -eq 0 ]; then
+            delivery=legacy
+          elif [ "$delivery_count" -eq 1 ] && [ "$endpoint_id_count" -eq 1 ] \
+            && [ "$server_id_count" -eq 1 ] && { [ "$locator_count" -eq 0 ] || [ "$locator_count" -eq 1 ]; }; then
+            delivery=$(fm_backend_meta_exact_value "$meta" adopted_delivery) || delivery=
+            endpoint_id=$(fm_backend_meta_exact_value "$meta" adopted_window_id) || endpoint_id=
+            server_id=$(fm_backend_meta_exact_value "$meta" adopted_tmux_server_identity) || server_id=
+            case "$delivery" in
+              pending|complete) ;;
+              *) delivery= ;;
+            esac
+            fm_backend_tmux_window_id_valid "$endpoint_id" || delivery=
+            fm_backend_tmux_server_identity_valid "$server_id" || delivery=
+            server_locator=
+            if [ "$locator_count" -eq 1 ]; then
+              server_locator=$(fm_backend_meta_exact_value "$meta" adopted_tmux_server_locator) || server_locator=
+              fm_backend_tmux_server_locator_valid "$server_locator" || delivery=
+            fi
+            [ -n "$delivery" ] || {
+              echo "error: existing metadata for task $ID has ambiguous adopted endpoint delivery identity" >&2
+              return 1
+            }
+            endpoint_target=$(fm_backend_meta_exact_value "$meta" window) || endpoint_target=
+            case "$endpoint_target" in
+              *:*) endpoint_session=${endpoint_target%%:*} ;;
+              *) endpoint_session= ;;
+            esac
+            case "$endpoint_session" in ''|*$'\n'*|*$'\r'*|*$'\t'*) endpoint_session= ;; esac
+            [ -n "$endpoint_session" ] || {
+              echo "error: existing metadata for task $ID has ambiguous adopted endpoint session identity" >&2
+              return 1
+            }
+            ADOPTED_PRIOR_DELIVERY=$delivery
+            ADOPTED_PRIOR_ENDPOINT_ID=$endpoint_id
+            ADOPTED_PRIOR_SERVER_LOCATOR=$server_locator
+            ADOPTED_PRIOR_SERVER_IDENTITY=$server_id
+            ADOPTED_PRIOR_ENDPOINT_SESSION=$endpoint_session
+          else
+            echo "error: existing metadata for task $ID has ambiguous adopted endpoint delivery identity" >&2
+            return 1
+          fi
+          ;;
+        herdr)
+          delivery=$(fm_backend_meta_exact_value "$meta" adopted_delivery) || delivery=
+          herdr_session=$(fm_backend_meta_exact_value "$meta" herdr_session) || herdr_session=
+          herdr_workspace=$(fm_backend_meta_exact_value "$meta" herdr_workspace_id) || herdr_workspace=
+          herdr_tab=$(fm_backend_meta_exact_value "$meta" herdr_tab_id) || herdr_tab=
+          herdr_pane=$(fm_backend_meta_exact_value "$meta" herdr_pane_id) || herdr_pane=
+          herdr_socket=$(fm_backend_meta_exact_value "$meta" adopted_herdr_socket_identity) || herdr_socket=
+          herdr_parent=$(fm_backend_meta_exact_value "$meta" adopted_herdr_parent_workspace_id) || herdr_parent=
+          herdr_agent=$(fm_backend_meta_exact_value "$meta" adopted_herdr_agent) || herdr_agent=
+          [ "$delivery" = complete ] && [ -n "$herdr_session" ] \
+            && [ -n "$herdr_workspace" ] && [ -n "$herdr_tab" ] \
+            && [ -n "$herdr_pane" ] && [ -n "$herdr_socket" ] \
+            && [ -n "$herdr_parent" ] && [ -n "$herdr_agent" ] || {
+              echo "error: existing metadata for task $ID has incomplete adopted herdr endpoint identity" >&2
+              return 1
+            }
+          ADOPTED_HERDR_META_COMPLETE=1
+          ;;
+      esac
       prior_meta=1
     elif [ "$claim_real" = "$WT" ]; then
       echo "error: adopted worktree is already claimed by durable task $meta_id at $meta" >&2
@@ -1736,6 +1809,8 @@ prepare_existing_worktree_adoption() {
   done
   ADOPTED_PRIOR_META=$prior_meta
 
+  case "$BACKEND" in
+    tmux)
   ADOPTED_CLAIM_HOME=$(cd -- "$FM_HOME" 2>/dev/null && pwd -P) || {
     echo "error: Firstmate home identity cannot be resolved for adopted-worktree ownership" >&2
     return 1
@@ -1962,6 +2037,182 @@ prepare_existing_worktree_adoption() {
     fi
     return 1
   fi
+      ;;
+    herdr)
+      ADOPTED_CLAIM_HOME=$(cd -- "$FM_HOME" 2>/dev/null && pwd -P) || {
+        echo "error: Firstmate home identity cannot be resolved for adopted-worktree ownership" >&2
+        return 1
+      }
+      case "$ADOPTED_CLAIM_HOME" in
+        *$'\n'*|*$'\r'*|*$'\t'*)
+          echo "error: Firstmate home path contains metadata-unsafe bytes; adopted-worktree ownership cannot be published" >&2
+          return 1
+          ;;
+      esac
+      fm_adopted_claim_paths "$PROJ_ABS_REAL" "$WT" || {
+        echo "error: adopted-worktree global claim identity cannot be derived" >&2
+        return 1
+      }
+      ADOPTED_CLAIM_LOCK=$FM_ADOPTED_CLAIM_LOCK
+      ADOPTED_CLAIM_FILE=$FM_ADOPTED_CLAIM_FILE
+      fm_lock_acquire_wait "$ADOPTED_CLAIM_LOCK" || {
+        echo "error: adopted-worktree global claim registry could not be locked" >&2
+        return 1
+      }
+      ADOPTED_CLAIM_LOCK_HELD=1
+      fm_adopted_claim_registry_prepare || {
+        echo "error: adopted-worktree global claim registry is unsafe or unavailable" >&2
+        return 1
+      }
+      if fm_adopted_claim_read "$ADOPTED_CLAIM_FILE"; then
+        if [ "$FM_ADOPTED_CLAIM_TASK" != "$ID" ] \
+           || [ "$FM_ADOPTED_CLAIM_HOME" != "$ADOPTED_CLAIM_HOME" ] \
+           || [ "$FM_ADOPTED_CLAIM_WORKTREE" != "$WT" ] \
+           || [ "$FM_ADOPTED_CLAIM_PROJECT" != "$PROJ_ABS_REAL" ]; then
+          echo "error: adopted worktree is already claimed by durable Firstmate task $FM_ADOPTED_CLAIM_TASK in home $FM_ADOPTED_CLAIM_HOME" >&2
+          return 1
+        fi
+        [ "$FM_ADOPTED_CLAIM_ENDPOINT_BACKEND" = herdr ] \
+          && [ "$FM_ADOPTED_CLAIM_ENDPOINT_STATE" = journal ] || {
+            echo "error: adopted-worktree global claim belongs to a different endpoint backend or state; recovery refused" >&2
+            return 1
+          }
+      else
+        claim_read_status=$?
+        if [ "$claim_read_status" -ne 1 ]; then
+          echo "error: adopted-worktree global claim is ambiguous (${FM_ADOPTED_CLAIM_ERROR:-unknown}); adoption refused" >&2
+          return 1
+        fi
+        [ "$prior_meta" -eq 0 ] || {
+          echo "error: existing adopted herdr metadata has no matching cross-home claim; recovery refused" >&2
+          return 1
+        }
+        fm_adopted_claim_publish_herdr "$ADOPTED_CLAIM_FILE" "$ID" \
+          "$ADOPTED_CLAIM_HOME" "$WT" "$PROJ_ABS_REAL" || {
+            echo "error: adopted-worktree global herdr claim could not be published atomically" >&2
+            return 1
+          }
+        claim_created=1
+        ADOPTED_CLAIM_REMOVE_ON_ABORT=1
+        fm_adopted_claim_read "$ADOPTED_CLAIM_FILE" \
+          && [ "$FM_ADOPTED_CLAIM_ENDPOINT_BACKEND" = herdr ] \
+          && [ "$FM_ADOPTED_CLAIM_ENDPOINT_STATE" = journal ] || return 1
+      fi
+      ADOPTED_HERDR_SESSION=$(fm_backend_herdr_session)
+      fm_backend_herdr_adopted_runtime_identity "$ADOPTED_HERDR_SESSION" || return 1
+      ADOPTED_HERDR_SOCKET_IDENTITY=$FM_BACKEND_HERDR_ADOPT_SOCKET
+      ADOPTED_HERDR_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_ADOPT_PARENT_WORKSPACE_ID
+      spawn_herdr_presentation_order_lock_acquire "$ADOPTED_HERDR_SESSION" || {
+        echo "error: existing-worktree adoption could not acquire the exact herdr session lock" >&2
+        return 1
+      }
+      home_real=$(cd -- "$FM_HOME" 2>/dev/null && pwd -P) || {
+        echo "error: existing-worktree adoption could not resolve its owning home" >&2
+        return 1
+      }
+      expected_agent=$(fm_backend_herdr_expected_agent_for_harness "$HARNESS") || return 1
+      ADOPTED_HERDR_EXPECTED_AGENT=$expected_agent
+      ADOPTED_HERDR_JOURNAL="$STATE/$ID.adopted-endpoint"
+      if [ -e "$ADOPTED_HERDR_JOURNAL" ] || [ -L "$ADOPTED_HERDR_JOURNAL" ]; then
+        fm_adopted_endpoint_journal_load "$ADOPTED_HERDR_JOURNAL" || {
+          echo "error: existing adopted herdr endpoint transaction is unreadable or ambiguous" >&2
+          return 1
+        }
+        [ "$FM_ADOPTED_ENDPOINT_TASK_ID" = "$ID" ] \
+          && [ "$FM_ADOPTED_ENDPOINT_HOME" = "$home_real" ] \
+          && [ "$FM_ADOPTED_ENDPOINT_SESSION" = "$ADOPTED_HERDR_SESSION" ] \
+          && [ "$FM_ADOPTED_ENDPOINT_SOCKET" = "$ADOPTED_HERDR_SOCKET_IDENTITY" ] \
+          && [ "$FM_ADOPTED_ENDPOINT_PARENT_WORKSPACE_ID" = "$ADOPTED_HERDR_PARENT_WORKSPACE_ID" ] \
+          && [ "$FM_ADOPTED_ENDPOINT_TASK_LABEL" = "fm-$ID" ] \
+          && [ "$FM_ADOPTED_ENDPOINT_WORKTREE" = "$WT" ] || {
+            echo "error: existing adopted herdr endpoint transaction does not match this task, home, session, parent, or worktree" >&2
+            return 1
+          }
+        [ "$FM_ADOPTED_ENDPOINT_PHASE" != creating ] || {
+          echo "error: prior adopted herdr endpoint creation has no complete response-derived identity; refusing a duplicate launch" >&2
+          return 1
+        }
+        ADOPTED_HERDR_TOKEN=$FM_ADOPTED_ENDPOINT_TOKEN
+        ADOPTED_HERDR_LAYOUT=$FM_ADOPTED_ENDPOINT_LAYOUT
+        ADOPTED_HERDR_WORKSPACE_ID=$FM_ADOPTED_ENDPOINT_WORKSPACE_ID
+        ADOPTED_HERDR_TAB_ID=$FM_ADOPTED_ENDPOINT_TAB_ID
+        ADOPTED_HERDR_PANE_ID=$FM_ADOPTED_ENDPOINT_PANE_ID
+        journal_state=$FM_ADOPTED_ENDPOINT_PHASE
+        fm_backend_herdr_adopted_endpoint_inspect \
+          "$ADOPTED_HERDR_SESSION" "$ADOPTED_HERDR_SOCKET_IDENTITY" \
+          "$ADOPTED_HERDR_WORKSPACE_ID" "$ADOPTED_HERDR_TAB_ID" \
+          "$ADOPTED_HERDR_PANE_ID" "fm-$ID" "$WT" || {
+            echo "error: prior adopted herdr endpoint no longer matches its exact transaction identity" >&2
+            return 1
+          }
+        case "$FM_BACKEND_HERDR_ADOPT_ENDPOINT_STATE:$journal_state" in
+          no-agent:endpoint)
+            ADOPTED_HERDR_RESUME=1
+            ;;
+          live:endpoint)
+            [ "$FM_BACKEND_HERDR_ADOPT_AGENT" = "$expected_agent" ] || {
+              echo "error: prior adopted herdr endpoint registered unexpected agent '$FM_BACKEND_HERDR_ADOPT_AGENT'" >&2
+              return 1
+            }
+            ADOPTED_HERDR_AGENT=$FM_BACKEND_HERDR_ADOPT_AGENT
+            fm_adopted_endpoint_journal_advance \
+              "$ADOPTED_HERDR_JOURNAL" "$ADOPTED_HERDR_TOKEN" agent \
+              "$ADOPTED_HERDR_WORKSPACE_ID" "$ADOPTED_HERDR_TAB_ID" \
+              "$ADOPTED_HERDR_PANE_ID" "$ADOPTED_HERDR_AGENT" || return 1
+            ADOPTED_HERDR_RESUME=1
+            ADOPTED_HERDR_LAUNCH_REQUIRED=0
+            ;;
+          live:agent)
+            [ "$FM_ADOPTED_ENDPOINT_AGENT" = "$expected_agent" ] \
+              && [ "$FM_BACKEND_HERDR_ADOPT_AGENT" = "$expected_agent" ] || {
+                echo "error: prior adopted herdr agent identity is contradictory" >&2
+                return 1
+              }
+            ADOPTED_HERDR_AGENT=$expected_agent
+            ADOPTED_HERDR_RESUME=1
+            ADOPTED_HERDR_LAUNCH_REQUIRED=0
+            ;;
+          *)
+            echo "error: prior adopted herdr endpoint phase and live agent state are contradictory" >&2
+            return 1
+            ;;
+        esac
+        if [ "$ADOPTED_HERDR_META_COMPLETE" = 1 ]; then
+          [ "$ADOPTED_HERDR_LAUNCH_REQUIRED" = 0 ] \
+            && [ "$herdr_session" = "$ADOPTED_HERDR_SESSION" ] \
+            && [ "$herdr_workspace" = "$ADOPTED_HERDR_WORKSPACE_ID" ] \
+            && [ "$herdr_tab" = "$ADOPTED_HERDR_TAB_ID" ] \
+            && [ "$herdr_pane" = "$ADOPTED_HERDR_PANE_ID" ] \
+            && [ "$herdr_socket" = "$ADOPTED_HERDR_SOCKET_IDENTITY" ] \
+            && [ "$herdr_parent" = "$ADOPTED_HERDR_PARENT_WORKSPACE_ID" ] \
+            && [ "$herdr_agent" = "$ADOPTED_HERDR_AGENT" ] || {
+              echo "error: stale adopted herdr metadata does not match its exact live endpoint transaction" >&2
+              return 1
+            }
+          echo "error: adopted herdr task $ID already has a complete live endpoint; refusing duplicate launch" >&2
+          return 1
+        fi
+      elif [ "$ADOPTED_HERDR_META_COMPLETE" = 1 ]; then
+        echo "error: adopted herdr metadata exists without its exact endpoint transaction journal" >&2
+        return 1
+      elif [ "$claim_created" -ne 1 ]; then
+        echo "error: existing adopted-worktree herdr claim has no exact endpoint transaction journal; recovery refused" >&2
+        return 1
+      fi
+      if live_claim=$(fm_backend_herdr_worktree_claim \
+        "$ADOPTED_HERDR_SESSION" "$WT" "$ADOPTED_HERDR_PANE_ID"); then
+        :
+      else
+        claim_status=$?
+        if [ "$claim_status" -eq 1 ]; then
+          echo "error: adopted worktree is already claimed by live herdr task $live_claim without matching durable metadata" >&2
+        else
+          echo "error: live herdr task inventory is ambiguous (${live_claim:-unknown}); adoption refused" >&2
+        fi
+        return 1
+      fi
+      ;;
+  esac
 
   status_file_q=$(shell_quote "$STATE/$ID.status")
   expected_path_q=$(shell_quote "$ADOPTED_WORKTREE_PATH")
@@ -2086,6 +2337,114 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+spawn_create_adopted_herdr_endpoint() {
+  local home_real projection_enabled=0
+  HERDR_SES=$ADOPTED_HERDR_SESSION
+  HERDR_PARENT_WORKSPACE_ID=$ADOPTED_HERDR_PARENT_WORKSPACE_ID
+  HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+  HERDR_PROJECTED=0
+  if [ "$ADOPTED_HERDR_RESUME" = 1 ]; then
+    HERDR_WORKSPACE_ID=$ADOPTED_HERDR_WORKSPACE_ID
+    HERDR_TAB_ID=$ADOPTED_HERDR_TAB_ID
+    HERDR_PANE_ID=$ADOPTED_HERDR_PANE_ID
+    [ "$ADOPTED_HERDR_LAYOUT" != projected ] || HERDR_PROJECTED=1
+    return 0
+  fi
+
+  home_real=$(cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+  if fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
+    projection_enabled=1
+    ADOPTED_HERDR_LAYOUT=projected
+    [ ! -e "$HERDR_PRESENTATION_JOURNAL" ] && [ ! -L "$HERDR_PRESENTATION_JOURNAL" ] || {
+      echo "error: adopted herdr endpoint has a pre-existing presentation journal without an exact endpoint transaction" >&2
+      return 1
+    }
+  else
+    ADOPTED_HERDR_LAYOUT=flat
+    ADOPTED_HERDR_WORKSPACE_ID=$ADOPTED_HERDR_PARENT_WORKSPACE_ID
+  fi
+  ADOPTED_HERDR_TOKEN=$(fm_backend_herdr_projection_id) || return 1
+  fm_adopted_endpoint_journal_create \
+    "$ADOPTED_HERDR_JOURNAL" "$ID" "$ADOPTED_HERDR_TOKEN" "$home_real" \
+    "$ADOPTED_HERDR_SESSION" "$ADOPTED_HERDR_SOCKET_IDENTITY" \
+    "$ADOPTED_HERDR_PARENT_WORKSPACE_ID" "$ADOPTED_HERDR_LAYOUT" \
+    "$ADOPTED_HERDR_WORKSPACE_ID" "$W" "$WT" || {
+      echo "error: adopted herdr endpoint transaction could not be published before creation" >&2
+      return 1
+    }
+  # Once the exact Herdr transaction exists, only endpoint-aware cleanup may
+  # retire the cross-home ownership claim.
+  ADOPTED_CLAIM_REMOVE_ON_ABORT=0
+
+  if [ "$projection_enabled" = 1 ]; then
+    HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || return 1
+    HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+    if ! fm_backend_herdr_projection_create_task "$WT" "$HERDR_PROJECTION_LABEL" "$W"; then
+      if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
+        ADOPTED_HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+        ADOPTED_HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+        ADOPTED_HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+        if fm_adopted_endpoint_journal_advance \
+          "$ADOPTED_HERDR_JOURNAL" "$ADOPTED_HERDR_TOKEN" endpoint \
+          "$ADOPTED_HERDR_WORKSPACE_ID" "$ADOPTED_HERDR_TAB_ID" \
+          "$ADOPTED_HERDR_PANE_ID" ""; then
+          ADOPTED_HERDR_CLEANUP_SAFE=1
+          ADOPTED_ENDPOINT_ABORT_CLEANUP=1
+        fi
+      fi
+      return 1
+    fi
+    HERDR_PROJECTED=1
+    HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+    HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+    HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+    ADOPTED_HERDR_WORKSPACE_ID=$HERDR_WORKSPACE_ID
+    ADOPTED_HERDR_TAB_ID=$HERDR_TAB_ID
+    ADOPTED_HERDR_PANE_ID=$HERDR_PANE_ID
+    fm_backend_herdr_projection_order_best_effort \
+      "$HERDR_SES" "$HERDR_WORKSPACE_ID" \
+      "$(fm_backend_herdr_workspace_label)" "$HERDR_PARENT_WORKSPACE_ID"
+    HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$FM_HOME" 2>/dev/null || true)
+    if [ -z "$HERDR_HOME_ID" ] \
+       || ! fm_backend_herdr_projection_live_binding_matches \
+         "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_WORKSPACE_ID" \
+         "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
+         "$(fm_backend_herdr_workspace_label)" "$HERDR_PROJECTION_LABEL" "$W" \
+       || ! fm_backend_herdr_projection_journal_bind \
+         "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
+         "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+         "$HERDR_PARENT_WORKSPACE_ID" "$(fm_backend_herdr_workspace_label)" \
+         "$HERDR_PROJECTION_LABEL" "$W"; then
+      echo "error: adopted herdr presentation could not bind its exact endpoint and parent identity" >&2
+      ADOPTED_HERDR_CLEANUP_SAFE=1
+      ADOPTED_ENDPOINT_ABORT_CLEANUP=1
+      fm_adopted_endpoint_journal_advance \
+        "$ADOPTED_HERDR_JOURNAL" "$ADOPTED_HERDR_TOKEN" endpoint \
+        "$ADOPTED_HERDR_WORKSPACE_ID" "$ADOPTED_HERDR_TAB_ID" \
+        "$ADOPTED_HERDR_PANE_ID" "" || true
+      return 1
+    fi
+  else
+    if ! fm_backend_herdr_create_adopted_task \
+      "$ADOPTED_HERDR_SESSION" "$ADOPTED_HERDR_SOCKET_IDENTITY" \
+      "$ADOPTED_HERDR_PARENT_WORKSPACE_ID" "$W" "$WT"; then
+      return 1
+    fi
+    HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_ADOPT_CREATED_WORKSPACE_ID
+    HERDR_TAB_ID=$FM_BACKEND_HERDR_ADOPT_CREATED_TAB_ID
+    HERDR_PANE_ID=$FM_BACKEND_HERDR_ADOPT_CREATED_PANE_ID
+    ADOPTED_HERDR_WORKSPACE_ID=$HERDR_WORKSPACE_ID
+    ADOPTED_HERDR_TAB_ID=$HERDR_TAB_ID
+    ADOPTED_HERDR_PANE_ID=$HERDR_PANE_ID
+  fi
+  fm_adopted_endpoint_journal_advance \
+    "$ADOPTED_HERDR_JOURNAL" "$ADOPTED_HERDR_TOKEN" endpoint \
+    "$ADOPTED_HERDR_WORKSPACE_ID" "$ADOPTED_HERDR_TAB_ID" \
+    "$ADOPTED_HERDR_PANE_ID" "" || return 1
+  ADOPTED_HERDR_CLEANUP_SAFE=1
+  ADOPTED_ENDPOINT_ABORT_CLEANUP=1
+}
+
 W="fm-$ID"
 TASK_CWD=$PROJ_ABS
 [ "$EXISTING_WORKTREE_SET" -eq 0 ] || TASK_CWD=$WT
@@ -2196,6 +2555,13 @@ case "$BACKEND" in
     fi
     ;;
   herdr)
+    if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
+      spawn_create_adopted_herdr_endpoint || exit 1
+      HERDR_SES=$ADOPTED_HERDR_SESSION
+      HERDR_WORKSPACE_ID=$ADOPTED_HERDR_WORKSPACE_ID
+      HERDR_TAB_ID=$ADOPTED_HERDR_TAB_ID
+      HERDR_PANE_ID=$ADOPTED_HERDR_PANE_ID
+    else
     # fm_backend_herdr_workspace_label resolves the target workspace from
     # FM_HOME. For every KIND except secondmate, this process's own FM_HOME is
     # already the right home (the primary spawning its own crewmate/scout, or
@@ -2355,6 +2721,7 @@ case "$BACKEND" in
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
+    fi
     fi
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
@@ -2912,9 +3279,15 @@ fi
     echo "worktree_ownership=adopted"
     echo "adopted_branch=$ADOPTED_WORKTREE_BRANCH"
     echo "adopted_head=$ADOPTED_WORKTREE_HEAD"
-    echo "adopted_window_id=$ADOPTED_ENDPOINT_ID"
-    echo "adopted_tmux_server_locator=$ADOPTED_TMUX_SERVER_LOCATOR"
-    echo "adopted_tmux_server_identity=$ADOPTED_TMUX_SERVER_IDENTITY"
+    if [ "$BACKEND" = tmux ]; then
+      echo "adopted_window_id=$ADOPTED_ENDPOINT_ID"
+      echo "adopted_tmux_server_locator=$ADOPTED_TMUX_SERVER_LOCATOR"
+      echo "adopted_tmux_server_identity=$ADOPTED_TMUX_SERVER_IDENTITY"
+    else
+      echo "adopted_herdr_socket_identity=$ADOPTED_HERDR_SOCKET_IDENTITY"
+      echo "adopted_herdr_parent_workspace_id=$ADOPTED_HERDR_PARENT_WORKSPACE_ID"
+      echo "adopted_herdr_agent=$ADOPTED_HERDR_AGENT"
+    fi
     echo "adopted_delivery=pending"
   fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
@@ -2956,7 +3329,7 @@ fi
     while IFS= read -r prior_line || [ -n "$prior_line" ]; do
       case "$prior_line" in
         window=*|endpoint_task_id=*|worktree=*|project=*|harness=*|kind=*|mode=*|yolo=*|tasktmp=*|model=*|effort=*|\
-        worktree_ownership=*|adopted_branch=*|adopted_head=*|adopted_window_id=*|adopted_tmux_server_locator=*|adopted_tmux_server_identity=*|adopted_delivery=*|busy_gen=*|traceparent=*|backend=*|\
+        worktree_ownership=*|adopted_branch=*|adopted_head=*|adopted_window_id=*|adopted_tmux_server_locator=*|adopted_tmux_server_identity=*|adopted_herdr_socket_identity=*|adopted_herdr_parent_workspace_id=*|adopted_herdr_agent=*|adopted_delivery=*|busy_gen=*|traceparent=*|backend=*|\
         herdr_session=*|herdr_workspace_id=*|herdr_tab_id=*|herdr_pane_id=*|\
         zellij_session=*|zellij_tab_id=*|zellij_pane_id=*|orca_worktree_id=*|terminal=*|\
         cmux_workspace_id=*|cmux_surface_id=*|home=*|projects=*) ;;
@@ -2967,12 +3340,14 @@ fi
 } > "$META_PUBLISH_PATH"
 if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
   verify_adopted_identity "metadata publication" || exit 1
-  mv -f -- "$ADOPTED_META_TMP" "$STATE/$ID.meta"
-  ADOPTED_META_TMP=
-  ADOPTED_CLAIM_REMOVE_ON_ABORT=0
+  if [ "$BACKEND" = tmux ]; then
+    mv -f -- "$ADOPTED_META_TMP" "$STATE/$ID.meta"
+    ADOPTED_META_TMP=
+    ADOPTED_CLAIM_REMOVE_ON_ABORT=0
+  fi
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
-if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
+if [ "$EXISTING_WORKTREE_SET" -eq 1 ] && [ "$BACKEND" = tmux ]; then
   ADOPTED_BRIEF_ABORT_CLEANUP=0
   [ -z "$ADOPTED_BRIEF_PREVIOUS_TMP" ] || rm -f -- "$ADOPTED_BRIEF_PREVIOUS_TMP"
   ADOPTED_BRIEF_PREVIOUS_TMP=
@@ -3024,6 +3399,12 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
+# An interrupted adopted Herdr launch may already have registered the exact
+# expected agent in the exact journal-bound pane.
+# In that case retry publishes the missing metadata below without typing into
+# the live agent or creating another pane.
+if [ "$EXISTING_WORKTREE_SET" -eq 0 ] || [ "$BACKEND" != herdr ] \
+   || [ "$ADOPTED_HERDR_LAUNCH_REQUIRED" = 1 ]; then
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
@@ -3051,7 +3432,8 @@ fi
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
-if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+if [ "${HERDR_PROJECTED:-0}" -eq 1 ] \
+   && { [ "$EXISTING_WORKTREE_SET" -eq 0 ] || [ "$BACKEND" != herdr ]; }; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
@@ -3080,6 +3462,7 @@ if [ "$HARNESS" = kimi ]; then
     exit 1
   fi
 fi
+fi
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
@@ -3090,7 +3473,95 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   fi
 fi
 
-if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
+if [ "$EXISTING_WORKTREE_SET" -eq 1 ] && [ "$BACKEND" = herdr ]; then
+  if [ "$ADOPTED_HERDR_LAUNCH_REQUIRED" = 1 ]; then
+    set +e
+    fm_backend_herdr_wait_adopted_agent \
+      "$ADOPTED_HERDR_SESSION" "$ADOPTED_HERDR_SOCKET_IDENTITY" \
+      "$ADOPTED_HERDR_WORKSPACE_ID" "$ADOPTED_HERDR_TAB_ID" \
+      "$ADOPTED_HERDR_PANE_ID" "$W" "$WT" "$ADOPTED_HERDR_EXPECTED_AGENT" \
+      "${FM_ADOPTED_HERDR_AGENT_POLLS:-60}" "${FM_ADOPTED_HERDR_AGENT_INTERVAL:-0.5}"
+    adopted_agent_status=$?
+    set -e
+    case "$adopted_agent_status" in
+      0) ADOPTED_HERDR_AGENT=$FM_BACKEND_HERDR_ADOPT_AGENT ;;
+      2)
+        echo "error: adopted herdr endpoint registered agent '$FM_BACKEND_HERDR_ADOPT_AGENT', expected '$ADOPTED_HERDR_EXPECTED_AGENT'; retaining its exact transaction for inspection" >&2
+        exit 1
+        ;;
+      *)
+        echo "error: adopted herdr endpoint did not register the expected agent before the bounded publication deadline; exact no-agent abort cleanup will retire only a proven attempt endpoint, otherwise its transaction is retained for retry" >&2
+        exit 1
+        ;;
+    esac
+    fm_adopted_endpoint_journal_advance \
+      "$ADOPTED_HERDR_JOURNAL" "$ADOPTED_HERDR_TOKEN" agent \
+      "$ADOPTED_HERDR_WORKSPACE_ID" "$ADOPTED_HERDR_TAB_ID" \
+      "$ADOPTED_HERDR_PANE_ID" "$ADOPTED_HERDR_AGENT" || {
+        echo "error: adopted herdr agent identity could not be committed to its exact endpoint transaction" >&2
+        exit 1
+      }
+  else
+    fm_backend_herdr_adopted_endpoint_inspect \
+      "$ADOPTED_HERDR_SESSION" "$ADOPTED_HERDR_SOCKET_IDENTITY" \
+      "$ADOPTED_HERDR_WORKSPACE_ID" "$ADOPTED_HERDR_TAB_ID" \
+      "$ADOPTED_HERDR_PANE_ID" "$W" "$WT" exact \
+      && [ "$FM_BACKEND_HERDR_ADOPT_ENDPOINT_STATE" = live ] \
+      && [ "$FM_BACKEND_HERDR_ADOPT_AGENT" = "$ADOPTED_HERDR_EXPECTED_AGENT" ] || {
+        echo "error: exact adopted herdr agent identity changed before metadata publication" >&2
+        exit 1
+      }
+    ADOPTED_HERDR_AGENT=$FM_BACKEND_HERDR_ADOPT_AGENT
+  fi
+  verify_adopted_identity "herdr agent metadata publication" || exit 1
+  fm_backend_herdr_adopted_endpoint_inspect \
+    "$ADOPTED_HERDR_SESSION" "$ADOPTED_HERDR_SOCKET_IDENTITY" \
+    "$ADOPTED_HERDR_WORKSPACE_ID" "$ADOPTED_HERDR_TAB_ID" \
+    "$ADOPTED_HERDR_PANE_ID" "$W" "$WT" exact \
+    && [ "$FM_BACKEND_HERDR_ADOPT_ENDPOINT_STATE" = live ] \
+    && [ "$FM_BACKEND_HERDR_ADOPT_AGENT" = "$ADOPTED_HERDR_AGENT" ] || {
+      echo "error: adopted herdr endpoint identity changed during atomic metadata publication" >&2
+      exit 1
+    }
+  ADOPTED_DELIVERY_TMP=$(umask 077; mktemp "$STATE/.${ID}.delivery.XXXXXXXX") || exit 1
+  delivery_count=0
+  adopted_agent_count=0
+  while IFS= read -r delivery_line || [ -n "$delivery_line" ]; do
+    case "$delivery_line" in
+      adopted_delivery=*)
+        delivery_count=$((delivery_count + 1))
+        printf '%s\n' 'adopted_delivery=complete'
+        ;;
+      adopted_herdr_agent=*)
+        adopted_agent_count=$((adopted_agent_count + 1))
+        printf 'adopted_herdr_agent=%s\n' "$ADOPTED_HERDR_AGENT"
+        ;;
+      *) printf '%s\n' "$delivery_line" ;;
+    esac
+  done < "$ADOPTED_META_TMP" > "$ADOPTED_DELIVERY_TMP"
+  if [ "$delivery_count" -ne 1 ] || [ "$adopted_agent_count" -ne 1 ] \
+     || ! mv -f -- "$ADOPTED_DELIVERY_TMP" "$STATE/$ID.meta"; then
+    rm -f -- "$ADOPTED_DELIVERY_TMP"
+    ADOPTED_DELIVERY_TMP=
+    echo "error: complete adopted herdr endpoint identity could not be published atomically" >&2
+    exit 1
+  fi
+  ADOPTED_DELIVERY_TMP=
+  rm -f -- "$ADOPTED_META_TMP"
+  ADOPTED_META_TMP=
+  ADOPTED_ENDPOINT_ABORT_CLEANUP=0
+  ADOPTED_HERDR_CLEANUP_SAFE=0
+  ADOPTED_BRIEF_ABORT_CLEANUP=0
+  [ -z "$ADOPTED_BRIEF_PREVIOUS_TMP" ] || rm -f -- "$ADOPTED_BRIEF_PREVIOUS_TMP"
+  ADOPTED_BRIEF_PREVIOUS_TMP=
+  ADOPTION_LOCK_HELD=0
+  fm_lock_release "$ADOPTION_LOCK" || true
+  ADOPTED_CLAIM_LOCK_HELD=0
+  fm_lock_release "$ADOPTED_CLAIM_LOCK" || true
+  spawn_herdr_presentation_order_lock_release
+fi
+
+if [ "$EXISTING_WORKTREE_SET" -eq 1 ] && [ "$BACKEND" = tmux ]; then
   [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] || {
     echo "error: adopted endpoint delivery metadata is no longer a regular task record; preserving pending recovery state" >&2
     exit 1

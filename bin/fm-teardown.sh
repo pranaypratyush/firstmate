@@ -45,7 +45,7 @@
 # branch, removes worktree files, returns/prunes/resets the worktree, or calls a
 # worktree-provider removal operation. Any adopted index.lock is preserved and
 # refuses teardown, including --force. The marker is accepted only once and only
-# with one adopted_branch= and adopted_head= on the supported tmux ordinary-task
+# with one adopted_branch= and adopted_head= on the supported tmux/Herdr ordinary-task
 # contract; any other value or shape refuses before cleanup mutation. The exact
 # Git-common-directory claim must identify this home/task/worktree/project under
 # its shared lock; teardown holds that lock from endpoint retirement through
@@ -62,6 +62,13 @@
 # that exact inventory. The Git registration remains authoritative after ordinary
 # task metadata cleanup, so deleting that home can never remove an inside worktree
 # or the common directory on which an outside worktree depends.
+# Adopted Herdr cleanup additionally requires one complete phase-agent endpoint
+# transaction that exactly matches metadata. Under the named-session lock it
+# rechecks the recorded socket, workspace, tab, pane, label, foreground worktree,
+# and native agent before closing only that pane. A changed socket or agent,
+# contradictory journal, ambiguous presence, or unconfirmed close preserves every
+# task record. A structured absent pane retires records only when the recorded
+# named-session socket is still the current exact socket.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -466,10 +473,11 @@ validate_adopted_worktree_metadata() {  # <meta> <kind> <backend>
     echo "error: adopted worktree ownership is valid only for ordinary ship or scout tasks in $meta" >&2
     return 1
   }
-  [ "$backend" = tmux ] || {
+  case "$backend" in tmux|herdr) ;; *)
     echo "error: adopted worktree ownership is unsupported for backend=$backend in $meta; preserving task state" >&2
     return 1
-  }
+    ;;
+  esac
   branch_count=$(grep -c '^adopted_branch=' "$meta" 2>/dev/null || true)
   head_count=$(grep -c '^adopted_head=' "$meta" 2>/dev/null || true)
   branch=$(grep '^adopted_branch=' "$meta" 2>/dev/null | cut -d= -f2-)
@@ -535,6 +543,18 @@ teardown_adopted_claim_lock_and_validate() {
   }
   if fm_adopted_claim_matches "$TEARDOWN_ADOPTED_CLAIM_FILE" "$ID" \
     "$TEARDOWN_ADOPTED_CLAIM_HOME" "$WT" "$PROJ"; then
+    if [ "$BACKEND" = herdr ]; then
+      [ "$FM_ADOPTED_CLAIM_ENDPOINT_BACKEND" = herdr ] \
+        && [ "$FM_ADOPTED_CLAIM_ENDPOINT_STATE" = journal ] || {
+          echo "error: adopted-worktree global claim does not bind the recorded Herdr transaction; preserving endpoint and task state" >&2
+          return 1
+        }
+      return 0
+    fi
+    [ "$FM_ADOPTED_CLAIM_ENDPOINT_BACKEND" = tmux ] || {
+      echo "error: adopted-worktree global claim does not bind the recorded tmux endpoint; preserving endpoint and task state" >&2
+      return 1
+    }
     case "$FM_ADOPTED_CLAIM_ENDPOINT_STATE" in
       legacy|legacy-bound)
         if [ "$FM_ADOPTED_CLAIM_ENDPOINT_STATE" = legacy-bound ]; then
@@ -661,6 +681,65 @@ load_adopted_tmux_endpoint_identity() {  # <meta>
   TEARDOWN_ADOPTED_SERVER_IDENTITY=$server_identity
 }
 
+load_adopted_herdr_endpoint_identity() {  # <meta>
+  local meta=$1 delivery socket parent agent session workspace tab pane home_real journal
+  fm_backend_source herdr || {
+    echo "error: herdr endpoint validation is unavailable for adopted worktree metadata in $meta; preserving task state" >&2
+    return 1
+  }
+  delivery=$(fm_backend_meta_exact_value "$meta" adopted_delivery) || delivery=
+  socket=$(fm_backend_meta_exact_value "$meta" adopted_herdr_socket_identity) || socket=
+  parent=$(fm_backend_meta_exact_value "$meta" adopted_herdr_parent_workspace_id) || parent=
+  agent=$(fm_backend_meta_exact_value "$meta" adopted_herdr_agent) || agent=
+  session=$(fm_backend_meta_exact_value "$meta" herdr_session) || session=
+  workspace=$(fm_backend_meta_exact_value "$meta" herdr_workspace_id) || workspace=
+  tab=$(fm_backend_meta_exact_value "$meta" herdr_tab_id) || tab=
+  pane=$(fm_backend_meta_exact_value "$meta" herdr_pane_id) || pane=
+  [ "$delivery" = complete ] && [ -n "$socket" ] && [ -n "$parent" ] \
+    && [ -n "$agent" ] && [ -n "$session" ] && [ -n "$workspace" ] \
+    && [ -n "$tab" ] && [ -n "$pane" ] || {
+      echo "error: adopted worktree metadata in $meta lacks one complete herdr endpoint identity; preserving task state" >&2
+      return 1
+    }
+  # shellcheck source=bin/fm-adopted-worktree-lib.sh
+  . "$SCRIPT_DIR/fm-adopted-worktree-lib.sh"
+  journal="$STATE/$ID.adopted-endpoint"
+  fm_adopted_endpoint_journal_load "$journal" || {
+    echo "error: adopted herdr endpoint transaction for $ID is unreadable or ambiguous; preserving task state" >&2
+    return 1
+  }
+  home_real=$(cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+  [ "$FM_ADOPTED_ENDPOINT_TASK_ID" = "$ID" ] \
+    && [ "$FM_ADOPTED_ENDPOINT_PHASE" = agent ] \
+    && [ "$FM_ADOPTED_ENDPOINT_HOME" = "$home_real" ] \
+    && [ "$FM_ADOPTED_ENDPOINT_SESSION" = "$session" ] \
+    && [ "$FM_ADOPTED_ENDPOINT_SOCKET" = "$socket" ] \
+    && [ "$FM_ADOPTED_ENDPOINT_PARENT_WORKSPACE_ID" = "$parent" ] \
+    && [ "$FM_ADOPTED_ENDPOINT_WORKSPACE_ID" = "$workspace" ] \
+    && [ "$FM_ADOPTED_ENDPOINT_TAB_ID" = "$tab" ] \
+    && [ "$FM_ADOPTED_ENDPOINT_PANE_ID" = "$pane" ] \
+    && [ "$FM_ADOPTED_ENDPOINT_TASK_LABEL" = "fm-$ID" ] \
+    && [ "$FM_ADOPTED_ENDPOINT_WORKTREE" = "$(fm_meta_get "$meta" worktree)" ] \
+    && [ "$FM_ADOPTED_ENDPOINT_AGENT" = "$agent" ] || {
+      echo "error: adopted herdr endpoint transaction for $ID contradicts task metadata; preserving task state" >&2
+      return 1
+    }
+  TEARDOWN_ADOPTED_HERDR_SESSION=$session
+  TEARDOWN_ADOPTED_HERDR_SOCKET=$socket
+  TEARDOWN_ADOPTED_HERDR_WORKSPACE=$workspace
+  TEARDOWN_ADOPTED_HERDR_TAB=$tab
+  TEARDOWN_ADOPTED_HERDR_PANE=$pane
+  TEARDOWN_ADOPTED_HERDR_AGENT=$agent
+}
+
+load_adopted_endpoint_identity() {  # <meta> <backend>
+  case "$2" in
+    tmux) load_adopted_tmux_endpoint_identity "$1" ;;
+    herdr) load_adopted_herdr_endpoint_identity "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
@@ -678,7 +757,7 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 WORKTREE_OWNERSHIP=$(require_worktree_ownership "$META") || exit 1
 if [ "$WORKTREE_OWNERSHIP" = adopted ]; then
   validate_adopted_worktree_metadata "$META" "$KIND" "$BACKEND" || exit 1
-  load_adopted_tmux_endpoint_identity "$META" || exit 1
+  load_adopted_endpoint_identity "$META" "$BACKEND" || exit 1
   load_adopted_global_claim_identity "$WT" "$PROJ" || exit 1
 fi
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
@@ -2741,7 +2820,38 @@ if [ "$BACKEND" = herdr ] \
   fi
 fi
 
-if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+if [ "$BACKEND" = herdr ] && [ "$WORKTREE_OWNERSHIP" = adopted ]; then
+  current_adopted_herdr_socket=$(fm_backend_herdr_presentation_session_socket_path \
+    "$TEARDOWN_ADOPTED_HERDR_SESSION" 2>/dev/null || true)
+  if [ -z "$current_adopted_herdr_socket" ] \
+     || [ "$current_adopted_herdr_socket" != "$TEARDOWN_ADOPTED_HERDR_SOCKET" ]; then
+    echo "error: adopted herdr session/socket identity changed for $ID; retaining every durable task record" >&2
+    exit 1
+  fi
+  if ! teardown_herdr_session_lock_held "$TEARDOWN_ADOPTED_HERDR_SESSION"; then
+    echo "error: adopted herdr endpoint lock is not held for $ID; retaining every durable task record" >&2
+    exit 1
+  fi
+  adopted_herdr_presence=$(fm_backend_herdr_pane_presence_state \
+    "$TEARDOWN_ADOPTED_HERDR_SESSION" "$TEARDOWN_ADOPTED_HERDR_PANE")
+  case "$adopted_herdr_presence" in
+    dead) ;;
+    present)
+      if ! fm_backend_herdr_close_adopted_endpoint \
+        "$TEARDOWN_ADOPTED_HERDR_SESSION" "$TEARDOWN_ADOPTED_HERDR_SOCKET" \
+        "$TEARDOWN_ADOPTED_HERDR_WORKSPACE" "$TEARDOWN_ADOPTED_HERDR_TAB" \
+        "$TEARDOWN_ADOPTED_HERDR_PANE" "fm-$ID" "$WT" any \
+        "$TEARDOWN_ADOPTED_HERDR_AGENT"; then
+        echo "error: adopted herdr endpoint $T could not be closed from its exact transaction identity; retaining every durable task record" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      echo "error: adopted herdr endpoint $T has ambiguous structured presence; retaining every durable task record" >&2
+      exit 1
+      ;;
+  esac
+elif [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   # The presentation lock was acquired before the worktree return above; a
   # contended lock already refused this teardown while everything was intact.
   if teardown_herdr_session_lock_held "$HERDR_PRESENTATION_SESSION"; then
@@ -2826,7 +2936,7 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" \
-  "$STATE/$ID.adopted-brief.md" \
+  "$STATE/$ID.adopted-brief.md" "$STATE/$ID.adopted-endpoint" \
   "$STATE/.$ID.open-decisions-cursor"
 if [ "$WORKTREE_OWNERSHIP" = adopted ]; then
   fm_adopted_claim_remove_exact "$TEARDOWN_ADOPTED_CLAIM_FILE" "$ID" \

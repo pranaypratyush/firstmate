@@ -202,6 +202,20 @@ ok - real tmux: kill removes the window and the readable session inventory autho
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 ```
 
+The Herdr adoption path was verified on 2026-08-07 with Herdr 0.7.5 protocol 17 on Linux inside a guarded non-default named session.
+The smoke launched `fm-spawn.sh` from a real Herdr pane, forced the optional presentation layout, adopted a separately registered Git worktree, and used a real native Codex registration rather than a composed endpoint identity.
+It verified the exact injected launcher parent and running-session socket, response-derived workspace, tab, and pane, native agent name, foreground CWD, complete transaction journal, atomic task metadata, unchanged branch, HEAD, index and files, zero Treehouse calls, unchanged captain focus, exact-pane teardown, retained worktree registration, and the helper's byte-identical default-fleet tripwire.
+
+```sh
+tests/fm-spawn-existing-worktree-herdr-e2e.test.sh
+```
+
+Observed bounded output:
+
+```text
+ok - real named-session Herdr adoption binds exact launcher/worktree/agent identity, preserves focus, and tears down without reclaiming the worktree
+```
+
 ## Herdr
 
 The compatibility floor is protocol 14.

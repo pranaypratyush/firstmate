@@ -30,8 +30,15 @@
 # gap and carries an atomically installed tmux window token, while `bound`
 # records the exact server locator, window, server lifetime, and session that a
 # retry must retire before creating another endpoint.
+# Version 4 records bind the same cross-home ownership to Herdr; the separate
+# token-bound endpoint journal below remains the exact Herdr transaction owner.
 # Versions 1 and 2 are readable only for an exact metadata-backed upgrade. Every
 # malformed, symbolic, missing, or mismatched record fails closed.
+# Herdr adoption additionally keeps state/<id>.adopted-endpoint as a
+# transaction journal.
+# The task metadata remains unpublished until an exact Herdr agent is verified;
+# this journal is the interruption-safe bridge between endpoint creation and
+# that publication.
 
 fm_adopted_worktree_snapshot() {  # <worktree-path> <project-root>
   local worktree=$1 project=$2 worktree_real project_real worktree_top project_top
@@ -169,6 +176,7 @@ fm_adopted_claim_read() {  # <claim-file>; returns 0 valid, 1 absent, 2 malforme
   FM_ADOPTED_CLAIM_HOME=
   FM_ADOPTED_CLAIM_WORKTREE=
   FM_ADOPTED_CLAIM_PROJECT=
+  FM_ADOPTED_CLAIM_ENDPOINT_BACKEND=
   FM_ADOPTED_CLAIM_ENDPOINT_STATE=
   FM_ADOPTED_CLAIM_ENDPOINT_SERVER_LOCATOR=
   FM_ADOPTED_CLAIM_ENDPOINT_WINDOW_ID=
@@ -188,6 +196,7 @@ fm_adopted_claim_read() {  # <claim-file>; returns 0 valid, 1 absent, 2 malforme
   case "$version" in
     1) [ "$line_count" = 5 ] || { FM_ADOPTED_CLAIM_ERROR=shape; return 2; } ;;
     2|3) ;;
+    4) [ "$line_count" = 7 ] || { FM_ADOPTED_CLAIM_ERROR=shape; return 2; } ;;
     *) FM_ADOPTED_CLAIM_ERROR=version; return 2 ;;
   esac
   FM_ADOPTED_CLAIM_TASK=$(fm_backend_meta_exact_value "$claim" task) \
@@ -199,9 +208,23 @@ fm_adopted_claim_read() {  # <claim-file>; returns 0 valid, 1 absent, 2 malforme
   FM_ADOPTED_CLAIM_PROJECT=$(fm_backend_meta_exact_value "$claim" project) \
     || { FM_ADOPTED_CLAIM_ERROR=project; return 2; }
   if [ "$version" = 1 ]; then
+    FM_ADOPTED_CLAIM_ENDPOINT_BACKEND=tmux
     FM_ADOPTED_CLAIM_ENDPOINT_STATE=legacy
     return 0
   fi
+  if [ "$version" = 4 ]; then
+    FM_ADOPTED_CLAIM_ENDPOINT_BACKEND=$(fm_backend_meta_exact_value "$claim" endpoint_backend) \
+      || { FM_ADOPTED_CLAIM_ERROR=endpoint-backend; return 2; }
+    [ "$FM_ADOPTED_CLAIM_ENDPOINT_BACKEND" = herdr ] \
+      || { FM_ADOPTED_CLAIM_ERROR=endpoint-backend; return 2; }
+    endpoint_state=$(fm_backend_meta_exact_value "$claim" endpoint_state) \
+      || { FM_ADOPTED_CLAIM_ERROR=endpoint-state; return 2; }
+    [ "$endpoint_state" = journal ] \
+      || { FM_ADOPTED_CLAIM_ERROR=endpoint-state; return 2; }
+    FM_ADOPTED_CLAIM_ENDPOINT_STATE=$endpoint_state
+    return 0
+  fi
+  FM_ADOPTED_CLAIM_ENDPOINT_BACKEND=tmux
   endpoint_state=$(fm_backend_meta_exact_value "$claim" endpoint_state) \
     || { FM_ADOPTED_CLAIM_ERROR=endpoint-state; return 2; }
   case "$endpoint_state" in
@@ -327,6 +350,25 @@ fm_adopted_claim_publish() {  # <claim> <task> <home> <worktree> <project> <loca
   rm -f -- "$tmp"
 }
 
+fm_adopted_claim_publish_herdr() {  # <claim> <task> <home> <worktree> <project>
+  local claim=$1 task=$2 home=$3 worktree=$4 project=$5 tmp claim_dir
+  [ ! -e "$claim" ] && [ ! -L "$claim" ] || return 1
+  claim_dir=${claim%/*}
+  tmp=$(umask 077; mktemp "$claim_dir/.claim.XXXXXXXX") || return 1
+  {
+    printf '%s\n' 'version=4'
+    printf 'task=%s\n' "$task"
+    printf 'home=%s\n' "$home"
+    printf 'worktree=%s\n' "$worktree"
+    printf 'project=%s\n' "$project"
+    printf '%s\n' 'endpoint_backend=herdr'
+    printf '%s\n' 'endpoint_state=journal'
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  ln "$tmp" "$claim" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
+  rm -f -- "$tmp"
+}
+
 fm_adopted_claim_mark_creating() {  # <claim> <task> <home> <worktree> <project> <locator> <session> <token>
   local claim=$1 locator=$6 session=$7 token=$8 tmp
   fm_adopted_claim_matches "$claim" "$2" "$3" "$4" "$5" || return 1
@@ -369,4 +411,174 @@ fm_adopted_worktree_identity_matches() {  # <wt> <project> <path> <branch> <head
     FM_ADOPTED_IDENTITY_DETAIL="path=$FM_ADOPTED_IDENTITY_WORKTREE branch=$FM_ADOPTED_IDENTITY_BRANCH head=$FM_ADOPTED_IDENTITY_HEAD"
     return 1
   fi
+}
+
+fm_adopted_endpoint_journal_load() {  # <journal>
+  local journal=$1 line key value seen=$'\n' count=0
+  FM_ADOPTED_ENDPOINT_VERSION=""
+  FM_ADOPTED_ENDPOINT_BACKEND=""
+  FM_ADOPTED_ENDPOINT_TASK_ID=""
+  FM_ADOPTED_ENDPOINT_TOKEN=""
+  FM_ADOPTED_ENDPOINT_PHASE=""
+  FM_ADOPTED_ENDPOINT_HOME=""
+  FM_ADOPTED_ENDPOINT_SESSION=""
+  FM_ADOPTED_ENDPOINT_SOCKET=""
+  FM_ADOPTED_ENDPOINT_PARENT_WORKSPACE_ID=""
+  FM_ADOPTED_ENDPOINT_LAYOUT=""
+  FM_ADOPTED_ENDPOINT_WORKSPACE_ID=""
+  FM_ADOPTED_ENDPOINT_TAB_ID=""
+  FM_ADOPTED_ENDPOINT_PANE_ID=""
+  FM_ADOPTED_ENDPOINT_TASK_LABEL=""
+  FM_ADOPTED_ENDPOINT_WORKTREE=""
+  FM_ADOPTED_ENDPOINT_AGENT=""
+  [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    count=$((count + 1))
+    case "$line" in
+      *=*) key=${line%%=*}; value=${line#*=} ;;
+      *) return 1 ;;
+    esac
+    case "$key$value" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+    case "$seen" in *$'\n'"$key"$'\n'*) return 1 ;; esac
+    seen="$seen$key"$'\n'
+    case "$key" in
+      version) FM_ADOPTED_ENDPOINT_VERSION=$value ;;
+      backend) FM_ADOPTED_ENDPOINT_BACKEND=$value ;;
+      task_id) FM_ADOPTED_ENDPOINT_TASK_ID=$value ;;
+      token) FM_ADOPTED_ENDPOINT_TOKEN=$value ;;
+      phase) FM_ADOPTED_ENDPOINT_PHASE=$value ;;
+      home) FM_ADOPTED_ENDPOINT_HOME=$value ;;
+      session) FM_ADOPTED_ENDPOINT_SESSION=$value ;;
+      socket) FM_ADOPTED_ENDPOINT_SOCKET=$value ;;
+      parent_workspace_id) FM_ADOPTED_ENDPOINT_PARENT_WORKSPACE_ID=$value ;;
+      layout) FM_ADOPTED_ENDPOINT_LAYOUT=$value ;;
+      workspace_id) FM_ADOPTED_ENDPOINT_WORKSPACE_ID=$value ;;
+      tab_id) FM_ADOPTED_ENDPOINT_TAB_ID=$value ;;
+      pane_id) FM_ADOPTED_ENDPOINT_PANE_ID=$value ;;
+      task_label) FM_ADOPTED_ENDPOINT_TASK_LABEL=$value ;;
+      worktree) FM_ADOPTED_ENDPOINT_WORKTREE=$value ;;
+      agent) FM_ADOPTED_ENDPOINT_AGENT=$value ;;
+      *) return 1 ;;
+    esac
+  done < "$journal"
+  [ "$count" -eq 16 ] \
+    && [ "$FM_ADOPTED_ENDPOINT_VERSION" = 1 ] \
+    && [ "$FM_ADOPTED_ENDPOINT_BACKEND" = herdr ] \
+    && [ -n "$FM_ADOPTED_ENDPOINT_TASK_ID" ] \
+    && [ -n "$FM_ADOPTED_ENDPOINT_TOKEN" ] \
+    && [ -n "$FM_ADOPTED_ENDPOINT_HOME" ] \
+    && [ -n "$FM_ADOPTED_ENDPOINT_SESSION" ] \
+    && [ -n "$FM_ADOPTED_ENDPOINT_SOCKET" ] \
+    && [ -n "$FM_ADOPTED_ENDPOINT_PARENT_WORKSPACE_ID" ] \
+    && [ -n "$FM_ADOPTED_ENDPOINT_TASK_LABEL" ] \
+    && [ -n "$FM_ADOPTED_ENDPOINT_WORKTREE" ] || return 1
+  case "$FM_ADOPTED_ENDPOINT_PHASE" in creating|endpoint|agent) ;; *) return 1 ;; esac
+  case "$FM_ADOPTED_ENDPOINT_LAYOUT" in flat|projected) ;; *) return 1 ;; esac
+  [ "${#FM_ADOPTED_ENDPOINT_TOKEN}" -eq 22 ] || return 1
+  case "$FM_ADOPTED_ENDPOINT_TOKEN" in *[!A-Za-z0-9_-]*) return 1 ;; esac
+  case "$FM_ADOPTED_ENDPOINT_HOME" in /*) ;; *) return 1 ;; esac
+  case "$FM_ADOPTED_ENDPOINT_SOCKET" in /*) ;; *) return 1 ;; esac
+  [ "$FM_ADOPTED_ENDPOINT_TASK_LABEL" = "fm-$FM_ADOPTED_ENDPOINT_TASK_ID" ] || return 1
+  for value in \
+    "$FM_ADOPTED_ENDPOINT_TASK_ID" \
+    "$FM_ADOPTED_ENDPOINT_SESSION" \
+    "$FM_ADOPTED_ENDPOINT_PARENT_WORKSPACE_ID" \
+    "$FM_ADOPTED_ENDPOINT_WORKSPACE_ID" \
+    "$FM_ADOPTED_ENDPOINT_TAB_ID" \
+    "$FM_ADOPTED_ENDPOINT_PANE_ID" \
+    "$FM_ADOPTED_ENDPOINT_AGENT"; do
+    case "$value" in *[[:space:]]*) return 1 ;; esac
+  done
+  case "$FM_ADOPTED_ENDPOINT_PHASE" in
+    creating)
+      [ -z "$FM_ADOPTED_ENDPOINT_TAB_ID$FM_ADOPTED_ENDPOINT_PANE_ID$FM_ADOPTED_ENDPOINT_AGENT" ] || return 1
+      [ "$FM_ADOPTED_ENDPOINT_LAYOUT" != flat ] || [ -n "$FM_ADOPTED_ENDPOINT_WORKSPACE_ID" ] || return 1
+      ;;
+    endpoint)
+      [ -n "$FM_ADOPTED_ENDPOINT_WORKSPACE_ID" ] \
+        && [ -n "$FM_ADOPTED_ENDPOINT_TAB_ID" ] \
+        && [ -n "$FM_ADOPTED_ENDPOINT_PANE_ID" ] \
+        && [ -z "$FM_ADOPTED_ENDPOINT_AGENT" ] || return 1
+      ;;
+    agent)
+      [ -n "$FM_ADOPTED_ENDPOINT_WORKSPACE_ID" ] \
+        && [ -n "$FM_ADOPTED_ENDPOINT_TAB_ID" ] \
+        && [ -n "$FM_ADOPTED_ENDPOINT_PANE_ID" ] \
+        && [ -n "$FM_ADOPTED_ENDPOINT_AGENT" ] || return 1
+      case "$FM_ADOPTED_ENDPOINT_AGENT" in codex|pi|muse) ;; *) return 1 ;; esac
+      ;;
+  esac
+}
+
+fm_adopted_endpoint_journal_write_file() {  # <path> <task> <token> <phase> <home> <session> <socket> <parent> <layout> <workspace> <tab> <pane> <label> <worktree> <agent>
+  local path=$1 task=$2 token=$3 phase=$4 home=$5 session=$6 socket=$7 parent=$8
+  local layout=$9 workspace=${10} tab=${11} pane=${12} label=${13} worktree=${14} agent=${15}
+  {
+    printf 'version=1\n'
+    printf 'backend=herdr\n'
+    printf 'task_id=%s\n' "$task"
+    printf 'token=%s\n' "$token"
+    printf 'phase=%s\n' "$phase"
+    printf 'home=%s\n' "$home"
+    printf 'session=%s\n' "$session"
+    printf 'socket=%s\n' "$socket"
+    printf 'parent_workspace_id=%s\n' "$parent"
+    printf 'layout=%s\n' "$layout"
+    printf 'workspace_id=%s\n' "$workspace"
+    printf 'tab_id=%s\n' "$tab"
+    printf 'pane_id=%s\n' "$pane"
+    printf 'task_label=%s\n' "$label"
+    printf 'worktree=%s\n' "$worktree"
+    printf 'agent=%s\n' "$agent"
+  } > "$path"
+  chmod 0600 "$path"
+}
+
+fm_adopted_endpoint_journal_create() {  # <journal> <task> <token> <home> <session> <socket> <parent> <layout> <workspace> <label> <worktree>
+  local journal=$1 task=$2 token=$3 home=$4 session=$5 socket=$6 parent=$7 layout=$8
+  local workspace=$9 label=${10} worktree=${11} tmp
+  tmp=$(umask 077; mktemp "$(dirname "$journal")/.${task}.adopted-endpoint.XXXXXXXX") || return 1
+  fm_adopted_endpoint_journal_write_file \
+    "$tmp" "$task" "$token" creating "$home" "$session" "$socket" "$parent" \
+    "$layout" "$workspace" "" "" "$label" "$worktree" "" || {
+      rm -f -- "$tmp"
+      return 1
+    }
+  fm_adopted_endpoint_journal_load "$tmp" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  if ! ln "$tmp" "$journal" 2>/dev/null; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  rm -f -- "$tmp"
+}
+
+fm_adopted_endpoint_journal_advance() {  # <journal> <token> <phase> <workspace> <tab> <pane> <agent>
+  local journal=$1 token=$2 phase=$3 workspace=$4 tab=$5 pane=$6 agent=$7 tmp current
+  fm_adopted_endpoint_journal_load "$journal" || return 1
+  [ "$FM_ADOPTED_ENDPOINT_TOKEN" = "$token" ] || return 1
+  current=$FM_ADOPTED_ENDPOINT_PHASE
+  case "$current:$phase" in
+    creating:endpoint|endpoint:agent) ;;
+    *) return 1 ;;
+  esac
+  tmp=$(umask 077; mktemp "$(dirname "$journal")/.${FM_ADOPTED_ENDPOINT_TASK_ID}.adopted-endpoint.XXXXXXXX") || return 1
+  fm_adopted_endpoint_journal_write_file \
+    "$tmp" "$FM_ADOPTED_ENDPOINT_TASK_ID" "$token" "$phase" \
+    "$FM_ADOPTED_ENDPOINT_HOME" "$FM_ADOPTED_ENDPOINT_SESSION" \
+    "$FM_ADOPTED_ENDPOINT_SOCKET" "$FM_ADOPTED_ENDPOINT_PARENT_WORKSPACE_ID" \
+    "$FM_ADOPTED_ENDPOINT_LAYOUT" "$workspace" "$tab" "$pane" \
+    "$FM_ADOPTED_ENDPOINT_TASK_LABEL" "$FM_ADOPTED_ENDPOINT_WORKTREE" "$agent" || {
+      rm -f -- "$tmp"
+      return 1
+    }
+  fm_adopted_endpoint_journal_load "$tmp" \
+    && [ "$FM_ADOPTED_ENDPOINT_TOKEN" = "$token" ] \
+    && [ "$FM_ADOPTED_ENDPOINT_PHASE" = "$phase" ] || {
+      rm -f -- "$tmp"
+      return 1
+    }
+  mv -f -- "$tmp" "$journal"
 }
