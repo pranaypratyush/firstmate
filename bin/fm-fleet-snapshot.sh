@@ -172,6 +172,10 @@ FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT, with truncation disclosed in the result.
 The registered secondmate table uses FM_SNAPSHOT_REGISTRY_LINES,
 FM_SNAPSHOT_REGISTRY_BYTES, FM_SNAPSHOT_REGISTRY_RECORDS, and
 FM_SNAPSHOT_REGISTRY_TIMEOUT, with unavailability and truncation disclosed.
+Bounded report context uses FM_SNAPSHOT_REPORT_SUMMARIES (default 40) across
+the snapshot, FM_SNAPSHOT_REPORT_SUMMARY_BYTES (default 4096) per selected
+report, and FM_SNAPSHOT_REPORT_SUMMARY_CHARS (default 800) after whitespace
+normalization. Report pointers remain visible outside the context-count bound.
 EOF
 }
 
@@ -659,8 +663,17 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
       | if length > $n then .[:$n] + "…" else . end;
     def report_context($id):
       ([ $reports[]? | select(.id == $id) | .summary_excerpt // empty ][0]) // null;
-    def report_truncated($id):
-      ([ $reports[]? | select(.id == $id) | .summary_truncated ][0]) // false;
+    def report_byte_truncated($id):
+      ([ $reports[]? | select(.id == $id) | .summary_byte_truncated ][0]) // false;
+    def report_character_truncated($id):
+      ([ $reports[]? | select(.id == $id) | .summary_character_truncated ][0]) // false;
+    def joined_context($body; $report):
+      ([ $body, $report ] | map(select(. != null and . != "")) | join(" "));
+    def context_value($body; $report):
+      (joined_context($body; $report)) as $context
+      | if $context == "" then null else ($context | trunc(800)) end;
+    def context_projection_truncated($body; $report):
+      (joined_context($body; $report) | gsub("\\s+"; " ") | length) > 800;
     ([ $backlog.records[]?
        | select((.state == "in_flight" or .state == "queued") and (.structured | not)) ]) as $unstructured_current
     | ([ $backlog.records[]? | select(.state == "in_flight" and .structured) ]) as $owned_in_flight
@@ -673,14 +686,16 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
     | ([ $queued_all[]
          | select(.captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
-            reason:(.hold_reason | trunc(160)),context:((.body_excerpt // report_context(.id)) | if . == null then null else trunc(800) end),source:"backlog"} ]) as $captain_holds_all
+            reason:(.hold_reason | trunc(160)),context:context_value(.body_excerpt; report_context(.id)),source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(.state == "done" and .structured and .kind != "captain")
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
             pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),
-            context:((.body_excerpt // report_context(.id)) | if . == null then null else trunc(800) end),
-            context_truncated:report_truncated(.id),completion} ]
+            context:context_value(.body_excerpt; report_context(.id)),
+            context_byte_truncated:report_byte_truncated(.id),
+            context_character_truncated:report_character_truncated(.id),
+            context_projection_truncated:context_projection_truncated(.body_excerpt; report_context(.id)),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
     | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
     | ([ $owned_in_flight[]
@@ -721,7 +736,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
             objective:(($work.title // .id) | trunc(160)),
             doing:((.current_state.detail // "") | trunc(160)),
             milestone:((.hints.last_event_text // "") | trunc(200)),
-            context:(($work.body_excerpt // report_context(.id)) | if . == null then null else trunc(800) end)} ]) as $active_all
+            context:context_value($work.body_excerpt; report_context(.id)),
+            context_byte_truncated:report_byte_truncated(.id),
+            context_character_truncated:report_character_truncated(.id),
+            context_projection_truncated:context_projection_truncated($work.body_excerpt; report_context(.id))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
             | {id:$t.id,key,verb,summary:(.summary | trunc(160)),reason:null,source:"status"} ])) as $decisions_all
@@ -732,7 +750,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
             blocked_by_ids:(.blocked_by_ids | map(trunc(120))),
             unresolved_blocker_ids:(.unresolved_blocker_ids | map(trunc(120))),
             reason:((.hold_reason // .blocked_reason // "blocked") | trunc(120)),
-            context:((.body_excerpt // report_context(.id)) | if . == null then null else trunc(800) end),source:"backlog"} ]
+            context:context_value(.body_excerpt; report_context(.id)),source:"backlog"} ]
        + [ $owned_in_flight[] as $work
            | $tasks[]
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
@@ -779,7 +797,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end),
-          context:((.body_excerpt // report_context(.id)) | if . == null then null else trunc(800) end)}][:$queued_n]),
+          context:context_value(.body_excerpt; report_context(.id))}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | . as $task | {id,state:.current_state.state,source:.current_state.source,
           objective:(([ $owned_in_flight[] | select(.id == $task.id) | .title ][0] // .id) | trunc(160)),
@@ -1353,7 +1371,8 @@ secondmate_landed_from_current_json() {  # <secondmate-current-json>
 }
 
 scout_report_lines() {  # <backlog-json> <tasks-json>
-  local report id relevant_ids summarized=0 content bytes truncated excerpt
+  local report id relevant_ids summarized=0 content bytes characters truncated excerpt normalized
+  local byte_truncated character_truncated
   if [ ! -d "$DATA" ]; then
     jq -n '[]'
     return 0
@@ -1368,22 +1387,38 @@ scout_report_lines() {  # <backlog-json> <tasks-json>
       id=$(basename "$(dirname "$report")")
       excerpt=
       truncated=false
+      byte_truncated=false
+      character_truncated=false
       if [ "$summarized" -lt "$FM_SNAPSHOT_REPORT_SUMMARIES" ] \
          && printf '%s\n' "$relevant_ids" | grep -Fqx -- "$id"; then
-        content=$(LC_ALL=C head -c "$((FM_SNAPSHOT_REPORT_SUMMARY_BYTES + 1))" "$report" 2>/dev/null || true)
+        content=$(LC_ALL=C head -c "$((FM_SNAPSHOT_REPORT_SUMMARY_BYTES + 1))" "$report" 2>/dev/null; printf '\036')
+        content=${content%$'\036'}
         bytes=$(printf '%s' "$content" | LC_ALL=C wc -c | tr -d ' ')
         if [ "$bytes" -gt "$FM_SNAPSHOT_REPORT_SUMMARY_BYTES" ]; then
-          truncated=true
+          byte_truncated=true
           content=$(printf '%s' "$content" | LC_ALL=C head -c "$FM_SNAPSHOT_REPORT_SUMMARY_BYTES")
         fi
-        excerpt=$(printf '%s' "$content" | jq -R -s -r \
-          --argjson chars "$FM_SNAPSHOT_REPORT_SUMMARY_CHARS" \
-          'gsub("[[:space:]]+"; " ") | gsub("^ | $"; "") | .[:$chars]')
+        normalized=$(printf '%s' "$content" | jq -R -s -r \
+          'gsub("[[:space:]]+"; " ") | gsub("^ | $"; "")')
+        characters=$(printf '%s' "$normalized" | jq -R -s 'length')
+        if [ "$characters" -gt "$FM_SNAPSHOT_REPORT_SUMMARY_CHARS" ]; then
+          character_truncated=true
+        fi
+        if [ "$byte_truncated" = true ] || [ "$character_truncated" = true ]; then
+          truncated=true
+        fi
+        excerpt=$(printf '%s' "$normalized" | jq -R -s -r \
+          --argjson chars "$FM_SNAPSHOT_REPORT_SUMMARY_CHARS" '.[:$chars]')
         summarized=$((summarized + 1))
       fi
       jq -n --arg id "$id" --arg path "$report" --arg excerpt "$excerpt" \
+        --argjson byte_truncated "$byte_truncated" \
+        --argjson character_truncated "$character_truncated" \
         --argjson truncated "$truncated" \
-        '{id:$id,path:$path,summary_excerpt:($excerpt | if . == "" then null else . end),summary_truncated:$truncated}'
+        '{id:$id,path:$path,summary_excerpt:($excerpt | if . == "" then null else . end),
+          summary_byte_truncated:$byte_truncated,
+          summary_character_truncated:$character_truncated,
+          summary_truncated:$truncated}'
     done \
     | jq -s 'sort_by(.id)'
 }

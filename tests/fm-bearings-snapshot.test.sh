@@ -391,7 +391,10 @@ EOF
   printf '%s' "$json" | jq -e '
     (.secondmates | any(.[]; .id == "domain-alpha" and .state == "captain_decision"))
       and (.decisions_open | any(.[]; .id == "domain-alpha/phase8-decision-release"
-        and .key == "phase8-decision-release" and .verb == "captain-hold"))
+        and .key == "phase8-decision-release" and .verb == "captain-hold"
+        and .review_changes_required == false
+        and .merge_decision_required == false
+        and .missing_choice_required == true))
       and (.in_flight | any(.[]; .id == "domain-alpha") | not)
   ' >/dev/null || fail "structured child captain hold did not reach Captain Call: $json"
   pass "a structured child captain hold reaches Captain's Call"
@@ -957,7 +960,11 @@ test_superseded_queued_item_dropped_by_default() {
   fakebin=$(make_fakebin "$home")
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
-    (.gates | any(.[]; .id == "live-gate")) and (.gates | any(.[]; .id == "dead-gate") | not)
+    (.gates | any(.[]; .id == "live-gate"
+      and (.context | length) > 0
+      and (.advance_when | contains("ship-task"))
+      and .owner == "(main)"))
+      and (.gates | any(.[]; .id == "dead-gate") | not)
   ' >/dev/null || fail "default gates must include live and drop superseded: $json"
   json=$(run "$home" "$fakebin" --json --all-queued)
   printf '%s' "$json" | jq -e '.gates | any(.[]; .id == "dead-gate")' >/dev/null \
@@ -1915,6 +1922,9 @@ EOF
       and (.evidence | contains("both are fixed"))
       and (.evidence | contains("no Windows evidence"))
       and (.evidence | contains("reviews the fixes, then separately decides whether to merge"))
+      and .review_changes_required == true
+      and .merge_decision_required == true
+      and .missing_choice_required == false
       and .action_owner == "captain"
   ' >/dev/null || fail "Captain Call lacked executable review and merge context: $json"
   pass "Captain Call carries the implementation, findings, caveat, and distinct review/merge actions"
@@ -1961,6 +1971,9 @@ EOF
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.landed | length) == 4
+      and (all(.landed[]; (.context | type) == "string" and (.context | length) > 0
+        and (.next_action | type) == "string" and (.next_action | length) > 0
+        and (.next_owner | type) == "string" and (.next_owner | length) > 0))
       and (.landed | any(.id == "nsm-salvage-lock" and (.outcome | contains("unique lease-recovery guard")) and (.outcome | contains("nsm-integrator ports"))))
       and (.landed | any(.id == "nsm-salvage-watch" and (.outcome | contains("already superseded")) and (.outcome | contains("omits this path"))))
       and (.landed | any(.id == "nsm-salvage-restart" and (.outcome | contains("evidence is missing")) and (.outcome | contains("adds the missing restart test"))))
@@ -1971,11 +1984,87 @@ EOF
         and (.milestone | contains("mapped all four scout dispositions"))
         and (.state_caveat | length) > 0
         and (.context | contains("retain unique recovery behavior"))
+        and (.next_action | contains("mapped all four scout dispositions"))
+        and .next_owner == "nsm-integrator"
         and .owner == "nsm-integrator"))
   ' >/dev/null || fail "salvage dispositions or unavailable-state milestone were compressed away: $json"
   pass "salvage dispositions and the unknown integrator's last structured milestone remain understandable"
 }
 
+test_landed_discloses_byte_character_and_projection_truncation() {
+  local home fakebin json i
+  home=$(make_home landed-truncation)
+  : > "$home/data/secondmates.md"
+  mkdir -p "$home/data/truncated-scout"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+- [x] truncated-scout - Truncation provenance scout data/truncated-scout/report.md (repo: firstmate) (kind: scout) (reported 2026-07-23)
+EOF
+  printf '  Context: ' >> "$home/data/backlog.md"
+  i=0
+  while [ "$i" -lt 200 ]; do printf 'b' >> "$home/data/backlog.md"; i=$((i + 1)); done
+  printf '\n' >> "$home/data/backlog.md"
+  printf '# Truncation report\nOutcome: ' > "$home/data/truncated-scout/report.md"
+  i=0
+  while [ "$i" -lt 700 ]; do printf 'r' >> "$home/data/truncated-scout/report.md"; i=$((i + 1)); done
+  printf '\nNext: integrator records the bounded result.\n' >> "$home/data/truncated-scout/report.md"
+  fakebin=$(make_fakebin "$home")
+
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .landed[] | select(.id == "truncated-scout")
+    | .context_byte_truncated == false
+      and .context_character_truncated == false
+      and .context_projection_truncated == true
+      and (.caveat | contains("final projection limit"))
+  ' >/dev/null || fail "final Bearings projection truncation was not disclosed: $json"
+
+  json=$(FM_SNAPSHOT_REPORT_SUMMARY_BYTES=80 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .landed[] | select(.id == "truncated-scout")
+    | .context_byte_truncated == true
+      and .context_character_truncated == false
+      and (.caveat | contains("byte limit"))
+  ' >/dev/null || fail "report byte truncation was not disclosed in landed context: $json"
+
+  json=$(FM_SNAPSHOT_REPORT_SUMMARY_CHARS=80 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .landed[] | select(.id == "truncated-scout")
+    | .context_byte_truncated == false
+      and .context_character_truncated == true
+      and (.caveat | contains("character limit"))
+  ' >/dev/null || fail "report character truncation was not disclosed in landed context: $json"
+  pass "landed context discloses byte, character, and final projection truncation"
+}
+
+test_help_names_every_operator_facing_bound() {
+  local help name
+  help=$("$ROOT/bin/fm-bearings-snapshot.sh" --help)
+  for name in \
+    'FM_BEARINGS_LANDED (default 6)' \
+    'FM_BEARINGS_LANDED_PER_HOME (default: FM_BEARINGS_LANDED)' \
+    'FM_BEARINGS_IN_FLIGHT (default 20)' \
+    'FM_BEARINGS_DECISIONS (default 20)' \
+    'FM_BEARINGS_SECONDMATES (default 20)' \
+    'FM_BEARINGS_GATES (default 20)' \
+    'FM_BEARINGS_REPORTS (default 20)' \
+    'FM_BEARINGS_RECORDED_PRS (default 20)' \
+    'FM_BEARINGS_UNHEALTHY (default 20)' \
+    'FM_BEARINGS_PR_REPOS (default 10)' \
+    'FM_BEARINGS_PR_LIMIT (default 20)' \
+    'FM_BEARINGS_PR_TIMEOUT (default 20 seconds)'
+  do
+    printf '%s' "$help" | grep -F "$name" >/dev/null ||
+      fail "help omitted operator-facing bound: $name"
+  done
+  pass "Bearings help names every operator-facing bound"
+}
+
+test_help_names_every_operator_facing_bound
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
@@ -2008,6 +2097,7 @@ test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
 test_captain_call_carries_executable_review_and_merge_context
 test_salvage_dispositions_and_unknown_integrator_milestone_surface
+test_landed_discloses_byte_character_and_projection_truncation
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface

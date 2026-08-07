@@ -47,7 +47,10 @@ It never tears down a task, merges a PR, dispatches new work, steers a worker, a
 2. **Compose the four-section chat digest from the fresh snapshot.**
    The gather step is deterministic; your judgment is scoped to ranking the command's facts by what matters right now and writing scannable captain-facing prose.
    Build every nonempty item as one concise causal capsule: name the concrete object, state what happened or remains uncertain, say why that fact matters now, and name the next action and its owner.
-   Use only the snapshot's explicit objective, milestone, caveat, evidence, outcome, context, blocker, and owner fields for that capsule.
+   Use only the snapshot's explicit objective, milestone, caveat, evidence, outcome, context, blocker, next-action, and owner fields for that capsule.
+   Every nonempty Underway and Recently Landed item must use its nonempty `context`, `next_action`, and `next_owner` values rather than reconstructing them from a title.
+   Captain's Call must use `review_changes_required`, `merge_decision_required`, and `missing_choice_required` as distinct action types and may render more than one explicit action when more than one value is true.
+   Surface each true `context_byte_truncated`, `context_character_truncated`, or `context_projection_truncated` flag as the corresponding evidence caveat.
    Treat a missing causal field as a disclosed evidence gap, never as permission to compress the item to its title or invent the missing link.
    The chat response uses the four complete sections in the chat-response contract below, in the same order, each always present.
    Plain mode stops here and writes no report artifact.
@@ -89,7 +92,10 @@ Rules that keep the contract unambiguous:
 - The four buckets are mutually exclusive, so every item is forced into exactly one: needs-your-action is Captain's Call, done is Recently Landed, self-progressing is Underway, and not-yet-started work or an action-free fleet-integrity warning is Charted Next.
 - The strict boundary keeps action-free items OUT of Captain's Call: a working or validating task, a queued item blocked on another task or a date, landed work, a completed scout's report pointer, a declared `paused:` external wait, and a bare recorded PR with no merge-ready signal each belong to one of the other three sections, never Captain's Call.
 - A secondmate's own row appears Underway only for `active_child_work`; `externally_held` belongs in Charted Next, and `unknown` belongs there as an unavailable-state gate unless its reason requires the captain's action.
-- An unavailable live harness state is a caveat attached to the snapshot's last trustworthy structured milestone and consequence, never the whole item.
+- An unavailable live harness state is a caveat attached to the snapshot's last trustworthy structured milestone, context, immediate `next_action`, and `next_owner`, never the whole item.
+- Captain's Call names the concrete action from the structured action flags: review the changes, decide whether to merge, or provide the missing choice; never collapse those actions into generic approval wording.
+- Recently Landed states the useful `outcome`, material `caveat`, immediate `next_action`, and `next_owner`, and discloses every active byte, character, or final-projection context limit.
+- Charted Next states the queue reason and uses `advance_when` as the exact condition that moves the item forward.
 - Do not suppress separately projected decisions, landed records, or gates from a `partial-structured` home merely because that secondmate's own row is `unknown`.
 - Include the required direct address to the captain inside one item or empty-state sentence.
 - Every PR appears as the full `https://...` URL; a shorthand `#number` is fine only as a back-reference after the full URL has already appeared in the same digest.

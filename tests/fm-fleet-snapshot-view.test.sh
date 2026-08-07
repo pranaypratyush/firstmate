@@ -151,6 +151,18 @@ test_empty_fleet_json() {
   pass "empty fleet snapshot and view use explicit absence markers"
 }
 
+test_help_names_every_report_context_bound() {
+  local help
+  help=$("$SNAPSHOT" --help)
+  assert_contains "$help" "FM_SNAPSHOT_REPORT_SUMMARIES (default 40)" \
+    "snapshot help omitted the report-count bound"
+  assert_contains "$help" "FM_SNAPSHOT_REPORT_SUMMARY_BYTES (default 4096)" \
+    "snapshot help omitted the per-report byte bound"
+  assert_contains "$help" "FM_SNAPSHOT_REPORT_SUMMARY_CHARS (default 800)" \
+    "snapshot help omitted the normalized character bound"
+  pass "snapshot help names every operator-facing report-context bound"
+}
+
 test_fixture_snapshot_json() {
   local home fakebin out ids
   home=$(make_home fixture)
@@ -445,7 +457,7 @@ EOF
 }
 
 test_scout_report_context_is_bounded_without_dropping_pointers() {
-  local home out
+  local home out char_out
   home=$(make_home bounded-report-context)
   mkdir -p "$home/data/report-a" "$home/data/report-b"
   cat > "$home/data/backlog.md" <<'EOF'
@@ -461,11 +473,27 @@ EOF
   printf '%s' "$out" | jq -e '
     (.scout_reports | map(.id)) == ["report-a","report-b"]
       and (.scout_reports[] | select(.id == "report-a")
-        | .summary_excerpt == "# Report A This conclusi" and .summary_truncated == true)
+        | .summary_excerpt == "# Report A This conclusi"
+          and .summary_byte_truncated == true
+          and .summary_character_truncated == false
+          and .summary_truncated == true)
       and (.scout_reports[] | select(.id == "report-b")
-        | .summary_excerpt == null and .summary_truncated == false)
+        | .summary_excerpt == null
+          and .summary_byte_truncated == false
+          and .summary_character_truncated == false
+          and .summary_truncated == false)
   ' >/dev/null || fail "report-context byte/count bounds did not preserve pointers: $out"
-  pass "report context obeys byte and count bounds while every report pointer remains visible"
+  char_out=$(FM_HOME="$home" FM_SNAPSHOT_REPORT_SUMMARIES=2 \
+    FM_SNAPSHOT_REPORT_SUMMARY_BYTES=4096 FM_SNAPSHOT_REPORT_SUMMARY_CHARS=12 \
+    "$SNAPSHOT" --json)
+  printf '%s' "$char_out" | jq -e '
+    .scout_reports[] | select(.id == "report-a")
+    | .summary_excerpt == "# Report A T"
+      and .summary_byte_truncated == false
+      and .summary_character_truncated == true
+      and .summary_truncated == true
+  ' >/dev/null || fail "report-context character bound was not disclosed: $char_out"
+  pass "report context discloses byte and character bounds while every pointer remains visible"
 }
 
 test_backlog_tasks_axi_forms_and_overrides() {
@@ -808,6 +836,7 @@ test_parked_scout_decision_stays_pending() {
 }
 
 test_empty_fleet_json
+test_help_names_every_report_context_bound
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
 test_normalized_roles_and_plural_blocker_readiness
