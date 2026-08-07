@@ -157,8 +157,16 @@ printf 'cwd=%s argv=%s\n' "$PWD" "$*" >> "$FM_NM_LOG"
 case "$*" in
   --version) printf 'no-mistakes version test (0d39eadf)\n' ;;
   "axi status"|"axi status --run "*)
-    [ -f "$FM_NM_STATUS" ] || exit 1
-    cat "$FM_NM_STATUS"
+    if [ -n "${FM_NM_STATUS_SEQUENCE_DIR:-}" ]; then
+      count=$(cat "$FM_NM_STATUS_COUNT" 2>/dev/null || printf 0)
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$FM_NM_STATUS_COUNT"
+      status="$FM_NM_STATUS_SEQUENCE_DIR/$count"
+    else
+      status=$FM_NM_STATUS
+    fi
+    [ -f "$status" ] || exit 1
+    cat "$status"
     ;;
   *) exit 8 ;;
 esac
@@ -198,11 +206,13 @@ case "${1:-} ${2:-}" in
     count=$(cat "$FM_HERDR_COUNT" 2>/dev/null || printf 0); count=$((count + 1)); printf '%s\n' "$count" > "$FM_HERDR_COUNT"
     tab="w-parent:t-view$count"; pane="w-parent:p-view$count"
     printf '%s\n' "$tab" > "$FM_HERDR_TAB"; printf '%s\n' "$pane" > "$FM_HERDR_PANE"; printf idle > "$FM_HERDR_STATE"
+    [ "${FM_HERDR_CREATE_FOCUS:-captain}" = captain ] || printf '%s' "$FM_HERDR_CREATE_FOCUS" > "$FM_HERDR_FOCUS"
     if [ "${FM_HERDR_CREATE_MODE:-ok}" = fail ]; then exit 7; fi
     if [ "${FM_HERDR_CREATE_MODE:-ok}" = malformed ]; then printf '{"result":{}}\n'; else printf '{"result":{"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' "$tab" "$pane"; fi
     ;;
   "pane run")
     [ "${FM_HERDR_RUN_FAIL:-0}" = 0 ] || exit 9
+    [ "${FM_HERDR_RUN_FOCUS:-captain}" = captain ] || printf '%s' "$FM_HERDR_RUN_FOCUS" > "$FM_HERDR_FOCUS"
     printf launched > "$FM_HERDR_STATE"
     ;;
   "pane get")
@@ -210,14 +220,19 @@ case "${1:-} ${2:-}" in
     if [ "$target" = w-parent:p-task ]; then
       printf '{"result":{"pane":{"pane_id":"w-parent:p-task","tab_id":"w-parent:t-task","workspace_id":"w-parent"}}}\n'
     elif [ "$target" = "$pane" ] && [ "$state" != gone ]; then
-      printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"w-parent"}}}\n' "$pane" "$tab"
+      printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"%s"}}}\n' \
+        "$pane" "${FM_HERDR_PANE_TAB_OVERRIDE:-$tab}" "${FM_HERDR_PANE_WORKSPACE_OVERRIDE:-w-parent}"
     else
       printf '{"error":{"code":"pane_not_found"}}\n'
     fi
     ;;
   "pane process-info")
     if [ "$state" = launched ]; then
-      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4000,"foreground_process_group_id":5000,"foreground_processes":[{"pid":5000,"name":"codex","argv0":"codex","argv":["codex","--remote","%s","resume","%s"]}]}}}\n' "$pane" "$FM_EXPECT_ENDPOINT" "$FM_EXPECT_THREAD"
+      if [ "${FM_HERDR_PROCESS_ARGV_MODE:-exact}" = wrong-order ]; then
+        printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4000,"foreground_process_group_id":5000,"foreground_processes":[{"pid":5000,"name":"codex","argv0":"codex","argv":["codex","resume","%s","--remote","%s"]}]}}}\n' "$pane" "$FM_EXPECT_THREAD" "$FM_EXPECT_ENDPOINT"
+      else
+        printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4000,"foreground_process_group_id":5000,"foreground_processes":[{"pid":5000,"name":"codex","argv0":"codex","argv":["codex","--remote","%s","resume","%s"]}]}}}\n' "$pane" "$FM_EXPECT_ENDPOINT" "$FM_EXPECT_THREAD"
+      fi
     else
       printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_process_group_id":4242,"foreground_processes":[{"pid":4242,"name":"bash","argv0":"bash","argv":["bash"]}]}}}\n' "$pane"
     fi
@@ -229,7 +244,8 @@ case "${1:-} ${2:-}" in
     printf gone > "$FM_HERDR_STATE"
     ;;
   "tab get")
-    printf '{"result":{"tab":{"tab_id":"%s","workspace_id":"w-parent"}}}\n' "${3:-}"
+    printf '{"result":{"tab":{"tab_id":"%s","workspace_id":"%s"}}}\n' \
+      "${FM_HERDR_TAB_ID_OVERRIDE:-${3:-}}" "${FM_HERDR_TAB_WORKSPACE_OVERRIDE:-w-parent}"
     ;;
   "tab focus")
     printf captain > "$FM_HERDR_FOCUS"
@@ -262,6 +278,7 @@ setup_live_case() {  # <name> [harness] [kind] [mode] [backend]
   CASE_CODEX_LOG="$CASE_DIR/codex.log"; CASE_NM_LOG="$CASE_DIR/nm.log"; CASE_HERDR_LOG="$CASE_DIR/herdr.log"
   CASE_NM_STATUS="$CASE_DIR/status.toon"; CASE_HERDR_FOCUS="$CASE_DIR/focus"; CASE_HERDR_STATE="$CASE_DIR/pane-state"
   CASE_HERDR_TAB="$CASE_DIR/tab"; CASE_HERDR_PANE="$CASE_DIR/pane"; CASE_HERDR_COUNT="$CASE_DIR/count"
+  CASE_NM_STATUS_SEQUENCE_DIR=; CASE_NM_STATUS_COUNT="$CASE_DIR/status.count"
   : > "$CASE_CODEX_LOG"; : > "$CASE_NM_LOG"; : > "$CASE_HERDR_LOG"; printf captain > "$CASE_HERDR_FOCUS"; printf gone > "$CASE_HERDR_STATE"
   CASE_SESSION=nm-herdr-lab; CASE_HERDR_SOCKET="$CASE_DIR/herdr.sock"
   printf 'agent: codex\ncodex:\n  transport: app-server\n  app_server_endpoint: unix://%s\n' "$CASE_SOCKET" > "$CASE_HOME/.no-mistakes/config.yaml"
@@ -278,10 +295,21 @@ run_live() {
   PATH="$CASE_FAKEBIN:$PATH" HOME="$CASE_HOME" FM_HOME="$CASE_HOME" \
     FM_CODEX_LOG="$CASE_CODEX_LOG" FM_CODEX_LIFECYCLE="$CASE_LIFECYCLE" \
     FM_NM_LOG="$CASE_NM_LOG" FM_NM_STATUS="$CASE_NM_STATUS" \
+    FM_NM_STATUS_SEQUENCE_DIR="${CASE_NM_STATUS_SEQUENCE_DIR:-}" \
+    FM_NM_STATUS_COUNT="${CASE_NM_STATUS_COUNT:-$CASE_DIR/status.count}" \
     FM_HERDR_LOG="$CASE_HERDR_LOG" FM_HERDR_FOCUS="$CASE_HERDR_FOCUS" \
     FM_HERDR_STATE="$CASE_HERDR_STATE" FM_HERDR_TAB="$CASE_HERDR_TAB" \
     FM_HERDR_PANE="$CASE_HERDR_PANE" FM_HERDR_COUNT="$CASE_HERDR_COUNT" \
     FM_HERDR_SESSION_NAME="$CASE_SESSION" FM_HERDR_SOCKET="$CASE_HERDR_SOCKET" \
+    FM_HERDR_RUN_FOCUS="${FM_HERDR_RUN_FOCUS:-captain}" \
+    FM_HERDR_CREATE_FOCUS="${FM_HERDR_CREATE_FOCUS:-captain}" \
+    FM_HERDR_PANE_TAB_OVERRIDE="${FM_HERDR_PANE_TAB_OVERRIDE:-}" \
+    FM_HERDR_PANE_WORKSPACE_OVERRIDE="${FM_HERDR_PANE_WORKSPACE_OVERRIDE:-}" \
+    FM_HERDR_TAB_ID_OVERRIDE="${FM_HERDR_TAB_ID_OVERRIDE:-}" \
+    FM_HERDR_TAB_WORKSPACE_OVERRIDE="${FM_HERDR_TAB_WORKSPACE_OVERRIDE:-}" \
+    FM_HERDR_PROCESS_ARGV_MODE="${FM_HERDR_PROCESS_ARGV_MODE:-exact}" \
+    FM_NM_LIVE_CAPTURE_TIMEOUT="${FM_NM_LIVE_CAPTURE_TIMEOUT:-0}" \
+    FM_NM_LIVE_CAPTURE_POLL="${FM_NM_LIVE_CAPTURE_POLL:-0.01}" \
     FM_EXPECT_ENDPOINT="unix://$CASE_SOCKET" FM_EXPECT_THREAD="${FM_EXPECT_THREAD:-019f4d4d-5dc0-75c1-8efe-adf4531bd733}" \
     "$LIVE" "$@"
 }
@@ -304,6 +332,31 @@ write_terminal_status() {  # <run> <head>
 write_no_active_status() {  # <run> <head>
   printf 'run:\n  id: "%s"\n  branch: fm/test\n  status: running\n  head: "%s"\n  active_steps[0]{step,status,active_for,last_activity,agent_pid,session_id,round}:\n' \
     "$1" "$2" > "$CASE_NM_STATUS"
+}
+
+write_state_status() {  # <run> <head> <status> <session>
+  printf 'run:\n  id: "%s"\n  branch: fm/test\n  status: %s\n  head: "%s"\n  active_steps[1]{step,status,active_for,last_activity,agent_pid,session_id,round}:\n    review,running,2s,"codex active",4242,"%s",round 1\n' \
+    "$1" "$3" "$2" "$4" > "$CASE_NM_STATUS"
+}
+
+write_no_run_status() {
+  printf 'runs: 0 runs yet in this repository\nhelp[1]:\n  - run no-mistakes\n' > "$CASE_NM_STATUS"
+}
+
+write_malformed_active_status() {  # <run> <head> <shape>
+  printf 'run:\n  id: "%s"\n  branch: fm/test\n  status: running\n  head: "%s"\n' "$1" "$2" > "$CASE_NM_STATUS"
+  if [ "$3" = wrong-header ]; then
+    printf '  active_steps[1]{step,status,session_id}:\n    review,running,"019f4d4d-5dc0-75c1-8efe-adf4531bd733"\n' >> "$CASE_NM_STATUS"
+  fi
+}
+
+sequence_status() {  # <sequence-dir> <index> <writer> [args...]
+  local dir=$1 index=$2 writer=$3 saved=$CASE_NM_STATUS
+  shift 3
+  mkdir -p "$dir"
+  CASE_NM_STATUS="$dir/$index"
+  "$writer" "$@"
+  CASE_NM_STATUS=$saved
 }
 
 write_branch_status() {  # <run> <branch> <head> <session>
@@ -365,6 +418,26 @@ test_trigger_and_live_lifecycle() {
   pass "live state machine: post-delivery attribution, exact unfocused creation, idempotence, pinned run, and focus-safe deferred cleanup"
 }
 
+test_bounded_capture_and_baseline_binding() {
+  local attempt journal sequence
+  setup_live_case bounded-capture
+  sequence="$CASE_DIR/status-sequence"
+  sequence_status "$sequence" 1 write_no_active_status RUN-OLD "$CASE_HEAD"
+  sequence_status "$sequence" 2 write_no_active_status RUN-OLD "$CASE_HEAD"
+  sequence_status "$sequence" 3 write_no_active_status RUN-NEW "$CASE_HEAD"
+  sequence_status "$sequence" 4 write_active_status RUN-NEW "$CASE_HEAD" 019f4d4d-5dc0-75c1-8efe-adf4531bd733
+  CASE_NM_STATUS_SEQUENCE_DIR=$sequence
+  attempt=$(run_live prepare task '$no-mistakes') || fail "sessionless baseline prepare failed"
+  journal="$CASE_STATE/task.nm-live"
+  FM_NM_LIVE_CAPTURE_TIMEOUT=1 run_live confirm task "$attempt" || fail "bounded post-delivery capture failed"
+  [ "$(phase_of "$journal")" = live ] || fail "bounded capture missed the transient active session"
+  [ "$(sed -n 's/^run_id=//p' "$journal")" = RUN-NEW ] || fail "pre-existing sessionless baseline was pinned"
+  assert_no_grep 'argv=axi status --run RUN-OLD' "$CASE_NM_LOG" "pre-existing sessionless baseline became the pinned run"
+  assert_grep 'argv=axi status --run RUN-NEW' "$CASE_NM_LOG" "new causal run was not pinned while awaiting its session"
+  [ "$(grep -c 'tab create' "$CASE_HERDR_LOG")" -eq 1 ] || fail "bounded capture did not create exactly one companion"
+  pass "post-delivery capture: transient identity retained and pre-existing sessionless baseline never pinned"
+}
+
 test_rejections_rotation_and_quarantine() {
   local attempt journal creates rc
   setup_live_case reject
@@ -404,6 +477,19 @@ test_rejections_rotation_and_quarantine() {
   [ "$(phase_of "$CASE_STATE/task.nm-live")" = quarantined ] || fail "lost creation response was not quarantined"
   assert_no_grep 'workspace find' "$CASE_HERDR_LOG" "lost creation response triggered global rediscovery"
   assert_no_grep 'label get' "$CASE_HERDR_LOG" "lost creation response triggered label adoption"
+
+  setup_live_case create-focus-drift
+  attempt=$(run_live prepare task '$no-mistakes') || fail "create-focus-drift prepare failed"
+  write_active_status RUN-FOCUS "$CASE_HEAD" 019f4d4d-5dc0-75c1-8efe-adf4531bd733
+  FM_HERDR_CREATE_FOCUS=view run_live confirm task "$attempt" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] && [ "$(phase_of "$CASE_STATE/task.nm-live")" = quarantined ] || fail "focus-changing tab creation was not quarantined"
+  [ "$(cat "$CASE_HERDR_FOCUS")" = captain ] || fail "focus-changing tab creation did not restore the exact prior focus"
+  [ "$(sed -n 's/^herdr_tab_id=//p' "$CASE_STATE/task.nm-live")" = w-parent:t-view1 ] || fail "focus-changing creation did not retain its exact returned tab id"
+  [ "$(sed -n 's/^herdr_pane_id=//p' "$CASE_STATE/task.nm-live")" = w-parent:p-view1 ] || fail "focus-changing creation did not retain its exact returned pane id"
+  assert_no_grep 'pane run' "$CASE_HERDR_LOG" "focus-changing tab creation reached pane launch"
+  run_live cleanup task || fail "focus-changing creation with bound ids did not clean up safely"
+  [ ! -e "$CASE_STATE/task.nm-live" ] || fail "focus-changing creation retained its journal after exact cleanup"
+  assert_grep 'pane close w-parent:p-view1 --session nm-herdr-lab' "$CASE_HERDR_LOG" "focus-changing creation cleanup did not close the exact returned pane"
   pass "attribution safety: multiple identities reject, rotation cleans before replacement, and ambiguous creation quarantines without label adoption"
 }
 
@@ -472,11 +558,42 @@ test_run_attribution_matrix() {
   run_live confirm task "$attempt" >/dev/null 2>&1; rc=$?
   [ "$rc" -ne 0 ] && [ "$(phase_of "$CASE_STATE/task.nm-live")" = quarantined ] || fail "malformed active session identity was not quarantined"
 
+  setup_live_case missing-active-header
+  attempt=$(run_live prepare task '$no-mistakes') || fail "missing-header prepare failed"
+  write_malformed_active_status RUN-MISSING "$CASE_HEAD" missing
+  run_live confirm task "$attempt" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] && [ "$(phase_of "$CASE_STATE/task.nm-live")" = quarantined ] || fail "missing active_steps header was treated as no identity"
+  assert_no_grep 'tab create' "$CASE_HERDR_LOG" "missing active_steps header reached Herdr creation"
+
+  setup_live_case malformed-active-header
+  attempt=$(run_live prepare task '$no-mistakes') || fail "wrong-header prepare failed"
+  write_malformed_active_status RUN-WRONG "$CASE_HEAD" wrong-header
+  run_live confirm task "$attempt" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] && [ "$(phase_of "$CASE_STATE/task.nm-live")" = quarantined ] || fail "wrong active_steps header was treated as no identity"
+  assert_no_grep 'tab create' "$CASE_HERDR_LOG" "wrong active_steps header reached Herdr creation"
+
   setup_live_case other-branch
   attempt=$(run_live prepare task '$no-mistakes') || fail "other-branch prepare failed"
   write_branch_status RUN-B fm/other "$CASE_HEAD" 019f4d4d-5dc0-75c1-8efe-adf4531bd733
   run_live confirm task "$attempt" || true
   [ "$(phase_of "$CASE_STATE/task.nm-live")" = waiting-run ] || fail "another branch was not rejected"
+
+  setup_live_case pending-run
+  attempt=$(run_live prepare task '$no-mistakes') || fail "pending-run prepare failed"
+  write_state_status RUN-PENDING "$CASE_HEAD" pending 019f4d4d-5dc0-75c1-8efe-adf4531bd733
+  run_live confirm task "$attempt" || fail "known pending run did not remain safely waiting"
+  [ "$(phase_of "$CASE_STATE/task.nm-live")" = waiting-run ] || fail "pending run was treated as active"
+  assert_no_grep 'tab create' "$CASE_HERDR_LOG" "pending run created a companion"
+  write_state_status RUN-PENDING "$CASE_HEAD" running 019f4d4d-5dc0-75c1-8efe-adf4531bd733
+  run_live reconcile task || fail "pending run did not become eligible after entering running state"
+  [ "$(phase_of "$CASE_STATE/task.nm-live")" = live ] || fail "running transition did not create the pending run's companion"
+
+  setup_live_case unknown-run-status
+  attempt=$(run_live prepare task '$no-mistakes') || fail "unknown-status prepare failed"
+  write_state_status RUN-UNKNOWN "$CASE_HEAD" bogus 019f4d4d-5dc0-75c1-8efe-adf4531bd733
+  run_live confirm task "$attempt" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] && [ "$(phase_of "$CASE_STATE/task.nm-live")" = quarantined ] || fail "unknown run status was not rejected as malformed"
+  assert_no_grep 'tab create' "$CASE_HERDR_LOG" "unknown run status reached Herdr creation"
 
   setup_live_case unavailable
   attempt=$(run_live prepare task '$no-mistakes') || fail "unavailable-status prepare failed"
@@ -519,10 +636,47 @@ test_restart_duplicate_and_binding_safety() {
   run_live reconcile task || fail "bound idle pre-launch restart did not finish launch"
   [ "$(phase_of "$journal")" = live ] || fail "bound idle pre-launch restart did not return live"
   [ "$(grep -c 'pane run' "$CASE_HERDR_LOG")" -eq $((before + 1)) ] || fail "restart did not issue exactly one recorded launch"
+  [ "$(cat "$CASE_HERDR_FOCUS")" = captain ] || fail "successful restart launch changed focus"
 
   printf gone > "$CASE_HERDR_STATE"
   run_live reconcile task || fail "gone live pane did not retire"
   [ ! -e "$journal" ] || fail "gone live pane retained a stale journal"
+
+  setup_live_case restart-binding-mismatch
+  attempt=$(run_live prepare task '$no-mistakes') || fail "restart-binding prepare failed"
+  write_active_status RUN-RB "$CASE_HEAD" 019f4d4d-5dc0-75c1-8efe-adf4531bd733
+  run_live confirm task "$attempt" || fail "restart-binding initial create failed"
+  journal="$CASE_STATE/task.nm-live"
+  sed -i 's/^phase=live$/phase=creating/; s/^launch_state=submitted$/launch_state=not-started/' "$journal"
+  printf idle > "$CASE_HERDR_STATE"
+  before=$(grep -c 'pane run' "$CASE_HERDR_LOG")
+  FM_HERDR_PANE_TAB_OVERRIDE=w-parent:t-other run_live reconcile task >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] && [ "$(phase_of "$journal")" = quarantined ] || fail "restart with mismatched pane binding was not quarantined"
+  [ "$(grep -c 'pane run' "$CASE_HERDR_LOG")" -eq "$before" ] || fail "restart mutated a pane whose exact binding did not match"
+
+  sed -i 's/^phase=quarantined$/phase=creating/; s/^last_error=.*$/last_error=/' "$journal"
+  FM_HERDR_PANE_WORKSPACE_OVERRIDE=w-other run_live reconcile task >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] && [ "$(phase_of "$journal")" = quarantined ] || fail "restart with mismatched pane workspace was not quarantined"
+
+  sed -i 's/^phase=quarantined$/phase=creating/; s/^last_error=.*$/last_error=/' "$journal"
+  FM_HERDR_TAB_ID_OVERRIDE=w-parent:t-other run_live reconcile task >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] && [ "$(phase_of "$journal")" = quarantined ] || fail "restart with mismatched tab identity was not quarantined"
+
+  sed -i 's/^phase=quarantined$/phase=creating/; s/^last_error=.*$/last_error=/' "$journal"
+  FM_HERDR_TAB_WORKSPACE_OVERRIDE=w-other run_live reconcile task >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] && [ "$(phase_of "$journal")" = quarantined ] || fail "restart with mismatched tab workspace was not quarantined"
+  [ "$(grep -c 'pane run' "$CASE_HERDR_LOG")" -eq "$before" ] || fail "restart binding mismatches reached pane launch"
+
+  setup_live_case restart-focus-drift
+  attempt=$(run_live prepare task '$no-mistakes') || fail "restart-focus prepare failed"
+  write_active_status RUN-RF "$CASE_HEAD" 019f4d4d-5dc0-75c1-8efe-adf4531bd733
+  run_live confirm task "$attempt" || fail "restart-focus initial create failed"
+  journal="$CASE_STATE/task.nm-live"
+  sed -i 's/^phase=live$/phase=creating/; s/^launch_state=submitted$/launch_state=not-started/' "$journal"
+  printf idle > "$CASE_HERDR_STATE"
+  FM_HERDR_RUN_FOCUS=view run_live reconcile task >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] && [ "$(phase_of "$journal")" = quarantined ] || fail "restart focus drift was not quarantined"
+  [ "$(cat "$CASE_HERDR_FOCUS")" = captain ] || fail "restart focus drift did not restore the exact prior focus"
 
   setup_live_case thread-disappeared
   attempt=$(run_live prepare task '$no-mistakes') || fail "thread-disappeared prepare failed"
@@ -532,6 +686,20 @@ test_restart_duplicate_and_binding_safety() {
   run_live reconcile task || fail "active thread disappearance cleanup failed"
   [ ! -e "$CASE_STATE/task.nm-live" ] || fail "disappeared active thread retained a companion journal"
   assert_grep 'pane close w-parent:p-view1 --session nm-herdr-lab' "$CASE_HERDR_LOG" "active thread disappearance did not clean the exact pane"
+
+  setup_live_case live-binding-drift
+  attempt=$(run_live prepare task '$no-mistakes') || fail "live-binding-drift prepare failed"
+  write_active_status RUN-LIVE-BIND "$CASE_HEAD" 019f4d4d-5dc0-75c1-8efe-adf4531bd733
+  run_live confirm task "$attempt" || fail "live-binding-drift initial create failed"
+  FM_HERDR_TAB_WORKSPACE_OVERRIDE=w-other run_live reconcile task >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] && [ "$(phase_of "$CASE_STATE/task.nm-live")" = quarantined ] || fail "live state accepted a drifted tab/workspace binding"
+
+  setup_live_case live-wrong-command
+  attempt=$(run_live prepare task '$no-mistakes') || fail "live-wrong-command prepare failed"
+  write_active_status RUN-LIVE-ARGV "$CASE_HEAD" 019f4d4d-5dc0-75c1-8efe-adf4531bd733
+  run_live confirm task "$attempt" || fail "live-wrong-command initial create failed"
+  FM_HERDR_PROCESS_ARGV_MODE=wrong-order run_live reconcile task >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] && [ "$(phase_of "$CASE_STATE/task.nm-live")" = quarantined ] || fail "live state accepted endpoint/thread arguments in the wrong command shape"
 
   setup_live_case binding-reuse
   attempt=$(run_live prepare task '$no-mistakes') || fail "binding reuse prepare failed"
@@ -599,7 +767,37 @@ test_eligibility_axes_and_opt_out() {
   printf 'agent: codex\nagent: codex\ncodex:\n  transport: app-server\n  app_server_endpoint: unix://%s\n' "$CASE_SOCKET" > "$CASE_HOME/.no-mistakes/config.yaml"
   run_live prepare task '$no-mistakes' >/dev/null 2>"$CASE_DIR/duplicate-config.err"; rc=$?
   [ "$rc" -ne 0 ] && [ ! -e "$CASE_STATE/task.nm-live" ] || fail "duplicate no-mistakes agent configuration was accepted"
+
+  setup_live_case invalid-presentation-parent
+  printf 'version=2\ntask_id=task\nmalformed=true\n' > "$CASE_STATE/task.herdr-presentation"
+  chmod 0600 "$CASE_STATE/task.herdr-presentation"
+  run_live prepare task '$no-mistakes' >/dev/null 2>"$CASE_DIR/presentation.err"; rc=$?
+  [ "$rc" -ne 0 ] && [ ! -e "$CASE_STATE/task.nm-live" ] || fail "invalid presentation journal fell back to the flat task workspace"
+  assert_grep 'invalid or mismatched Herdr presentation parent binding' "$CASE_DIR/presentation.err" "invalid presentation binding refusal was not actionable"
+  assert_no_grep 'tab create' "$CASE_HERDR_LOG" "invalid presentation binding reached Herdr creation"
   pass "trigger eligibility: exact canonical harness forms only, ship/no-mistakes/Herdr only, with default-on private opt-out"
+}
+
+test_read_only_diagnostic_verbs() {
+  local endpoint session pane info rendered
+  setup_live_case diagnostic-verbs
+  endpoint="unix://$CASE_DIR/codex ' socket"
+  session=019f4d4d-5dc0-75c1-8efe-adf4531bd733
+  pane=w-parent:p-view1
+  rendered=$(run_live render-command "$endpoint" "$session") || fail "read-only command renderer rejected valid exact identity"
+  [ "$rendered" = "exec codex --remote 'unix://$CASE_DIR/codex '\"'\"' socket' resume '$session'" ] \
+    || fail "read-only command renderer drifted from the safely quoted launch shape"
+  info=$(printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","foreground_processes":[{"name":"codex","argv":["codex","--remote","%s","resume","%s"]}]}}}' "$pane" "$endpoint" "$session")
+  printf '%s\n' "$info" | run_live classify-process-info "$pane" "$endpoint" "$session" \
+    || fail "read-only process classifier rejected the exact command shape"
+  info=$(printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","foreground_processes":[{"name":"codex","argv":["codex","resume","%s","--remote","%s"]}]}}}' "$pane" "$session" "$endpoint")
+  if printf '%s\n' "$info" | run_live classify-process-info "$pane" "$endpoint" "$session"; then
+    fail "read-only process classifier accepted endpoint/thread arguments in the wrong order"
+  fi
+  [ ! -s "$CASE_CODEX_LOG" ] || fail "read-only diagnostics invoked Codex lifecycle"
+  [ ! -s "$CASE_NM_LOG" ] || fail "read-only diagnostics invoked no-mistakes"
+  [ ! -s "$CASE_HERDR_LOG" ] || fail "read-only diagnostics invoked Herdr"
+  pass "read-only live guard boundary: shared command rendering and exact process classification have no lifecycle effects"
 }
 
 make_send_fakes() {  # <dir>
@@ -678,8 +876,10 @@ test_fm_send_seam() {
 
 test_app_server_boundary
 test_trigger_and_live_lifecycle
+test_bounded_capture_and_baseline_binding
 test_rejections_rotation_and_quarantine
 test_run_attribution_matrix
 test_restart_duplicate_and_binding_safety
 test_eligibility_axes_and_opt_out
+test_read_only_diagnostic_verbs
 test_fm_send_seam

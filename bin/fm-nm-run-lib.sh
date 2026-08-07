@@ -138,6 +138,10 @@ fm_nm_attributed_status() {
     FM_NM_ATTRIBUTED_REASON=missing-status
     return 2
   }
+  case "$run_status" in
+    pending|running|completed|failed|cancelled) ;;
+    *) FM_NM_ATTRIBUTED_REASON=malformed-status; return 2 ;;
+  esac
   FM_NM_ATTRIBUTED_OUT=$out
   FM_NM_ATTRIBUTED_ID=$run_id
   FM_NM_ATTRIBUTED_BRANCH=$run_branch
@@ -152,7 +156,7 @@ fm_nm_attributed_status() {
 # interface's exact active_steps table.
 # The table shape is pinned to no-mistakes commit
 # 0d39eadf3f36ed8087794947425d122ca9323f8f.
-# Return 0 includes the valid absent/empty case; return 2 means a malformed,
+# Return 0 includes the valid empty table; return 2 means a missing, malformed,
 # duplicated, truncated, or differently shaped table.
 fm_nm_active_session_ids() {  # <toon-output>
   printf '%s\n' "$1" | awk '
@@ -182,7 +186,10 @@ fm_nm_active_session_ids() {  # <toon-output>
       return n
     }
     /^[[:space:]]*active_steps\[[0-9][0-9]*\]\{step,status,active_for,last_activity,agent_pid,session_id,round\}:[[:space:]]*$/ {
-      if (seen_header++) exit 22
+      if (seen_header++) {
+        bad = 22
+        exit
+      }
       header = $0
       sub(/^[[:space:]]*active_steps\[/, "", header)
       sub(/\].*$/, "", header)
@@ -190,17 +197,26 @@ fm_nm_active_session_ids() {  # <toon-output>
       reading = 1
       next
     }
+    /^[[:space:]]*active_steps/ {
+      bad = 25
+      exit
+    }
     reading && got < want {
       delete fields
       count = csv($0, fields)
-      if (count != 7) exit 23
+      if (count != 7) {
+        bad = 23
+        exit
+      }
       got++
       if (fields[6] != "") print fields[6]
       if (got == want) reading = 0
       next
     }
     END {
-      if (seen_header && got != want) exit 24
+      if (bad) exit bad
+      if (seen_header != 1) exit 26
+      if (got != want) exit 24
     }
   '
 }

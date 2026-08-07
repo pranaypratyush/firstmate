@@ -174,10 +174,7 @@ Operational compromises:
 
 ## No-mistakes live Codex companion
 
-Eligible Herdr no-mistakes ship tasks gain a default-on companion tab in the exact recorded parent workspace without changing the authoritative task endpoint.
-[`codex-app-backend.md`](codex-app-backend.md#no-mistakes-live-companion) owns the trigger, App Server prerequisite, run and thread attribution, private journal, creation, restart, rotation, opt-out, and cleanup contract.
-Herdr contributes only its exact named-session, structured-id, `--no-focus`, process-state, and focus-preserving close primitives.
-The companion label is view-only context and never identity, Firstmate input never targets its pane, and a focused companion is left open for later cleanup.
+[`codex-app-backend.md`](codex-app-backend.md#no-mistakes-live-companion) owns the no-mistakes companion that consumes this adapter's existing structured-identity and focus-preservation interfaces.
 
 ## Default-tab prune safety
 

@@ -8,6 +8,8 @@
 #   fm-nm-live.sh reconcile <task-id>
 #   fm-nm-live.sh reconcile-all
 #   fm-nm-live.sh cleanup <task-id>
+#   fm-nm-live.sh render-command <endpoint> <session-id>
+#   fm-nm-live.sh classify-process-info <pane-id> <endpoint> <session-id>
 #
 # `prepare` is a pre-delivery operation.
 # It recognizes only an exact canonical no-mistakes skill invocation for an
@@ -17,7 +19,8 @@
 # 0600 without creating a Herdr tab.
 # It prints an attempt id only when it prepared an eligible invocation.
 # `confirm` is the only transition that records successful delivery, and then
-# performs one idempotent reconciliation pass.
+# performs a bounded series of idempotent reconciliation passes so a transient
+# active thread identity cannot fall between normal watcher cycles.
 # It never sends or synthesizes the skill invocation.
 #
 # This file is the single owner of eligibility, branch-plus-head run binding,
@@ -38,6 +41,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 NM_TIMEOUT=${FM_NM_LIVE_STATUS_TIMEOUT:-5}
+CAPTURE_TIMEOUT=${FM_NM_LIVE_CAPTURE_TIMEOUT:-5}
+CAPTURE_POLL=${FM_NM_LIVE_CAPTURE_POLL:-0.1}
 PREPARED_TTL=${FM_NM_LIVE_PREPARED_TTL:-300}
 APP_SERVER_HELPER=${FM_NM_LIVE_APP_SERVER_HELPER:-$SCRIPT_DIR/fm-codex-app-server.sh}
 
@@ -346,14 +351,16 @@ resolve_parent() {  # uses E_META/E_HOME_REAL
   valid_atom "$session" || { warn "task $J_TASK_ID has a malformed Herdr session"; return 1; }
   parent=
   fm_backend_source herdr || return 1
-  if [ -f "$presentation" ] && [ ! -L "$presentation" ] \
-    && fm_backend_herdr_projection_journal_snapshot "$presentation" "$J_TASK_ID" \
-    && [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
-    && [ "$FM_BACKEND_HERDR_JOURNAL_HOME" = "$E_HOME_REAL" ] \
-    && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ]; then
+  if [ -e "$presentation" ] || [ -L "$presentation" ]; then
+    if ! fm_backend_herdr_projection_journal_snapshot "$presentation" "$J_TASK_ID" \
+      || [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 2 ] \
+      || [ "$FM_BACKEND_HERDR_JOURNAL_HOME" != "$E_HOME_REAL" ] \
+      || [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ]; then
+      warn "task $J_TASK_ID has an invalid or mismatched Herdr presentation parent binding"
+      return 1
+    fi
     parent=$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID
-  fi
-  if [ -z "$parent" ]; then
+  else
     workspace=$(fm_meta_get "$E_META" herdr_workspace_id)
     parent=$workspace
   fi
@@ -385,18 +392,15 @@ app_server_snapshot() {
 }
 
 baseline_snapshot() {
-  local sessions rc
+  local rc
   if fm_nm_attributed_status "$J_WORKTREE_REAL" "$J_BRANCH" "$NM_TIMEOUT"; then
     J_BASELINE_RUN_ID=$FM_NM_ATTRIBUTED_ID
-    sessions=$(fm_nm_active_session_ids "$FM_NM_ATTRIBUTED_OUT")
+    run_is_terminal && return 0
+    exact_active_session
     rc=$?
-    [ "$rc" -eq 0 ] || return 1
-    case "$(printf '%s\n' "$sessions" | sed '/^$/d' | wc -l | tr -d ' ')" in
-      0) ;;
-      1)
-        J_BASELINE_SESSION_ID=$(printf '%s\n' "$sessions" | sed '/^$/d')
-        valid_uuid "$J_BASELINE_SESSION_ID" || return 1
-        ;;
+    case "$rc" in
+      0) J_BASELINE_SESSION_ID=$ACTIVE_SESSION ;;
+      1) ;;
       *) return 1 ;;
     esac
   else
@@ -462,7 +466,7 @@ confirm() {  # <task-id> <attempt-id>
   J_LAST_ERROR=
   journal_write "$journal" || { fm_lock_release "$lock"; return 1; }
   fm_lock_release "$lock"
-  reconcile "$id"
+  capture_after_delivery "$id"
 }
 
 current_binding_matches() {
@@ -520,19 +524,28 @@ companion_command() {
   printf 'exec codex --remote %s resume %s' "$(shell_quote "$J_CODEX_ENDPOINT")" "$(shell_quote "$J_SESSION_ID")"
 }
 
+companion_process_info_matches() {  # <json> <pane-id> <endpoint> <session-id>
+  printf '%s' "$1" | jq -e --arg pane "$2" --arg endpoint "$3" --arg session "$4" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+    and any(.result.process_info.foreground_processes[]?;
+      (((.name // "") | split("/") | last) == "codex")
+      and ((.argv // []) as $argv
+        | ($argv | length) == 5
+        and (($argv[0] | split("/") | last) == "codex")
+        and $argv[1] == "--remote"
+        and $argv[2] == $endpoint
+        and $argv[3] == "resume"
+        and $argv[4] == $session))
+  ' >/dev/null 2>&1
+}
+
 pane_live_state() {  # prints codex|idle|dead|unknown
   local presence info
   presence=$(fm_backend_herdr_pane_presence_state "$J_HERDR_SESSION" "$J_HERDR_PANE_ID")
   case "$presence" in dead) printf dead; return 0 ;; present) ;; *) printf unknown; return 0 ;; esac
   info=$(fm_backend_herdr_cli "$J_HERDR_SESSION" pane process-info --pane "$J_HERDR_PANE_ID" 2>/dev/null) || { printf unknown; return 0; }
-  if printf '%s' "$info" | jq -e --arg pane "$J_HERDR_PANE_ID" --arg endpoint "$J_CODEX_ENDPOINT" --arg session "$J_SESSION_ID" '
-    .result.type == "pane_process_info"
-    and .result.process_info.pane_id == $pane
-    and any(.result.process_info.foreground_processes[]?;
-      (((.name // "") | split("/") | last) == "codex")
-      and ((.argv // []) | index($endpoint)) != null
-      and ((.argv // []) | index($session)) != null)
-  ' >/dev/null 2>&1; then
+  if companion_process_info_matches "$info" "$J_HERDR_PANE_ID" "$J_CODEX_ENDPOINT" "$J_SESSION_ID"; then
     printf codex
   elif fm_backend_herdr_pane_idle_shell_pid "$J_HERDR_SESSION" "$J_HERDR_PANE_ID" >/dev/null 2>&1; then
     printf idle
@@ -548,8 +561,40 @@ acquire_session_lock() {
 
 release_session_lock() { [ -z "${SESSION_LOCK:-}" ] || fm_lock_release "$SESSION_LOCK" || true; SESSION_LOCK=; }
 
+recorded_companion_binding_matches() {
+  local pane_info tab_info
+  pane_info=$(fm_backend_herdr_cli "$J_HERDR_SESSION" pane get "$J_HERDR_PANE_ID" 2>/dev/null) || return 1
+  printf '%s' "$pane_info" | jq -e \
+    --arg pane "$J_HERDR_PANE_ID" \
+    --arg tab "$J_HERDR_TAB_ID" \
+    --arg workspace "$J_HERDR_PARENT_WORKSPACE_ID" '
+      .result.pane.pane_id == $pane
+      and .result.pane.tab_id == $tab
+      and .result.pane.workspace_id == $workspace
+    ' >/dev/null 2>&1 || return 1
+  tab_info=$(fm_backend_herdr_cli "$J_HERDR_SESSION" tab get "$J_HERDR_TAB_ID" 2>/dev/null) || return 1
+  printf '%s' "$tab_info" | jq -e \
+    --arg tab "$J_HERDR_TAB_ID" \
+    --arg workspace "$J_HERDR_PARENT_WORKSPACE_ID" '
+      .result.tab.tab_id == $tab
+      and .result.tab.workspace_id == $workspace
+    ' >/dev/null 2>&1
+}
+
+launch_companion_preserving_focus() {  # <focus-snapshot> <context>; session lock held
+  local focus_before=$1 context=$2 command focus_after rc
+  command=$(companion_command)
+  fm_backend_herdr_cli "$J_HERDR_SESSION" pane run "$J_HERDR_PANE_ID" "$command" >/dev/null 2>&1
+  rc=$?
+  focus_after=$(fm_backend_herdr_projection_focus_snapshot "$J_HERDR_SESSION" 2>/dev/null || true)
+  if [ "$rc" -ne 0 ] || [ "$focus_after" != "$focus_before" ]; then
+    fm_backend_herdr_projection_focus_restore "$J_HERDR_SESSION" "$focus_before" "$context" >/dev/null 2>&1 || true
+    return 1
+  fi
+}
+
 create_companion() {  # task lock held, journal loaded and attributed
-  local journal out focus_before focus_after tab pane command short_run rc
+  local journal out focus_before focus_after tab pane short_run rc
   journal=$(journal_path "$J_TASK_ID")
   pair_claimed_elsewhere "$J_TASK_ID" "$J_RUN_ID" "$J_SESSION_ID" && {
     J_PHASE=quarantined J_LAST_ERROR="run/session pair is already claimed by another task journal"
@@ -580,35 +625,42 @@ create_companion() {  # task lock held, journal loaded and attributed
     --no-focus 2>/dev/null)
   rc=$?
   focus_after=$(fm_backend_herdr_projection_focus_snapshot "$J_HERDR_SESSION" 2>/dev/null || true)
-  if [ "$rc" -ne 0 ] || [ "$focus_after" != "$focus_before" ]; then
+  if [ "$rc" -ne 0 ]; then
     fm_backend_herdr_projection_focus_restore "$J_HERDR_SESSION" "$focus_before" "no-mistakes companion create" >/dev/null 2>&1 || true
     release_session_lock
-    J_PHASE=quarantined J_LAST_ERROR="Herdr tab creation response or focus preservation was ambiguous"
+    J_PHASE=quarantined J_LAST_ERROR="Herdr tab creation response was ambiguous"
     journal_write "$journal"
     return 1
   fi
   tab=$(printf '%s' "$out" | jq -er '.result.tab.tab_id | select(type == "string" and length > 0)' 2>/dev/null) || tab=
   pane=$(printf '%s' "$out" | jq -er '.result.root_pane.pane_id | select(type == "string" and length > 0)' 2>/dev/null) || pane=
   if ! valid_atom "$tab" || ! valid_atom "$pane"; then
+    if [ "$focus_after" != "$focus_before" ]; then
+      fm_backend_herdr_projection_focus_restore "$J_HERDR_SESSION" "$focus_before" "no-mistakes companion create" >/dev/null 2>&1 || true
+    fi
     release_session_lock
     J_PHASE=quarantined J_LAST_ERROR="Herdr tab creation returned incomplete exact ids"
     journal_write "$journal"
     return 1
   fi
   J_HERDR_TAB_ID=$tab J_HERDR_PANE_ID=$pane
-  journal_write "$journal" || { release_session_lock; return 1; }
-  command=$(companion_command)
-  if ! fm_backend_herdr_cli "$J_HERDR_SESSION" pane run "$J_HERDR_PANE_ID" "$command" >/dev/null 2>&1; then
+  if ! journal_write "$journal"; then
+    if [ "$focus_after" != "$focus_before" ]; then
+      fm_backend_herdr_projection_focus_restore "$J_HERDR_SESSION" "$focus_before" "no-mistakes companion create" >/dev/null 2>&1 || true
+    fi
     release_session_lock
-    J_PHASE=quarantined J_LAST_ERROR="Herdr pane launch response was ambiguous"
+    return 1
+  fi
+  if [ "$focus_after" != "$focus_before" ]; then
+    fm_backend_herdr_projection_focus_restore "$J_HERDR_SESSION" "$focus_before" "no-mistakes companion create" >/dev/null 2>&1 || true
+    release_session_lock
+    J_PHASE=quarantined J_LAST_ERROR="Herdr tab creation did not preserve exact focus"
     journal_write "$journal"
     return 1
   fi
-  focus_after=$(fm_backend_herdr_projection_focus_snapshot "$J_HERDR_SESSION" 2>/dev/null || true)
-  if [ "$focus_after" != "$focus_before" ]; then
-    fm_backend_herdr_projection_focus_restore "$J_HERDR_SESSION" "$focus_before" "no-mistakes companion launch" >/dev/null 2>&1 || true
+  if ! launch_companion_preserving_focus "$focus_before" "no-mistakes companion launch"; then
     release_session_lock
-    J_PHASE=quarantined J_LAST_ERROR="companion launch did not preserve exact focus"
+    J_PHASE=quarantined J_LAST_ERROR="Herdr pane launch response or focus preservation was ambiguous"
     journal_write "$journal"
     return 1
   fi
@@ -682,39 +734,53 @@ close_companion() {  # task lock held; returns 0 retired/promoted, 1 deferred/qu
 }
 
 recover_creating() {  # task lock held
-  local state journal command
+  local state journal focus_before
   journal=$(journal_path "$J_TASK_ID")
   if [ -z "$J_HERDR_TAB_ID" ] || [ -z "$J_HERDR_PANE_ID" ]; then
     J_PHASE=quarantined J_LAST_ERROR="restart found an unbound Herdr creation attempt"
     journal_write "$journal"
     return 1
   fi
+  acquire_session_lock || { J_LAST_ERROR="Herdr presentation lock is unavailable"; journal_write "$journal"; return 1; }
+  if ! recorded_companion_binding_matches; then
+    release_session_lock
+    J_PHASE=quarantined J_LAST_ERROR="restart found an ambiguous recorded workspace/tab/pane binding"
+    journal_write "$journal"
+    return 1
+  fi
   state=$(pane_live_state)
   case "$state" in
     codex)
+      release_session_lock
       J_PHASE=live J_LAUNCH_STATE=submitted J_LAST_ERROR=
       journal_write "$journal"
       ;;
     idle)
-      acquire_session_lock || return 1
-      command=$(companion_command)
-      if fm_backend_herdr_cli "$J_HERDR_SESSION" pane run "$J_HERDR_PANE_ID" "$command" >/dev/null 2>&1; then
+      focus_before=$(fm_backend_herdr_projection_focus_snapshot "$J_HERDR_SESSION") || {
+        release_session_lock
+        J_PHASE=quarantined J_LAST_ERROR="could not capture exact pre-restart focus"
+        journal_write "$journal"
+        return 1
+      }
+      if launch_companion_preserving_focus "$focus_before" "no-mistakes companion restart launch"; then
         release_session_lock
         J_PHASE=live J_LAUNCH_STATE=submitted J_LAST_ERROR=
         journal_write "$journal"
       else
         release_session_lock
-        J_PHASE=quarantined J_LAST_ERROR="restart launch response was ambiguous"
+        J_PHASE=quarantined J_LAST_ERROR="restart launch response or focus preservation was ambiguous"
         journal_write "$journal"
         return 1
       fi
       ;;
     dead)
+      release_session_lock
       J_PHASE=quarantined J_LAST_ERROR="bound pre-launch pane disappeared"
       journal_write "$journal"
       return 1
       ;;
     *)
+      release_session_lock
       J_PHASE=quarantined J_LAST_ERROR="bound creating pane has ambiguous live state"
       journal_write "$journal"
       return 1
@@ -758,7 +824,12 @@ reconcile_locked() {  # task lock held, journal already loaded
     attr_rc=$?
   fi
   if [ "$attr_rc" -eq 2 ]; then
-    J_LAST_ERROR="no-mistakes status is temporarily unavailable or malformed"
+    if [ "$FM_NM_ATTRIBUTED_REASON" != query-failed ]; then
+      J_PHASE=quarantined J_LAST_ERROR="no-mistakes returned a malformed attributed run"
+      journal_write "$journal"
+      return 1
+    fi
+    J_LAST_ERROR="no-mistakes status is temporarily unavailable"
     journal_write "$journal"
     return 1
   fi
@@ -788,6 +859,21 @@ reconcile_locked() {  # task lock held, journal already loaded
     return 0
   fi
 
+  if [ "$FM_NM_ATTRIBUTED_STATUS" = pending ]; then
+    if [ -n "$J_HERDR_PANE_ID" ]; then
+      J_PHASE=thread-complete J_TERMINAL_SEEN_AT=$(date +%s) J_LAST_ERROR="attributed run is no longer active"
+      journal_write "$journal"
+      close_companion
+    else
+      if [ -n "$J_RUN_ID" ] || [ "$FM_NM_ATTRIBUTED_ID" != "$J_BASELINE_RUN_ID" ]; then
+        J_RUN_ID=$FM_NM_ATTRIBUTED_ID J_RUN_HEAD=$FM_NM_ATTRIBUTED_HEAD
+      fi
+      J_PHASE=waiting-run J_LAST_ERROR=
+      journal_write "$journal"
+    fi
+    return 0
+  fi
+
   exact_active_session
   session_rc=$?
   if [ "$session_rc" -eq 2 ]; then
@@ -800,7 +886,9 @@ reconcile_locked() {  # task lock held, journal already loaded
       journal_write "$journal"
       close_companion
     else
-      J_RUN_ID=$FM_NM_ATTRIBUTED_ID J_RUN_HEAD=$FM_NM_ATTRIBUTED_HEAD
+      if [ -n "$J_RUN_ID" ] || [ "$FM_NM_ATTRIBUTED_ID" != "$J_BASELINE_RUN_ID" ]; then
+        J_RUN_ID=$FM_NM_ATTRIBUTED_ID J_RUN_HEAD=$FM_NM_ATTRIBUTED_HEAD
+      fi
       J_PHASE=waiting-run J_LAST_ERROR=
       journal_write "$journal"
     fi
@@ -830,10 +918,38 @@ reconcile_locked() {  # task lock held, journal already loaded
 
   state=$(pane_live_state)
   case "$state" in
-    codex) J_PHASE=live J_LAST_ERROR=; journal_write "$journal" ;;
+    codex)
+      if ! recorded_companion_binding_matches; then
+        J_PHASE=quarantined J_LAST_ERROR="live companion workspace/tab/pane binding is ambiguous"
+        journal_write "$journal"
+        return 1
+      fi
+      J_PHASE=live J_LAST_ERROR=
+      journal_write "$journal"
+      ;;
     dead) rm -f "$journal" ;;
     *) J_PHASE=quarantined J_LAST_ERROR="live companion pane state is ambiguous"; journal_write "$journal"; return 1 ;;
   esac
+}
+
+capture_after_delivery() {  # <task-id>
+  local id=$1 deadline now phase rc
+  case "$CAPTURE_TIMEOUT" in ''|*[!0-9]*) warn "FM_NM_LIVE_CAPTURE_TIMEOUT must be a non-negative integer"; return 1 ;; esac
+  [[ $CAPTURE_POLL =~ ^[0-9]+([.][0-9]+)?$ ]] || { warn "FM_NM_LIVE_CAPTURE_POLL must be a non-negative number"; return 1; }
+  now=$(date +%s)
+  deadline=$((now + CAPTURE_TIMEOUT))
+  while :; do
+    reconcile "$id"
+    rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    [ -f "$(journal_path "$id")" ] || return 0
+    phase=$(journal_field "$(journal_path "$id")" phase 2>/dev/null) || return 1
+    case "$phase" in delivery-confirmed|waiting-run) ;; *) return 0 ;; esac
+    [ "$CAPTURE_TIMEOUT" -gt 0 ] || return 0
+    now=$(date +%s)
+    [ "$now" -le "$deadline" ] || return 0
+    sleep "$CAPTURE_POLL"
+  done
 }
 
 reconcile() {  # <task-id>
@@ -888,8 +1004,31 @@ cleanup() {  # <task-id>
   return "$rc"
 }
 
-mkdir -p "$STATE" || exit 1
+render_command() {  # <endpoint> <session-id>
+  case "$1" in unix:///*) ;; *) return 1 ;; esac
+  case "$1" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  valid_uuid "$2" || return 1
+  J_CODEX_ENDPOINT=$1 J_SESSION_ID=$2
+  companion_command
+}
+
+classify_process_info() {  # <pane-id> <endpoint> <session-id>
+  local info
+  valid_atom "$1" || return 1
+  case "$2" in unix:///*) ;; *) return 1 ;; esac
+  case "$2" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  valid_uuid "$3" || return 1
+  info=$(cat) || return 1
+  companion_process_info_matches "$info" "$1" "$2" "$3"
+}
+
 command=${1:-}
+case "$command" in
+  render-command) [ "$#" -eq 3 ] || { usage >&2; exit 2; }; render_command "$2" "$3"; exit $? ;;
+  classify-process-info) [ "$#" -eq 4 ] || { usage >&2; exit 2; }; classify_process_info "$2" "$3" "$4"; exit $? ;;
+  -h|--help) usage; exit ;;
+esac
+mkdir -p "$STATE" || exit 1
 case "$command" in
   prepare) [ "$#" -eq 3 ] || { usage >&2; exit 2; }; prepare "$2" "$3" ;;
   confirm) [ "$#" -eq 3 ] || { usage >&2; exit 2; }; confirm "$2" "$3" ;;
@@ -897,6 +1036,5 @@ case "$command" in
   reconcile) [ "$#" -eq 2 ] || { usage >&2; exit 2; }; reconcile "$2" ;;
   reconcile-all) [ "$#" -eq 1 ] || { usage >&2; exit 2; }; reconcile_all ;;
   cleanup) [ "$#" -eq 2 ] || { usage >&2; exit 2; }; cleanup "$2" ;;
-  -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

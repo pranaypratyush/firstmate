@@ -281,6 +281,12 @@ if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ]; then
   fi
 fi
 
+nm_live_cancel_prepared() {
+  [ -n "${NM_LIVE_ATTEMPT:-}" ] || return 0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "${FM_NM_LIVE_HELPER:-$SCRIPT_DIR/fm-nm-live.sh}" cancel "$TARGET_TASK_ID" "$NM_LIVE_ATTEMPT" >/dev/null 2>&1 || true
+}
+
 # Resolve the target's harness from its meta (recorded by fm-spawn), used only to
 # scope the codex `$<skill>` popup-settle below. A task selector carries
 # meta; an explicit backend-target escape hatch has none, so its harness is
@@ -372,10 +378,7 @@ else
     send_rc=$?
   fi
   if [ "$send_rc" -ne 0 ]; then
-    if [ -n "$NM_LIVE_ATTEMPT" ]; then
-      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-        "${FM_NM_LIVE_HELPER:-$SCRIPT_DIR/fm-nm-live.sh}" cancel "$TARGET_TASK_ID" "$NM_LIVE_ATTEMPT" >/dev/null 2>&1 || true
-    fi
+    nm_live_cancel_prepared
     if [ "$TARGET_BACKEND" = remote ] && [ "$send_rc" -eq 255 ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
       echo "error: text delivery to remote secondmate $TARGET_REMOTE_ID is unknown; do not resend - same-host reconciliation is required" >&2
@@ -391,10 +394,7 @@ else
     empty)
       ;;
     send-failed)
-      if [ -n "$NM_LIVE_ATTEMPT" ]; then
-        FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-          "${FM_NM_LIVE_HELPER:-$SCRIPT_DIR/fm-nm-live.sh}" cancel "$TARGET_TASK_ID" "$NM_LIVE_ATTEMPT" >/dev/null 2>&1 || true
-      fi
+      nm_live_cancel_prepared
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
@@ -402,10 +402,7 @@ else
       exit 1
       ;;
     *)
-      if [ -n "$NM_LIVE_ATTEMPT" ]; then
-        FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-          "${FM_NM_LIVE_HELPER:-$SCRIPT_DIR/fm-nm-live.sh}" cancel "$TARGET_TASK_ID" "$NM_LIVE_ATTEMPT" >/dev/null 2>&1 || true
-      fi
+      nm_live_cancel_prepared
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi

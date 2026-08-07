@@ -672,3 +672,57 @@ The host-tool sequence was:
 Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files when the prompt provides an authorized absolute path, and create, send, read, and archive work at the Desktop host-tool layer.
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
+
+## No-mistakes Codex companion
+
+The deterministic managed-lifecycle and Herdr interface matrix was re-run on 2026-08-07:
+
+```sh
+bin/fm-test-run.sh tests/fm-nm-live.test.sh
+```
+
+It passed lifecycle JSON normalization and rejection, private Unix-socket validation, no stop/restart fallback, exact endpoint/thread argv classification, unfocused creation, restart binding, focus restoration, and exact cleanup against fake executable surfaces.
+
+Bounded output:
+
+```text
+ok - managed App Server: lifecycle JSON, exact private socket, normalized endpoint, and no stop/restart fallback
+ok - post-delivery capture: transient identity retained and pre-existing sessionless baseline never pinned
+ok - run attribution matrix: descendant accepted; advanced, diverged, detached, stale, terminal-baseline, malformed, and unavailable sources rejected
+ok - restart and authority matrix: unbound quarantine, bound launch recovery, gone or disappeared thread retirement, task-binding refusal, duplicate prevention, and orphan cleanup
+```
+
+The installed-interface drift guard is:
+
+```sh
+FM_NM_LIVE_HERDR_PROCESS_E2E=1 \
+FM_NM_LIVE_SMOKE_THREAD_ID=<disposable-thread-uuid> \
+bin/fm-test-run.sh tests/fm-nm-live-herdr-process-live-e2e.test.sh
+```
+
+It performs read-only managed App Server inspection before provisioning a named non-default Herdr lab, then checks the real `pane process-info` name and argv shape for the exact remote endpoint and disposable thread.
+It does not create a Codex thread, start or replace the shared server, or invoke no-mistakes, so it is a drift guard rather than the mandatory multi-client acceptance smoke.
+
+On 2026-08-07 the system CLI was Codex 0.146.1, and the read-only prerequisite probe stopped before Herdr provisioning because the managed standalone Codex installation was absent.
+The real process/argv observation and multi-client smoke therefore remain blocked on that installation decision; no server was installed, started, stopped, or replaced.
+
+Commands:
+
+```sh
+codex --version
+test -x "${CODEX_HOME:-$HOME/.codex}/packages/standalone/current/codex" \
+  && printf 'managed_standalone=present\n' \
+  || printf 'managed_standalone=absent\n'
+FM_NM_LIVE_HERDR_PROCESS_E2E=1 \
+FM_NM_LIVE_SMOKE_THREAD_ID=<disposable-thread-uuid> \
+bin/fm-test-run.sh tests/fm-nm-live-herdr-process-live-e2e.test.sh
+```
+
+Bounded output:
+
+```text
+codex-cli 0.146.1
+managed_standalone=absent
+fm-codex-app-server: managed Codex App Server inspection failed; run 'bin/fm-codex-app-server.sh ensure' after its standalone installation is approved
+not ok - managed Codex App Server read-only inspection failed; do not install or start it from this guard
+```

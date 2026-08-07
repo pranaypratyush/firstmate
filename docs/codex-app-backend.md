@@ -10,37 +10,15 @@ An eligible Herdr `kind=ship`, `mode=no-mistakes` task opens an unfocused compan
 This is a view-oriented companion to the no-mistakes-owned structured turn, not a Firstmate runtime backend and not a second delivery path.
 The current Codex TUI remains interactive, so typing into the companion can interfere with the no-mistakes-owned turn even though Firstmate never routes messages, approvals, or lifecycle input there.
 
-The trigger recognizes only the harness adapter's exact canonical no-mistakes invocation after `fm-send` has resolved a recorded task selector.
-Claude, Grok, and Kimi use `/no-mistakes`, Codex uses `$no-mistakes`, and the OpenCode, Pi, Pi Signed, and Muse natural-language surfaces are not inferred.
-Preflight validates the exact task and parent workspace and may ensure the shared managed App Server, but it creates no tab and never submits or rewrites the skill invocation.
-Only a successful backend delivery verdict activates the journal and reconciliation.
-A later companion failure is reported as already-delivered and never invites resending the skill.
+The companion activates only after `fm-send` successfully delivers the eligible task's canonical no-mistakes invocation.
+Preflight may prepare the exact parent and shared server state, but it never delivers the invocation, and a later companion failure cannot turn an already-delivered command into an unsent result.
 
-The no-mistakes interface is pinned to commit `0d39eadf3f36ed8087794947425d122ca9323f8f`.
-The global no-mistakes config must select the singular `agent: codex`, `codex.transport: app-server`, and a local `codex.app_server_endpoint` matching the managed endpoint or the `unix://` default alias.
-Eligible active steps expose their exact thread identity as `active_steps[].session_id`.
-Firstmate accepts exactly one canonical UUID from a causally matching active run whose branch and head pass the shared attribution rule in `bin/fm-nm-run-lib.sh`.
-Detached, another-branch, stale, locally advanced, diverged, terminal, malformed, multiple, or already-claimed identities never create a companion.
+The headers of `bin/fm-codex-app-server.sh`, `bin/fm-nm-run-lib.sh`, and `bin/fm-nm-live.sh` own the lifecycle, attribution, journal, Herdr mutation, recovery, and cleanup mechanics.
+Their public safety boundary is that Firstmate never discovers identity globally, never uses a label as authority, never routes input or approvals to the companion, and never stops a shared Codex or no-mistakes daemon or closes a Herdr workspace.
+Malformed or ambiguous identity and mutation results fail closed, while focused cleanup is deferred for a later safe cycle.
 
-`bin/fm-codex-app-server.sh` is the sole owner of managed App Server lifecycle JSON and socket validation.
-It invokes only the idempotent managed daemon start or read-only inspection, accepts only a positive managed pid with matching nonempty CLI, App Server, and managed Codex versions, and validates the exact absolute non-symlink Unix socket as current-user-owned mode 0600 before returning a normalized `unix:///absolute/path` endpoint.
-It never scans processes or sockets and never stops or restarts the shared server.
-A missing managed standalone installation fails with a bootstrap and current-session consent diagnostic; Firstmate does not install it implicitly.
-
-`bin/fm-nm-live.sh` owns the mode-0600 `state/<task-id>.nm-live` journal, run and thread attribution, exact Herdr creation, restart reconciliation, duplicate prevention, rotation, quarantine, and focus-safe cleanup.
-The tab is created in the journal's exact named session and exact parent workspace with `--no-focus`, a `VIEW ONLY` no-mistakes label, and `$FM_HOME/state` as its local cwd.
-Only the exact returned root pane receives one safely quoted `codex --remote <endpoint> resume <session-id>` launch.
-Labels and global focus are never identity or adoption sources.
-Lost or malformed mutation responses quarantine the attempt instead of searching by label.
-Normal watcher cycles and locked startup reconcile the journal idempotently.
-Terminal or rotated threads close only the exact nonfocused pane; a focused companion records `cleanup-deferred` and remains open until a later safe cycle.
-Teardown asks for this exact cleanup before removing task state, and a deferred journal deliberately survives missing task metadata so locked startup can finish it later.
-No companion path closes a Herdr workspace, stops the shared Codex or no-mistakes daemon, archives the server thread, or changes focus as cleanup policy.
-
-A home opts out by writing `off` to its private gitignored `config/nm-live-view`.
-Absence, an empty file, and `on` mean enabled, while an unrecognized value warns and keeps the default-on behavior.
-The setting follows the primary-authoritative secondmate inheritance contract in `.agents/skills/secondmate-provisioning/SKILL.md`.
-`tests/fm-nm-live.test.sh` is the deterministic fake-surface regression entry point.
+[`configuration.md`](configuration.md) owns the private `config/nm-live-view` schema and inheritance behavior.
+`tests/fm-nm-live.test.sh` is the deterministic fake-surface regression entry point, and `tests/fm-nm-live-herdr-process-live-e2e.test.sh` is the opt-in installed-interface drift guard.
 
 ## Acceptance contract
 
