@@ -31,6 +31,7 @@
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
     "docs/cmux-backend.md",
+    "docs/indexing-tools-cachyos.md",
     "docs/remote-secondmates.md"
   ],
   "requiredOwnerPointers": [
@@ -262,6 +263,10 @@
     },
     {
       "path": "docs/herdr-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/indexing-tools-cachyos.md",
       "audience": "operator-current"
     },
     {
