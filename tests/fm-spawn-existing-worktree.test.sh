@@ -20,12 +20,32 @@ make_fakebin() {
 set -u
 [ -z "${FM_ADOPT_TMUX_LOG:-}" ] || printf 'tmux %s\n' "$*" >> "$FM_ADOPT_TMUX_LOG"
 case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_path}"*)
+    case "$*" in
+      *"-t @777"*) printf '%s\n' "${FM_ADOPT_LIVE_PANE_PATH:-${FM_FAKE_PANE_PATH:-}}" ;;
+      *) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
+    esac
+    exit 0
+    ;;
 esac
 case "${1:-}" in
   display-message) printf '%s\n' firstmate ;;
   list-windows)
-    [ -z "${FM_ADOPT_WINDOW_STATE:-}" ] || [ ! -s "$FM_ADOPT_WINDOW_STATE" ] || cat "$FM_ADOPT_WINDOW_STATE"
+    case "$*" in
+      *"#{window_id}"*"#{window_panes}"*)
+        [ "${FM_ADOPT_INVENTORY_ERROR:-0}" != 1 ] || exit 2
+        printf '@1|firstmate|1\n'
+        if [ -n "${FM_ADOPT_WINDOW_STATE:-}" ] && [ -s "$FM_ADOPT_WINDOW_STATE" ]; then
+          while IFS= read -r listed_window; do
+            [ -n "$listed_window" ] || continue
+            printf '@777|%s|1\n' "$listed_window"
+          done < "$FM_ADOPT_WINDOW_STATE"
+        fi
+        ;;
+      *)
+        [ -z "${FM_ADOPT_WINDOW_STATE:-}" ] || [ ! -s "$FM_ADOPT_WINDOW_STATE" ] || cat "$FM_ADOPT_WINDOW_STATE"
+        ;;
+    esac
     ;;
   new-window)
     window=
@@ -97,8 +117,9 @@ setup_case() {  # <name> <task-id> <ship|scout>
 run_spawn() {  # <id> <ship|scout> <existing-path> [extra args...]
   local id=$1 kind=$2 existing=$3
   shift 3
+  local project_arg=${FM_ADOPT_PROJECT_ARG:-$PROJ}
   local -a args
-  args=("$id" "$PROJ" --harness codex --backend tmux --existing-worktree "$existing")
+  args=("$id" "$project_arg" --harness codex --backend tmux --existing-worktree "$existing")
   if [ "$kind" = scout ]; then
     args+=(--scout)
   else
@@ -111,6 +132,8 @@ run_spawn() {  # <id> <ship|scout> <existing-path> [extra args...]
     FM_ADOPT_TMUX_LOG="$TLOG" FM_ADOPT_TREEHOUSE_LOG="$TREELOG" \
     FM_ADOPT_WINDOW_STATE="$WINDOW_STATE" FM_ADOPT_SEND_COUNT="$SEND_COUNT" \
     FM_ADOPT_FAIL_SEND_AT="${FM_ADOPT_FAIL_SEND_AT:-0}" \
+    FM_ADOPT_INVENTORY_ERROR="${FM_ADOPT_INVENTORY_ERROR:-0}" \
+    FM_ADOPT_LIVE_PANE_PATH="${FM_ADOPT_LIVE_PANE_PATH:-}" \
     FM_ADOPT_GIT_COUNT="${FM_ADOPT_GIT_COUNT:-}" FM_ADOPT_GIT_MUTATE_AT="${FM_ADOPT_GIT_MUTATE_AT:-0}" \
     FM_ADOPT_MUTATE_WT="${FM_ADOPT_MUTATE_WT:-}" FM_ADOPT_REAL_GIT="$REAL_GIT" \
     PATH="$FAKEBIN:$PATH" \
@@ -231,6 +254,27 @@ test_input_and_ownership_refusals_precede_endpoint() {
   assert_no_endpoint_created
 
   pass "fm-spawn refuses non-exact, primary, foreign, symlinked, claimed, and detached worktrees before endpoint creation"
+}
+
+test_live_claims_and_ambiguous_tmux_inventory_refuse() {
+  local id out status
+  id=adopt-live-claim-h9
+  setup_case live-claim "$id" ship
+  printf '%s\n' fm-other-task > "$WINDOW_STATE"
+  out=$(FM_ADOPT_LIVE_PANE_PATH="$WT" run_spawn "$id" ship "$WT"); status=$?
+  expect_code 1 "$status" "live different-task worktree claim should refuse"
+  assert_contains "$out" 'already claimed by live tmux task other-task' "live claim refusal did not identify the different task"
+  assert_no_endpoint_created
+  assert_absent "$HOME_DIR/state/$id.meta" "live claim refusal published metadata"
+
+  id=adopt-inventory-ambiguous-i0
+  setup_case inventory-ambiguous "$id" ship
+  out=$(FM_ADOPT_INVENTORY_ERROR=1 run_spawn "$id" ship "$WT"); status=$?
+  expect_code 1 "$status" "unreadable live tmux inventory should refuse"
+  assert_contains "$out" 'live tmux task inventory is ambiguous' "inventory refusal did not explain the fail-closed boundary"
+  assert_no_endpoint_created
+  assert_absent "$HOME_DIR/state/$id.meta" "ambiguous inventory refusal published metadata"
+  pass "fm-spawn refuses live metadata-free claims and ambiguous tmux task inventory"
 }
 
 test_incompatible_modes_refuse_before_endpoint() {
@@ -450,9 +494,146 @@ SH
   pass "fm-teardown never scans or reaps arbitrary processes by adopted-worktree cwd"
 }
 
+test_adopted_teardown_preserves_index_lock() {
+  local id=adopt-index-lock-q6 out status origin lock
+  setup_case index-lock "$id" ship
+  origin="$CASE/origin.git"
+  git init -q --bare "$origin"
+  git -C "$PROJ" remote add origin "$origin"
+  git -C "$PROJ" push -q origin main
+  git -C "$WT" push -q -u origin "recovered/$id"
+  run_spawn "$id" ship "$WT" >/dev/null
+  lock=$(git -C "$WT" rev-parse --git-path index.lock)
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -d '2 minutes ago' "$lock"
+  cat > "$FAKEBIN/lsof" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$FAKEBIN/lsof"
+  : > "$TLOG"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_TEARDOWN_GUARD_DONE=1 \
+    FM_STALE_WORKTREE_LOCK_AGE_SECS=0 FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 \
+    FM_ADOPT_TMUX_LOG="$TLOG" FM_ADOPT_TREEHOUSE_LOG="$TREELOG" \
+    FM_ADOPT_WINDOW_STATE="$WINDOW_STATE" PATH="$FAKEBIN:$PATH" "$TEARDOWN" "$id" 2>&1)
+  status=$?
+  expect_code 1 "$status" "adopted teardown should refuse on an external index.lock"
+  assert_contains "$out" 'adopted worktree git lock' "adopted lock refusal did not name external ownership"
+  assert_present "$lock" "adopted teardown removed the external index.lock"
+  assert_present "$HOME_DIR/state/$id.meta" "adopted lock refusal erased task metadata"
+  assert_no_grep 'tmux kill-window ' "$TLOG" "adopted lock refusal closed the endpoint before safety completed"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_TEARDOWN_GUARD_DONE=1 \
+    FM_ADOPT_TMUX_LOG="$TLOG" FM_ADOPT_TREEHOUSE_LOG="$TREELOG" \
+    FM_ADOPT_WINDOW_STATE="$WINDOW_STATE" PATH="$FAKEBIN:$PATH" "$TEARDOWN" "$id" --force 2>&1)
+  status=$?
+  expect_code 1 "$status" "forced adopted teardown should still preserve an external index.lock"
+  assert_present "$lock" "forced adopted teardown removed the external index.lock"
+  assert_present "$HOME_DIR/state/$id.meta" "forced adopted lock refusal erased task metadata"
+  pass "fm-teardown preserves and refuses on an adopted worktree index.lock"
+}
+
+test_symlinked_project_identity_is_canonical_and_teardown_safe() {
+  local id=adopt-project-link-r7 out status origin project_link project_real
+  setup_case project-link "$id" ship
+  project_link="$CASE/project-link"
+  ln -s "$PROJ" "$project_link"
+  project_real=$(cd "$PROJ" && pwd -P)
+  out=$(FM_ADOPT_PROJECT_ARG="$project_link" run_spawn "$id" ship "$WT"); status=$?
+  expect_code 0 "$status" "symlink-spelled project adoption should succeed"
+  assert_grep "project=$project_real" "$HOME_DIR/state/$id.meta" "adoption did not publish canonical project identity"
+  origin="$CASE/origin.git"
+  git init -q --bare "$origin"
+  git -C "$PROJ" remote add origin "$origin"
+  git -C "$PROJ" push -q origin main
+  git -C "$WT" push -q -u origin "recovered/$id"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+    FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_TEARDOWN_GUARD_DONE=1 \
+    FM_ADOPT_TMUX_LOG="$TLOG" FM_ADOPT_TREEHOUSE_LOG="$TREELOG" \
+    FM_ADOPT_WINDOW_STATE="$WINDOW_STATE" PATH="$FAKEBIN:$PATH" "$TEARDOWN" "$id" 2>&1)
+  status=$?
+  expect_code 0 "$status" "canonical project identity should remain teardown-safe"
+  assert_present "$WT" "symlink-project teardown removed the adopted worktree"
+  assert_absent "$HOME_DIR/state/$id.meta" "symlink-project teardown retained task metadata"
+  pass "fm-spawn canonicalizes adopted project identity for later teardown"
+}
+
+test_forced_secondmate_retirement_refuses_adopted_descendants() {
+  local placement parent child sm_home child_project child_wt branch head out status
+  for placement in inside-home outside-home; do
+    parent="adopt-parent-${placement}-s8"
+    child="adopt-child-${placement}-t9"
+    setup_case "secondmate-$placement" "$parent" ship
+    sm_home="$CASE/secondmate-home"
+    child_project="$sm_home/projects/project"
+    if [ "$placement" = inside-home ]; then
+      child_wt="$sm_home/projects/adopted-worktree"
+    else
+      child_wt="$CASE/outside-adopted-worktree"
+    fi
+    mkdir -p "$sm_home/state" "$sm_home/data" "$sm_home/config" "$sm_home/projects"
+    printf '%s\n' "$parent" > "$sm_home/.fm-secondmate-home"
+    git init -q -b main "$child_project"
+    git -C "$child_project" commit -q --allow-empty -m baseline
+    git -C "$child_project" worktree add -q -b "recovered/$child" "$child_wt" main
+    branch=$(git -C "$child_wt" symbolic-ref --short HEAD)
+    head=$(git -C "$child_wt" rev-parse HEAD)
+    fm_write_meta "$sm_home/state/$child.meta" \
+      "window=firstmate:fm-$child" \
+      "endpoint_task_id=$child" \
+      "worktree=$child_wt" \
+      "project=$child_project" \
+      'harness=codex' \
+      'kind=ship' \
+      'mode=local-only' \
+      'worktree_ownership=adopted' \
+      "adopted_branch=$branch" \
+      "adopted_head=$head"
+    fm_write_meta "$HOME_DIR/state/$parent.meta" \
+      "window=firstmate:fm-$parent" \
+      "endpoint_task_id=$parent" \
+      "worktree=$sm_home" \
+      "project=$sm_home" \
+      'harness=codex' \
+      'kind=secondmate' \
+      'mode=secondmate' \
+      "home=$sm_home"
+    : > "$TLOG"
+    : > "$TREELOG"
+
+    out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+      FM_DATA_OVERRIDE="$HOME_DIR/data" FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" \
+      FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_TEARDOWN_GUARD_DONE=1 \
+      FM_ADOPT_TMUX_LOG="$TLOG" FM_ADOPT_TREEHOUSE_LOG="$TREELOG" \
+      FM_ADOPT_WINDOW_STATE="$WINDOW_STATE" PATH="$FAKEBIN:$PATH" \
+      "$TEARDOWN" "$parent" --force 2>&1)
+    status=$?
+    expect_code 1 "$status" "forced secondmate retirement should refuse an $placement adopted descendant"
+    assert_contains "$out" "adopted descendant $child" "secondmate refusal did not identify the $placement adopted descendant"
+    assert_present "$HOME_DIR/state/$parent.meta" "secondmate refusal erased the parent record for $placement"
+    assert_present "$sm_home/state/$child.meta" "secondmate refusal erased the child record for $placement"
+    assert_present "$sm_home" "secondmate refusal removed the parent home for $placement"
+    assert_present "$child_wt" "secondmate refusal removed the adopted worktree for $placement"
+    git -C "$child_wt" status --porcelain >/dev/null \
+      || fail "secondmate refusal broke the adopted worktree Git common-dir dependency for $placement"
+    assert_no_grep 'tmux kill-window ' "$TLOG" "secondmate refusal closed an endpoint before the adopted descendant preflight"
+    assert_no_grep 'treehouse ' "$TREELOG" "secondmate refusal returned a home or worktree for $placement"
+  done
+  pass "forced secondmate retirement preserves inside-home and outside-home adopted descendants and their Git common directories"
+}
+
 test_safe_ship_adoption_preserves_git_state
 test_safe_scout_adoption_has_non_discard_contract
 test_input_and_ownership_refusals_precede_endpoint
+test_live_claims_and_ambiguous_tmux_inventory_refuse
 test_incompatible_modes_refuse_before_endpoint
 test_endpoint_cwd_mismatch_is_cleaned_without_meta
 test_recovery_reuses_claim_and_recaptures_head
@@ -460,5 +641,8 @@ test_identity_change_before_publication_refuses_atomically
 test_post_publication_send_failures_are_retryable
 test_teardown_retires_task_without_returning_adopted_worktree
 test_teardown_does_not_reap_external_worktree_processes
+test_adopted_teardown_preserves_index_lock
+test_symlinked_project_identity_is_canonical_and_teardown_safe
+test_forced_secondmate_retirement_refuses_adopted_descendants
 
 echo "# all existing-worktree adoption tests passed"

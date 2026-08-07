@@ -43,11 +43,13 @@
 # root, closes the exact endpoint, and retires ordinary task state, but never
 # scans or signals arbitrary processes by adopted-worktree cwd, detaches or deletes the
 # branch, removes worktree files, returns/prunes/resets the worktree, or calls a
-# worktree-provider removal operation. The marker is accepted only once and only
+# worktree-provider removal operation. Any adopted index.lock is preserved and
+# refuses teardown, including --force. The marker is accepted only once and only
 # with one adopted_branch= and adopted_head= on the supported tmux ordinary-task
 # contract; any other value or shape refuses before cleanup mutation. Forced
-# recursive secondmate retirement preserves adopted child worktrees under the
-# same rule while still removing their endpoints and child-home task records.
+# recursive secondmate retirement refuses before mutation when any descendant
+# is adopted, because deleting that home could remove the worktree itself or
+# the Git common directory on which an outside worktree still depends.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -1931,7 +1933,8 @@ validate_firstmate_home_children_removal() {
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ "$child_ownership" = adopted ]; then
-      :
+      echo "REFUSED: secondmate retirement found adopted descendant $child_id at $child_wt; preserving the descendant, its Git common-directory dependency, the parent home, and every durable record" >&2
+      return 1
     elif [ "$child_backend" = orca ]; then
       child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
       if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
@@ -2280,12 +2283,28 @@ if [ "$WORKTREE_OWNERSHIP" = adopted ] && [ "$FORCE" != "--force" ] \
   exit 1
 fi
 
+if [ "$WORKTREE_OWNERSHIP" = adopted ] && [ -d "$WT" ]; then
+  adopted_lock=$(worktree_git_lock_path "$WT") || {
+    echo "REFUSED: cannot resolve the adopted worktree git lock path for $WT; preserving the endpoint and task state" >&2
+    exit 1
+  }
+  if [ -e "$adopted_lock" ] || [ -L "$adopted_lock" ]; then
+    echo "REFUSED: adopted worktree git lock $adopted_lock is present; preserving the externally owned lock, endpoint, and task state" >&2
+    exit 1
+  fi
+fi
+
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
   else
     safety_rc=$?
     if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
+      if [ "$WORKTREE_OWNERSHIP" = adopted ]; then
+        adopted_lock=$(worktree_git_lock_path "$WT" 2>/dev/null || true)
+        echo "REFUSED: adopted worktree git lock ${adopted_lock:-<unresolved>} blocks safety inspection; preserving the externally owned lock, endpoint, and task state" >&2
+        exit 1
+      fi
       cleanup_stale_lock_for_safety_check "$WT" || exit 1
       validate_worktree_teardown_safety || exit 1
     else

@@ -55,6 +55,9 @@
 #   named branch still agree. Recovery atomically replaces only spawn-owned meta
 #   fields, retains every other durable field, and rolls the generated addendum
 #   back if refusal occurs before the matching metadata publication.
+#   While holding that lock, adoption also reads every live tmux fm-<task-id>
+#   endpoint and its exact physical CWD. A different live task at the requested
+#   worktree, or any unreadable/ambiguous task inventory, refuses before creation.
 #   The first supported runtime is tmux only. Herdr, zellij, cmux, Orca,
 #   --secondmate, and batch dispatch are refused before endpoint creation. The
 #   supported harnesses are codex, pi, pi-signed, and muse because their spawn
@@ -683,6 +686,7 @@ ADOPTION_LOCK=
 ADOPTION_LOCK_HELD=0
 ADOPTED_ENDPOINT_ABORT_CLEANUP=0
 ADOPTED_ENDPOINT_ID=
+ADOPTED_TMUX_SESSION=
 ADOPTED_BRIEF_ABORT_CLEANUP=0
 ADOPTED_BRIEF_PREVIOUS_TMP=
 ADOPTED_BRIEF_PREVIOUS_PRESENT=0
@@ -1499,7 +1503,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
-adopted_meta_exact_value() {  # <meta> <key>
+spawn_meta_exact_value() {  # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   count=$(grep -c "^${key}=" "$meta" 2>/dev/null || true)
@@ -1537,7 +1541,7 @@ report_adopted_snapshot_refusal() {
 
 prepare_existing_worktree_adoption() {
   local requested=$EXISTING_WORKTREE_ARG
-  local meta meta_id claim claim_real own project branch prior_meta=0
+  local meta meta_id claim claim_real own project branch prior_meta=0 claim_status live_claim
   local adopted_brief_tmp status_file_q expected_path_q expected_branch_q expected_head_q brief_path
 
   if ! fm_adopted_worktree_snapshot "$requested" "$PROJ_ABS_REAL"; then
@@ -1563,7 +1567,7 @@ prepare_existing_worktree_adoption() {
       return 1
     }
     meta_id=$(basename "$meta" .meta)
-    claim=$(adopted_meta_exact_value "$meta" worktree) || {
+    claim=$(spawn_meta_exact_value "$meta" worktree) || {
       echo "error: task metadata $meta has an ambiguous worktree claim; adoption refused" >&2
       return 1
     }
@@ -1573,10 +1577,10 @@ prepare_existing_worktree_adoption() {
         echo "error: task $ID already has durable metadata for a different worktree: $claim" >&2
         return 1
       }
-      own=$(adopted_meta_exact_value "$meta" worktree_ownership) || own=
-      project=$(adopted_meta_exact_value "$meta" project) || project=
+      own=$(spawn_meta_exact_value "$meta" worktree_ownership) || own=
+      project=$(spawn_meta_exact_value "$meta" project) || project=
       project=$(cd -- "$project" 2>/dev/null && pwd -P) || project=
-      branch=$(adopted_meta_exact_value "$meta" adopted_branch) || branch=
+      branch=$(spawn_meta_exact_value "$meta" adopted_branch) || branch=
       [ "$own" = adopted ] && [ "$project" = "$PROJ_ABS_REAL" ] \
         && [ "$branch" = "$ADOPTED_WORKTREE_BRANCH" ] || {
         echo "error: existing metadata for task $ID does not prove the same adopted worktree, project, and branch" >&2
@@ -1589,6 +1593,22 @@ prepare_existing_worktree_adoption() {
     fi
   done
   ADOPTED_PRIOR_META=$prior_meta
+
+  ADOPTED_TMUX_SESSION=$(fm_backend_tmux_container_ensure) || {
+    echo "error: live tmux task inventory is ambiguous; adoption could not resolve its exact session" >&2
+    return 1
+  }
+  if live_claim=$(fm_backend_tmux_worktree_claim "$ADOPTED_TMUX_SESSION" "fm-$ID" "$WT"); then
+    :
+  else
+    claim_status=$?
+    if [ "$claim_status" -eq 1 ]; then
+      echo "error: adopted worktree is already claimed by live tmux task $live_claim without matching durable metadata" >&2
+    else
+      echo "error: live tmux task inventory is ambiguous (${live_claim:-unknown}); adoption refused" >&2
+    fi
+    return 1
+  fi
 
   status_file_q=$(shell_quote "$STATE/$ID.status")
   expected_path_q=$(shell_quote "$ADOPTED_WORKTREE_PATH")
@@ -1645,14 +1665,6 @@ fi
 # herdr-sm-spaces-k4). Both branches converge on the same $T ("target") string
 # that every downstream operation (send/capture/kill) already treats as opaque
 # per-backend routing (fm_backend_resolve_selector).
-herdr_projection_meta_field_exact() {  # <meta> <key>
-  local meta=$1 key=$2 count
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  count=$(grep -c "^${key}=" "$meta" 2>/dev/null || true)
-  [ "$count" = 1 ] || return 1
-  grep "^${key}=" "$meta" 2>/dev/null | cut -d= -f2-
-}
-
 # A stale presentation journal never grants launch authority.
 # Under the session lock, authoritative metadata must identify one positively
 # dead or agent-free endpoint before token inspection may allow flat fallback.
@@ -1677,19 +1689,19 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
     }
     target_session=$FM_BACKEND_HERDR_SESSION
     target_pane=$FM_BACKEND_HERDR_PANE
-    old_session=$(herdr_projection_meta_field_exact "$meta" herdr_session) || {
+    old_session=$(spawn_meta_exact_value "$meta" herdr_session) || {
       echo "error: existing herdr metadata for $ID has an ambiguous session; refusing duplicate launch" >&2
       return 1
     }
-    HERDR_RECOVERY_WORKSPACE_ID=$(herdr_projection_meta_field_exact "$meta" herdr_workspace_id) || {
+    HERDR_RECOVERY_WORKSPACE_ID=$(spawn_meta_exact_value "$meta" herdr_workspace_id) || {
       echo "error: existing herdr metadata for $ID has an ambiguous workspace; refusing duplicate launch" >&2
       return 1
     }
-    HERDR_RECOVERY_TAB_ID=$(herdr_projection_meta_field_exact "$meta" herdr_tab_id) || {
+    HERDR_RECOVERY_TAB_ID=$(spawn_meta_exact_value "$meta" herdr_tab_id) || {
       echo "error: existing herdr metadata for $ID has an ambiguous tab; refusing duplicate launch" >&2
       return 1
     }
-    old_pane=$(herdr_projection_meta_field_exact "$meta" herdr_pane_id) || {
+    old_pane=$(spawn_meta_exact_value "$meta" herdr_pane_id) || {
       echo "error: existing herdr metadata for $ID has an ambiguous pane; refusing duplicate launch" >&2
       return 1
     }
@@ -1726,7 +1738,11 @@ TASK_CWD=$PROJ_ABS
 [ "$EXISTING_WORKTREE_SET" -eq 0 ] || TASK_CWD=$WT
 case "$BACKEND" in
   tmux)
-    SES=$(fm_backend_tmux_container_ensure)
+    if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
+      SES=$ADOPTED_TMUX_SESSION
+    else
+      SES=$(fm_backend_tmux_container_ensure)
+    fi
     T="$SES:$W"
     # #134 robustness (tmux): fm_backend_tmux_create_task captures a stable window
     # id and pins the window name (automatic-rename/allow-rename off) so a captain's
@@ -2442,7 +2458,11 @@ fi
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
-  echo "project=$PROJ_ABS"
+  if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
+    echo "project=$PROJ_ABS_REAL"
+  else
+    echo "project=$PROJ_ABS"
+  fi
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"

@@ -103,6 +103,74 @@ fm_backend_tmux_current_path() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null
 }
 
+# fm_backend_tmux_worktree_claim: inspect every live fm-<task-id> window in one
+# exact session while an adoption caller holds its home-wide claim lock.
+# Returns 0 with no output when clear, 1 printing the other task id when another
+# task has the exact physical cwd, and 2 printing a bounded reason when inventory,
+# window identity, pane cardinality, or cwd cannot be proven.
+fm_backend_tmux_worktree_claim() {  # <session> <own-window-name> <worktree>
+  local session=$1 own_window=$2 worktree=$3 inventory format line
+  local window_id window_name window_panes extra pane_path pane_real seen=$'\n'
+  format='#{window_id}|#{window_name}|#{window_panes}'
+  if ! inventory=$(LC_ALL=C tmux list-windows -t "$session" -F "$format" 2>/dev/null); then
+    printf '%s\n' inventory
+    return 2
+  fi
+  [ -n "$inventory" ] || {
+    printf '%s\n' empty-inventory
+    return 2
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    IFS='|' read -r window_id window_name window_panes extra <<EOF
+$line
+EOF
+    case "$window_id" in
+      @|@*[!0-9]*|'') printf '%s\n' window-id; return 2 ;;
+      @*) ;;
+      *) printf '%s\n' window-id; return 2 ;;
+    esac
+    [ -n "$window_name" ] && [ -z "$extra" ] || {
+      printf '%s\n' window-record
+      return 2
+    }
+    case "$window_panes" in
+      ''|*[!0-9]*) printf '%s\n' window-record; return 2 ;;
+    esac
+    case "$seen" in
+      *$'\n'"$window_id"$'\n'*) printf '%s\n' duplicate-window-id; return 2 ;;
+    esac
+    seen="$seen$window_id"$'\n'
+    case "$window_name" in
+      fm-) printf '%s\n' task-window; return 2 ;;
+      fm-*) ;;
+      *) continue ;;
+    esac
+    [ "$window_name" != "$own_window" ] || continue
+    [ "$window_panes" = 1 ] || {
+      printf 'pane-count:%s\n' "$window_name"
+      return 2
+    }
+    pane_path=$(fm_backend_tmux_current_path "$window_id") || {
+      printf 'cwd:%s\n' "$window_name"
+      return 2
+    }
+    [ -n "$pane_path" ] || {
+      printf 'cwd:%s\n' "$window_name"
+      return 2
+    }
+    pane_real=$(cd -- "$pane_path" 2>/dev/null && pwd -P) || {
+      printf 'cwd:%s\n' "$window_name"
+      return 2
+    }
+    if [ "$pane_real" = "$worktree" ]; then
+      printf '%s\n' "${window_name#fm-}"
+      return 1
+    fi
+  done <<EOF
+$inventory
+EOF
+}
+
 # fm_backend_tmux_send_text_line: send one line of TEXT then Enter, with no
 # composer verification - used for the fixed spawn-time commands
 # (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence

@@ -177,6 +177,13 @@ for _ in $(seq 1 100); do
 done
 [ "$stable_path" = "$STABLE_CWD" ] \
   || fail "real tmux: stable window did not report its exact adopted cwd"
+claim=$(fm_backend_tmux_worktree_claim "$SESSION" fm-new-adoption "$STABLE_CWD")
+claim_status=$?
+[ "$claim_status" -eq 1 ] && [ "$claim" = adopted-cwd ] \
+  || fail "real tmux: live task CWD inventory did not identify the adopted-cwd claim"
+if ! fm_backend_tmux_worktree_claim "$SESSION" fm-adopted-cwd "$STABLE_CWD"; then
+  fail "real tmux: live task CWD inventory did not exclude the same task window"
+fi
 tmux rename-window -t "$STABLE_WID" fm-renamed-after-create \
   || fail "real tmux: could not simulate a lost task window name"
 fm_backend_tmux_kill_window_id "$STABLE_WID" \
@@ -186,7 +193,7 @@ if tmux list-windows -t "$SESSION" -F '#{window_id}' | grep -Fqx "$STABLE_WID"; 
 fi
 tmux list-windows -t "$SESSION" -F '#{window_id}' | grep -Fqx "$TASK_WID" \
   || fail "real tmux: stable-id cleanup removed the independent control window"
-pass "real tmux: adopted task creation reports exact cwd and stable-id cleanup survives a lost name"
+pass "real tmux: adopted task creation reports exact cwd, live claims, and stable-id cleanup after a lost name"
 
 # --- kill and recovery-grade missing-window classification ------------------
 
