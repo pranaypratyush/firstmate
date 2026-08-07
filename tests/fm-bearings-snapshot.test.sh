@@ -225,9 +225,16 @@ test_domain_alpha_stale_parent_event_does_not_become_current_work() {
           and .state == "externally_held"
           and .provenance == "structured-home"
           and .freshness == "fresh"
-          and .contradiction == true))
+          and .contradiction == true
+          and (.context | contains("Release approval"))
+          and (.next_action | contains("external-legal"))
+          and (.advance_when | contains("external-legal"))))
       and (.gates | any(.[]; .id == "legal-release" and .owner == "domain-alpha"))
-      and (.landed | any(.[]; .id == "phase7" and .owner == "domain-alpha"))
+      and (.landed | any(.[]; .id == "phase7" and .owner == "domain-alpha"
+        and .outcome == null
+        and .outcome_evidence_available == false
+        and (.outcome_evidence_gap | contains("No bounded completion outcome evidence"))
+        and .context == "Sample rollout Phase 7"))
   ' >/dev/null || fail "stale parent Phase 7 event overrode authoritative Domain Alpha state: $json"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
     FM_SNAPSHOT_NOW_EPOCH=1783792800 FM_SNAPSHOT_TERMINAL_LINES=2 FM_SNAPSHOT_TERMINAL_BYTES=64 \
@@ -376,7 +383,7 @@ test_structured_child_decision_reaches_captains_call() {
 - [ ] phase8 - Sample rollout Phase 8 (repo: sample) (kind: ship) (since 2026-07-13)
 
 ## Queued
-- [ ] phase8-decision-release - Choose sample release (repo: sample) (kind: captain) (hold: captain release choice pending) (hold-kind: captain)
+- [ ] phase8-decision-release - Choose sample release (repo: sample) (kind: captain) (hold: captain release choice pending) (hold-kind: captain) (captain-action: missing-choice)
 
 ## Done
 - [x] phase7 - Sample rollout Phase 7 (repo: sample) (kind: ship) (done 2026-07-12)
@@ -1694,7 +1701,10 @@ EOF
       and (.gates | any(.id == "captain-run" and .owner == "home-assistant"
         and .blocked_by == "prep,security"))
       and (.secondmates | any(.id == "sshhip" and .state == "unknown"
-        and (.reason | contains("unreadable-child"))))
+        and (.reason | contains("unreadable-child"))
+        and (.context | contains("Submit App Store build"))
+        and (.next_action | contains("unreadable-child"))
+        and (.advance_when | contains("unreadable-child"))))
   ' >/dev/null || fail "end-to-end mixed-domain projection was wrong: $json"
 
   sed '/unreadable-child/a\
@@ -1907,7 +1917,7 @@ test_captain_call_carries_executable_review_and_merge_context() {
 ## In flight
 
 ## Queued
-- [ ] nm-codex-appserver-q8 - Codex app-server queue isolation implementation (repo: firstmate) (kind: captain) (hold: manual re-review and landing decision) (hold-kind: captain)
+- [ ] nm-codex-appserver-q8 - Codex app-server queue isolation implementation (repo: firstmate) (kind: captain) (hold: manual re-review and landing decision) (hold-kind: captain) (captain-action: review-changes+merge-decision)
   Prior review found cross-thread wake leakage and missing restart coverage; both are fixed. Remaining gap: no Windows evidence. Next: captain reviews the fixes, then separately decides whether to merge.
 
 ## Done
@@ -1928,6 +1938,46 @@ EOF
       and .action_owner == "captain"
   ' >/dev/null || fail "Captain Call lacked executable review and merge context: $json"
   pass "Captain Call carries the implementation, findings, caveat, and distinct review/merge actions"
+}
+
+test_captain_actions_ignore_incidental_evidence_prose() {
+  local home fakebin json
+  home=$(make_home captain-action-adversarial)
+  : > "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] choose-path - Choose the deployment path (repo: firstmate) (kind: captain) (hold: provide the remaining deployment choice) (hold-kind: captain) (captain-action: missing-choice)
+  The implementation was reviewed yesterday and the team selected the safe merge strategy. Next: captain provides the environment choice.
+- [ ] inspect-fix - Inspect the restart fix (repo: firstmate) (kind: captain) (hold: inspect the corrected restart changes) (hold-kind: captain) (captain-action: review-changes)
+  The team selected and merged the unrelated documentation path last week. Next: captain reviews only the restart changes.
+- [ ] untyped-action - Untyped captain action (repo: firstmate) (kind: captain) (hold: manual follow-up required) (hold-kind: captain)
+  The prior review selected a merge path, but no structured captain action was recorded.
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open[] | select(.id == "choose-path")
+      | .action_types == ["missing-choice"]
+        and .review_changes_required == false
+        and .merge_decision_required == false
+        and .missing_choice_required == true)
+      and (.decisions_open[] | select(.id == "inspect-fix")
+        | .action_types == ["review-changes"]
+          and .review_changes_required == true
+          and .merge_decision_required == false
+          and .missing_choice_required == false)
+      and (.decisions_open[] | select(.id == "untyped-action")
+        | .action_types == []
+          and .review_changes_required == false
+          and .merge_decision_required == false
+          and .missing_choice_required == false
+          and (.action_type_evidence_gap | contains("No structured captain action")))
+  ' >/dev/null || fail "incidental past-tense evidence invented captain actions: $json"
+  pass "captain action types come from structured metadata, not incidental evidence prose"
 }
 
 # Triggering regression: four completed salvage scouts need their different
@@ -1973,7 +2023,9 @@ EOF
     (.landed | length) == 4
       and (all(.landed[]; (.context | type) == "string" and (.context | length) > 0
         and (.next_action | type) == "string" and (.next_action | length) > 0
-        and (.next_owner | type) == "string" and (.next_owner | length) > 0))
+        and (.next_owner | type) == "string" and (.next_owner | length) > 0
+        and .outcome_evidence_available == true
+        and .outcome_evidence_gap == null))
       and (.landed | any(.id == "nsm-salvage-lock" and (.outcome | contains("unique lease-recovery guard")) and (.outcome | contains("nsm-integrator ports"))))
       and (.landed | any(.id == "nsm-salvage-watch" and (.outcome | contains("already superseded")) and (.outcome | contains("omits this path"))))
       and (.landed | any(.id == "nsm-salvage-restart" and (.outcome | contains("evidence is missing")) and (.outcome | contains("adds the missing restart test"))))
@@ -2006,7 +2058,7 @@ test_landed_discloses_byte_character_and_projection_truncation() {
 EOF
   printf '  Context: ' >> "$home/data/backlog.md"
   i=0
-  while [ "$i" -lt 200 ]; do printf 'b' >> "$home/data/backlog.md"; i=$((i + 1)); done
+  while [ "$i" -lt 300 ]; do printf 'b' >> "$home/data/backlog.md"; i=$((i + 1)); done
   printf '\n' >> "$home/data/backlog.md"
   printf '# Truncation report\nOutcome: ' > "$home/data/truncated-scout/report.md"
   i=0
@@ -2019,7 +2071,9 @@ EOF
     .landed[] | select(.id == "truncated-scout")
     | .context_byte_truncated == false
       and .context_character_truncated == false
+      and .context_backlog_truncated == true
       and .context_projection_truncated == true
+      and (.caveat | contains("backlog body limit"))
       and (.caveat | contains("final projection limit"))
   ' >/dev/null || fail "final Bearings projection truncation was not disclosed: $json"
 
@@ -2039,6 +2093,52 @@ EOF
       and (.caveat | contains("character limit"))
   ' >/dev/null || fail "report character truncation was not disclosed in landed context: $json"
   pass "landed context discloses byte, character, and final projection truncation"
+}
+
+test_report_count_and_decision_gate_projection_truncation_are_disclosed() {
+  local home fakebin json i long_hold
+  home=$(make_home causal-truncation-provenance)
+  : > "$home/data/secondmates.md"
+  mkdir -p "$home/data/a-decision" "$home/data/z-count-scout"
+  long_hold=wait-for-
+  i=0
+  while [ "$i" -lt 280 ]; do long_hold="${long_hold}g"; i=$((i + 1)); done
+  {
+    printf '## In flight\n\n## Queued\n'
+    printf '%s\n' '- [ ] a-decision - Choose bounded release (repo: firstmate) (kind: captain) (hold: provide release choice) (hold-kind: captain) (captain-action: missing-choice)'
+    printf '  Evidence: '
+    i=0
+    while [ "$i" -lt 300 ]; do printf 'e'; i=$((i + 1)); done
+    printf '\n'
+    printf -- '- [ ] long-gate - Long external gate (repo: firstmate) (kind: ship) (hold: %s) (hold-kind: external)\n' "$long_hold"
+    printf '  Gate context: '
+    i=0
+    while [ "$i" -lt 300 ]; do printf 'c'; i=$((i + 1)); done
+    printf '\n\n## Done\n'
+    printf '%s\n' '- [x] z-count-scout - Count-omitted report data/z-count-scout/report.md (repo: firstmate) (kind: scout) (reported 2026-07-23)'
+  } > "$home/data/backlog.md"
+  printf '# Decision evidence\n' > "$home/data/a-decision/report.md"
+  i=0
+  while [ "$i" -lt 700 ]; do printf 'r' >> "$home/data/a-decision/report.md"; i=$((i + 1)); done
+  printf '# Count omitted\nUnique landed evidence.\n' > "$home/data/z-count-scout/report.md"
+  fakebin=$(make_fakebin "$home")
+  json=$(FM_SNAPSHOT_REPORT_SUMMARIES=1 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.decisions_open[] | select(.id == "a-decision")
+      | .evidence_backlog_truncated == true
+        and .evidence_projection_truncated == true
+        and (.evidence_caveat | contains("backlog body limit"))
+        and (.evidence_caveat | contains("decision evidence projection limit")))
+      and (.gates[] | select(.id == "long-gate")
+        | .context_backlog_truncated == true
+          and .advance_when_truncated == true
+          and (.caveat | contains("backlog body limit"))
+          and (.caveat | contains("gate condition projection limit")))
+      and (.landed[] | select(.id == "z-count-scout")
+        | .context_report_count_omitted == true
+          and (.caveat | contains("report-count limit")))
+  ' >/dev/null || fail "causal truncation provenance was incomplete: $json"
+  pass "report-count, backlog-body, decision-evidence, and gate-condition limits are disclosed"
 }
 
 test_help_names_every_operator_facing_bound() {
@@ -2096,8 +2196,10 @@ test_main_orphan_counterfactual_meta_clears_inventory_warning
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
 test_captain_call_carries_executable_review_and_merge_context
+test_captain_actions_ignore_incidental_evidence_prose
 test_salvage_dispositions_and_unknown_integrator_milestone_surface
 test_landed_discloses_byte_character_and_projection_truncation
+test_report_count_and_decision_gate_projection_truncation_are_disclosed
 test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface

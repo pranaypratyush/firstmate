@@ -160,6 +160,10 @@ test_help_names_every_report_context_bound() {
     "snapshot help omitted the per-report byte bound"
   assert_contains "$help" "FM_SNAPSHOT_REPORT_SUMMARY_CHARS (default 800)" \
     "snapshot help omitted the normalized character bound"
+  assert_contains "$help" "captain-action: review-changes+merge-decision" \
+    "snapshot help omitted structured captain-action syntax"
+  assert_contains "$help" "Backlog body excerpts are capped at 240 characters" \
+    "snapshot help omitted the backlog-body bound"
   pass "snapshot help names every operator-facing report-context bound"
 }
 
@@ -457,7 +461,7 @@ EOF
 }
 
 test_scout_report_context_is_bounded_without_dropping_pointers() {
-  local home out char_out
+  local home out char_out i
   home=$(make_home bounded-report-context)
   mkdir -p "$home/data/report-a" "$home/data/report-b"
   cat > "$home/data/backlog.md" <<'EOF'
@@ -465,6 +469,10 @@ test_scout_report_context_is_bounded_without_dropping_pointers() {
 - [x] report-a - First bounded report data/report-a/report.md (repo: alpha) (kind: scout) (reported 2026-07-07)
 - [x] report-b - Second bounded report data/report-b/report.md (repo: alpha) (kind: scout) (reported 2026-07-06)
 EOF
+  printf '  Context: ' >> "$home/data/backlog.md"
+  i=0
+  while [ "$i" -lt 300 ]; do printf 'b' >> "$home/data/backlog.md"; i=$((i + 1)); done
+  printf '\n' >> "$home/data/backlog.md"
   printf '# Report A\nThis conclusion intentionally extends beyond the configured byte window.\n' > "$home/data/report-a/report.md"
   printf '# Report B\nThis pointer must remain even when its context is outside the report-count cap.\n' > "$home/data/report-b/report.md"
   out=$(FM_HOME="$home" FM_SNAPSHOT_REPORT_SUMMARIES=1 \
@@ -481,7 +489,10 @@ EOF
         | .summary_excerpt == null
           and .summary_byte_truncated == false
           and .summary_character_truncated == false
-          and .summary_truncated == false)
+          and .summary_omitted_by_count == true
+          and .summary_truncated == true)
+      and (.backlog.records[] | select(.id == "report-b")
+        | .body_excerpt_truncated == true)
   ' >/dev/null || fail "report-context byte/count bounds did not preserve pointers: $out"
   char_out=$(FM_HOME="$home" FM_SNAPSHOT_REPORT_SUMMARIES=2 \
     FM_SNAPSHOT_REPORT_SUMMARY_BYTES=4096 FM_SNAPSHOT_REPORT_SUMMARY_CHARS=12 \
@@ -491,6 +502,7 @@ EOF
     | .summary_excerpt == "# Report A T"
       and .summary_byte_truncated == false
       and .summary_character_truncated == true
+      and .summary_omitted_by_count == false
       and .summary_truncated == true
   ' >/dev/null || fail "report-context character bound was not disclosed: $char_out"
   pass "report context discloses byte and character bounds while every pointer remains visible"

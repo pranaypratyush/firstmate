@@ -161,6 +161,12 @@ Its invalidity object names the normalized failure kind and affected ids.
 Actionable tasks-axi captain holds appear as decisions_open and stay visible in
 queued with hold_reason, hold_kind, and plural blocker fields for downstream
 projections. A captain hold is actionable only when every blocker is Done.
+Use structured metadata such as (captain-action: review-changes+merge-decision)
+with the values review-changes, merge-decision, and missing-choice. A missing or
+invalid value remains an explicit action-type evidence gap.
+Backlog body excerpts are capped at 240 characters with per-record truncation
+disclosure. Secondmate Charted Next context is capped at 800 characters, while
+its next action and advancement condition are capped at 320 characters.
 Cross-home reads use FM_SNAPSHOT_SECONDMATES (default 20, 0 lifts the count
 bound), FM_SNAPSHOT_SECONDMATE_TIMEOUT, and FM_SNAPSHOT_SECONDMATE_MAX_BYTES.
 Terminal contradiction evidence uses
@@ -289,7 +295,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def links($rest): [$rest | scan(url_pattern)];
     def strip_trailing_metadata:
       reduce range(0; 20) as $_ (.;
-        sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
+        sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind|captain-action):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
     def strip_title_artifacts:
       sub("[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
       | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
@@ -335,7 +341,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def parse_row($line; $section; $order):
       row_match($line) as $m
       | if $m == null then
-          {order:$order,state:$section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null}
+          {order:$order,state:$section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null,body_excerpt_truncated:false}
         else
           ($m.rest) as $rest
           | {order:$order,
@@ -349,6 +355,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              priority:metadata($rest; "priority"),
              hold_reason:metadata($rest; "hold"),
              hold_kind:metadata($rest; "hold-kind"),
+             captain_action:metadata($rest; "captain-action"),
              blocked_by:cap($rest; ".*blocked-by:[[:space:]]*(?<v>[^[:space:])]+).*"),
              blocked_by_ids:blocked_by_ids($rest),
              blocked_reason:blocked_reason($rest),
@@ -363,7 +370,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              local_note:local_note($rest),
              raw:$line,
              body_lines:[],
-             body_excerpt:null}
+             body_excerpt:null,
+             body_excerpt_truncated:false}
         end;
     reduce inputs as $line
       ({path:$path,present:true,records:[],section:null,order:0};
@@ -380,11 +388,13 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
            else .records[-1].body_lines += [$body] end
        else
          .order += 1
-         | .records += [{order:.order,state:.section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null}]
+         | .records += [{order:.order,state:.section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null,body_excerpt_truncated:false}]
        end)
     | .records |= map(
         if (.body_lines | length) > 0 then
-          .body_excerpt = ((.body_lines | join(" "))[:240])
+          (.body_lines | join(" ")) as $body
+          | .body_excerpt = ($body[:240])
+          | .body_excerpt_truncated = (($body | length) > 240)
         else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};
@@ -407,6 +417,15 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
           | .captain_actionable =
               (.state == "queued" and .kind == "captain" and .hold_kind == "captain"
                and .hold_reason != null and (.unresolved_blocker_ids | length) == 0)
+          | ((.captain_action // "") | split("+") | map(select(. != ""))) as $declared_actions
+          | .captain_action_types =
+              (if .kind != "captain" then []
+               else ($declared_actions
+                 | map(select(. == "review-changes" or . == "merge-decision" or . == "missing-choice"))
+                 | unique) end)
+          | .captain_action_type_missing = (.kind == "captain" and ($declared_actions | length) == 0)
+          | .captain_action_type_invalid =
+              (.kind == "captain" and ($declared_actions | length) != (.captain_action_types | length))
         else . end)
     | del(.section,.order)
   ' < "$backlog"
@@ -667,6 +686,8 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
       ([ $reports[]? | select(.id == $id) | .summary_byte_truncated ][0]) // false;
     def report_character_truncated($id):
       ([ $reports[]? | select(.id == $id) | .summary_character_truncated ][0]) // false;
+    def report_count_omitted($id):
+      ([ $reports[]? | select(.id == $id) | .summary_omitted_by_count ][0]) // false;
     def joined_context($body; $report):
       ([ $body, $report ] | map(select(. != null and . != "")) | join(" "));
     def context_value($body; $report):
@@ -686,15 +707,26 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
     | ([ $queued_all[]
          | select(.captain_actionable == true)
          | {id,key:.id,verb:"captain-hold",summary:(.title | trunc(160)),
-            reason:(.hold_reason | trunc(160)),context:context_value(.body_excerpt; report_context(.id)),source:"backlog"} ]) as $captain_holds_all
+            reason:(.hold_reason | trunc(160)),action_types:.captain_action_types,
+            action_type_missing:.captain_action_type_missing,
+            action_type_invalid:.captain_action_type_invalid,
+            context:context_value(.body_excerpt; report_context(.id)),
+            context_backlog_truncated:(.body_excerpt_truncated // false),
+            context_byte_truncated:report_byte_truncated(.id),
+            context_character_truncated:report_character_truncated(.id),
+            context_report_count_omitted:report_count_omitted(.id),
+            context_projection_truncated:context_projection_truncated(.body_excerpt; report_context(.id)),
+            source:"backlog"} ]) as $captain_holds_all
     | ([ $backlog.records[]? | select(.state == "done" and .structured and .kind != "captain")
          | {id:(.id | trunc(120)),title:(.title | trunc(120)),
             pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),
             context:context_value(.body_excerpt; report_context(.id)),
+            context_backlog_truncated:(.body_excerpt_truncated // false),
             context_byte_truncated:report_byte_truncated(.id),
             context_character_truncated:report_character_truncated(.id),
+            context_report_count_omitted:report_count_omitted(.id),
             context_projection_truncated:context_projection_truncated(.body_excerpt; report_context(.id)),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
     | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
@@ -737,8 +769,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
             doing:((.current_state.detail // "") | trunc(160)),
             milestone:((.hints.last_event_text // "") | trunc(200)),
             context:context_value($work.body_excerpt; report_context(.id)),
+            context_backlog_truncated:($work.body_excerpt_truncated // false),
             context_byte_truncated:report_byte_truncated(.id),
             context_character_truncated:report_character_truncated(.id),
+            context_report_count_omitted:report_count_omitted(.id),
             context_projection_truncated:context_projection_truncated($work.body_excerpt; report_context(.id))} ]) as $active_all
     | ($captain_holds_all
        + ([ $tasks[] as $t | ($t.hints.open_decisions // [])[]
@@ -750,7 +784,12 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
             blocked_by_ids:(.blocked_by_ids | map(trunc(120))),
             unresolved_blocker_ids:(.unresolved_blocker_ids | map(trunc(120))),
             reason:((.hold_reason // .blocked_reason // "blocked") | trunc(120)),
-            context:context_value(.body_excerpt; report_context(.id)),source:"backlog"} ]
+            context:context_value(.body_excerpt; report_context(.id)),
+            context_backlog_truncated:(.body_excerpt_truncated // false),
+            context_byte_truncated:report_byte_truncated(.id),
+            context_character_truncated:report_character_truncated(.id),
+            context_report_count_omitted:report_count_omitted(.id),
+            context_projection_truncated:context_projection_truncated(.body_excerpt; report_context(.id)),source:"backlog"} ]
        + [ $owned_in_flight[] as $work
            | $tasks[]
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
@@ -776,6 +815,38 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
        elif ($active_all | length) > 0 then "active_child_work"
        elif ($holds_all | length) > 0 then "externally_held"
        else "no_active_work" end) as $state
+    | (if $state == "externally_held" then
+         ([ $holds_all[] | [.title, .context, .reason]
+           | map(select(. != null and . != "")) | join(": ") ] | join("; ")) as $held_context
+         | ([ $holds_all[] | .id +
+            (if ((.unresolved_blocker_ids // []) | length) > 0
+             then " waits for " + (.unresolved_blocker_ids | join(", "))
+             else " remains held: " + (.reason // "held") end) ] | join("; ")) as $held_next
+         | ([ $holds_all[]
+            | if ((.unresolved_blocker_ids // []) | length) > 0
+              then "After " + (.unresolved_blocker_ids | join(", ")) + " are done"
+              else "When hold clears for " + .id + ": " + (.reason // "held") end ]
+            | join("; ")) as $held_advance
+         | {context:($held_context | trunc(800)),context_truncated:(($held_context | length) > 800),
+            next_action:($held_next | trunc(320)),next_action_truncated:(($held_next | length) > 320),
+            advance_when:($held_advance | trunc(320)),advance_when_truncated:(($held_advance | length) > 320)}
+       elif $state == "unknown" then
+         ([ $unknown_children[] as $child
+            | $child.id + ": " +
+              (([ $owned_in_flight[] | select(.id == $child.id) | .title ][0])
+               // $child.hints.last_event_text // "current state unavailable") ]
+          | join("; ")) as $unknown_context
+         | (($unknown_children | map(.id)) + ($invalidity.ids // []) | unique) as $unknown_ids
+         | (if $unknown_context == "" then ($reason // "Current home state unavailable")
+            else $unknown_context end) as $unknown_context_value
+         | ("Restore trustworthy child state for " +
+            (if ($unknown_ids | length) == 0 then "this home" else ($unknown_ids | join(", ")) end)) as $unknown_next
+         | ("When current child state is available for " +
+            (if ($unknown_ids | length) == 0 then "this home" else ($unknown_ids | join(", ")) end)) as $unknown_advance
+         | {context:($unknown_context_value | trunc(800)),context_truncated:(($unknown_context_value | length) > 800),
+            next_action:($unknown_next | trunc(320)),next_action_truncated:(($unknown_next | length) > 320),
+            advance_when:($unknown_advance | trunc(320)),advance_when_truncated:(($unknown_advance | length) > 320)}
+       else null end) as $charted_next
     | {
         schema:"fm-secondmate-home-summary.v1",
         generated:$generated,
@@ -784,6 +855,7 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
         reason:$reason,
         invalidity:$invalidity,
         state:$state,
+        charted_next:$charted_next,
         active_children:$active_all[:$child_n],
         decisions_open:$decisions_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
@@ -792,12 +864,19 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
           blocked_by_ids:((.blocked_by_ids // []) | map(trunc(120))),
           unresolved_blocker_ids:((.unresolved_blocker_ids // []) | map(trunc(120))),
           blocked_reason:((.blocked_reason // null) | if . == null then null else trunc(160) end),
+          blocked_reason_truncated:(((.blocked_reason // "") | length) > 160),
           hold_reason:((.hold_reason // null) | if . == null then null else trunc(160) end),
+          hold_reason_truncated:(((.hold_reason // "") | length) > 160),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end),
-          context:context_value(.body_excerpt; report_context(.id))}][:$queued_n]),
+          context:context_value(.body_excerpt; report_context(.id)),
+          context_backlog_truncated:(.body_excerpt_truncated // false),
+          context_byte_truncated:report_byte_truncated(.id),
+          context_character_truncated:report_character_truncated(.id),
+          context_report_count_omitted:report_count_omitted(.id),
+          context_projection_truncated:context_projection_truncated(.body_excerpt; report_context(.id))}][:$queued_n]),
         landed:(if $landed_n == 0 then $landed_all else $landed_all[:$landed_n] end),
         endpoints:([$tasks[] | . as $task | {id,state:.current_state.state,source:.current_state.source,
           objective:(([ $owned_in_flight[] | select(.id == $task.id) | .title ][0] // .id) | trunc(160)),
@@ -1258,6 +1337,16 @@ secondmate_current_json() {  # <parent-tasks-json>
           .schema == "fm-secondmate-home-summary.v1" and .home == $home
           and (($remote == true) or .generated == $generated)
           and (.valid | type) == "boolean" and (.state | type) == "string"
+          and ((if (.state == "unknown" or .state == "externally_held")
+                then (.charted_next | type) == "object"
+                else (.charted_next == null or (.charted_next | type) == "object") end)
+            and ((.charted_next == null) or ((.charted_next | type) == "object"
+            and (.charted_next.context | type) == "string"
+            and (.charted_next.next_action | type) == "string"
+            and (.charted_next.advance_when | type) == "string"
+            and (.charted_next.context_truncated | type) == "boolean"
+            and (.charted_next.next_action_truncated | type) == "boolean"
+            and (.charted_next.advance_when_truncated | type) == "boolean")))
           and (.invalidity | type) == "object" and (.invalidity.ids | type) == "array"
           and (.active_children | type) == "array" and (.decisions_open | type) == "array"
           and (.holds | type) == "array" and (.queued | type) == "array"
@@ -1306,6 +1395,7 @@ secondmate_current_json() {  # <parent-tasks-json>
          provenance:{selected:"structured-home",structured_home:$home,summary_valid:$summary_valid,
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
          freshness:{status:"fresh",observed_at:$observed,age_seconds:0},
+         charted_next:$summary.charted_next,
          active_children:$summary.active_children,
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
@@ -1334,6 +1424,12 @@ secondmate_current_json() {  # <parent-tasks-json>
          current:{state:"unknown",reason:$reason},invalidity:null,
          provenance:{selected:$provenance,structured_home:($home | if . == "" then null else . end),parent_event_role:"fallback-only-not-current"},
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
+         charted_next:{context:$reason,
+           context_truncated:false,
+           next_action:("Restore readable structured state for " + $id),
+           next_action_truncated:false,
+           advance_when:("When the registered home is readable for " + $id),
+           advance_when_truncated:false},
          active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
          terminal_evidence:$terminal,contradiction:false}')
@@ -1372,14 +1468,15 @@ secondmate_landed_from_current_json() {  # <secondmate-current-json>
 
 scout_report_lines() {  # <backlog-json> <tasks-json>
   local report id relevant_ids summarized=0 content bytes characters truncated excerpt normalized
-  local byte_truncated character_truncated
+  local byte_truncated character_truncated omitted_by_count relevant
   if [ ! -d "$DATA" ]; then
     jq -n '[]'
     return 0
   fi
   relevant_ids=$(jq -n -r --argjson backlog "$1" --argjson tasks "$2" '
     ([ $backlog.records[]?
-       | select(.structured and (.state == "in_flight" or .state == "done"))
+       | select(.structured and
+           (.state == "in_flight" or .state == "done" or .captain_actionable == true))
        | .id ] + [ $tasks[].id ]) | unique[]')
   LC_ALL=C find "$DATA" -mindepth 2 -maxdepth 2 -type f -name report.md -print \
     | sort \
@@ -1389,8 +1486,12 @@ scout_report_lines() {  # <backlog-json> <tasks-json>
       truncated=false
       byte_truncated=false
       character_truncated=false
-      if [ "$summarized" -lt "$FM_SNAPSHOT_REPORT_SUMMARIES" ] \
-         && printf '%s\n' "$relevant_ids" | grep -Fqx -- "$id"; then
+      omitted_by_count=false
+      relevant=false
+      if printf '%s\n' "$relevant_ids" | grep -Fqx -- "$id"; then
+        relevant=true
+      fi
+      if [ "$summarized" -lt "$FM_SNAPSHOT_REPORT_SUMMARIES" ] && [ "$relevant" = true ]; then
         content=$(LC_ALL=C head -c "$((FM_SNAPSHOT_REPORT_SUMMARY_BYTES + 1))" "$report" 2>/dev/null; printf '\036')
         content=${content%$'\036'}
         bytes=$(printf '%s' "$content" | LC_ALL=C wc -c | tr -d ' ')
@@ -1410,14 +1511,19 @@ scout_report_lines() {  # <backlog-json> <tasks-json>
         excerpt=$(printf '%s' "$normalized" | jq -R -s -r \
           --argjson chars "$FM_SNAPSHOT_REPORT_SUMMARY_CHARS" '.[:$chars]')
         summarized=$((summarized + 1))
+      elif [ "$relevant" = true ]; then
+        omitted_by_count=true
+        truncated=true
       fi
       jq -n --arg id "$id" --arg path "$report" --arg excerpt "$excerpt" \
         --argjson byte_truncated "$byte_truncated" \
         --argjson character_truncated "$character_truncated" \
+        --argjson omitted_by_count "$omitted_by_count" \
         --argjson truncated "$truncated" \
         '{id:$id,path:$path,summary_excerpt:($excerpt | if . == "" then null else . end),
           summary_byte_truncated:$byte_truncated,
           summary_character_truncated:$character_truncated,
+          summary_omitted_by_count:$omitted_by_count,
           summary_truncated:$truncated}'
     done \
     | jq -s 'sort_by(.id)'
