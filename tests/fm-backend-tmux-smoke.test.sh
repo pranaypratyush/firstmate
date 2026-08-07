@@ -165,8 +165,19 @@ pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that d
 # --- exact cwd plus stable-id abort cleanup ---------------------------------
 
 STABLE_CWD="$SHIM_DIR/adopted cwd"
+CROSS_SESSION_CWD="$SHIM_DIR/cross session adopted cwd"
+RENAMED_CWD="$SHIM_DIR/renamed adopted cwd"
+RENAMED_PANE_CWD="$RENAMED_CWD/active/subdir"
+PENDING_CWD="$SHIM_DIR/pending adopted cwd"
 mkdir -p "$STABLE_CWD"
+mkdir -p "$CROSS_SESSION_CWD"
+mkdir -p "$RENAMED_PANE_CWD"
+mkdir -p "$PENDING_CWD"
 STABLE_CWD=$(cd "$STABLE_CWD" && pwd -P)
+CROSS_SESSION_CWD=$(cd "$CROSS_SESSION_CWD" && pwd -P)
+RENAMED_CWD=$(cd "$RENAMED_CWD" && pwd -P)
+RENAMED_PANE_CWD=$(cd "$RENAMED_PANE_CWD" && pwd -P)
+PENDING_CWD=$(cd "$PENDING_CWD" && pwd -P)
 STABLE_WID=$(fm_backend_tmux_create_task "$SESSION" fm-adopted-cwd "$STABLE_CWD") \
   || fail "real tmux: could not create the stable-id cleanup fixture"
 stable_path=
@@ -184,6 +195,86 @@ claim_status=$?
 if ! fm_backend_tmux_worktree_claim "$SESSION" fm-adopted-cwd "$STABLE_CWD"; then
   fail "real tmux: live task CWD inventory did not exclude the same task window"
 fi
+same_name_claim=$(fm_backend_tmux_worktree_claim \
+  "$SESSION" fm-adopted-cwd "$STABLE_CWD" "$TASK_WID")
+same_name_status=$?
+[ "$same_name_status" -eq 1 ] && [ "$same_name_claim" = adopted-cwd ] \
+  || fail "real tmux: stable-id inventory excluded a same-name different window: status=$same_name_status claim='$same_name_claim'"
+
+CROSS_SESSION=smoke-other
+tmux new-session -d -s "$CROSS_SESSION" -x 200 -y 50 \
+  || fail "real tmux: could not create the cross-session claim fixture"
+CROSS_WID=$(fm_backend_tmux_create_task "$CROSS_SESSION" fm-cross-session "$CROSS_SESSION_CWD") \
+  || fail "real tmux: could not create the cross-session task window"
+cross_path=
+for _ in $(seq 1 100); do
+  cross_path=$(fm_backend_tmux_current_path "$CROSS_WID" 2>/dev/null || true)
+  [ "$cross_path" = "$CROSS_SESSION_CWD" ] && break
+  sleep 0.1
+done
+[ "$cross_path" = "$CROSS_SESSION_CWD" ] \
+  || fail "real tmux: cross-session task did not report its exact adopted cwd"
+cross_claim=$(fm_backend_tmux_worktree_claim "$SESSION" fm-new-adoption "$CROSS_SESSION_CWD")
+cross_status=$?
+[ "$cross_status" -eq 1 ] && [ "$cross_claim" = cross-session ] \
+  || fail "real tmux: live claim inventory missed a different-session task at the exact adopted cwd"
+
+RENAMED_WID=$(fm_backend_tmux_create_task "$SESSION" fm-before-rename "$RENAMED_PANE_CWD") \
+  || fail "real tmux: could not create the renamed claim fixture"
+renamed_path=
+for _ in $(seq 1 100); do
+  renamed_path=$(fm_backend_tmux_current_path "$RENAMED_WID" 2>/dev/null || true)
+  [ "$renamed_path" = "$RENAMED_PANE_CWD" ] && break
+  sleep 0.1
+done
+[ "$renamed_path" = "$RENAMED_PANE_CWD" ] \
+  || fail "real tmux: renamed task fixture did not report its adopted-worktree descendant cwd"
+tmux rename-window -t "$RENAMED_WID" lost-task-name \
+  || fail "real tmux: could not remove the task-like name from the live claim fixture"
+renamed_claim=$(fm_backend_tmux_worktree_claim "$SESSION" fm-new-adoption "$RENAMED_CWD")
+renamed_status=$?
+[ "$renamed_status" -eq 2 ] \
+  || fail "real tmux: renamed metadata-free occupancy should be ambiguous, got status $renamed_status and '$renamed_claim'"
+case "$renamed_claim" in
+  occupancy:*) : ;;
+  *) fail "real tmux: renamed metadata-free occupancy did not return a bounded occupancy reason: '$renamed_claim'" ;;
+esac
+pass "real tmux: adopted CWD inventory detects cross-session and same-name/different-id claims and refuses renamed metadata-free occupancy"
+
+PENDING_WID=$(fm_backend_tmux_create_task "$SESSION" fm-pending-retry "$PENDING_CWD") \
+  || fail "real tmux: could not create the pending-delivery recovery fixture"
+pending_path=
+for _ in $(seq 1 100); do
+  pending_path=$(fm_backend_tmux_current_path "$PENDING_WID" 2>/dev/null || true)
+  [ "$pending_path" = "$PENDING_CWD" ] && break
+  sleep 0.1
+done
+[ "$pending_path" = "$PENDING_CWD" ] \
+  || fail "real tmux: pending-delivery fixture did not report its exact adopted cwd"
+PENDING_SERVER_IDENTITY=$(fm_backend_tmux_server_identity "$PENDING_WID") \
+  || fail "real tmux: pending-delivery fixture had no stable server identity"
+tmux split-window -d -t "$PENDING_WID" -c "$PENDING_CWD" \
+  || fail "real tmux: could not add the unrelated second-pane safety fixture"
+pending_refusal=$(fm_backend_tmux_retire_adopted_window \
+  "$PENDING_WID" "$PENDING_SERVER_IDENTITY" "$SESSION" "$PENDING_CWD")
+pending_status=$?
+[ "$pending_status" -eq 2 ] && [ "$pending_refusal" = pane-count ] \
+  || fail "real tmux: pending endpoint cleanup did not refuse a multi-pane window"
+tmux list-windows -t "$SESSION" -F '#{window_id}' | grep -Fqx "$PENDING_WID" \
+  || fail "real tmux: multi-pane pending endpoint cleanup removed the window"
+extra_pane=$(tmux list-panes -t "$PENDING_WID" -F '#{pane_id}' | tail -1)
+tmux kill-pane -t "$extra_pane" \
+  || fail "real tmux: could not remove the second-pane safety fixture"
+tmux rename-window -t "$PENDING_WID" lost-pending-name \
+  || fail "real tmux: could not remove the pending endpoint's mutable name"
+fm_backend_tmux_retire_adopted_window \
+  "$PENDING_WID" "$PENDING_SERVER_IDENTITY" "$SESSION" "$PENDING_CWD" \
+  || fail "real tmux: exact pending endpoint could not be retired by stable id"
+if tmux list-windows -t "$SESSION" -F '#{window_id}' | grep -Fqx "$PENDING_WID"; then
+  fail "real tmux: exact pending endpoint survived stable-id retirement"
+fi
+pass "real tmux: adopted endpoint cleanup refuses multi-pane ambiguity and retires a renamed single-pane window by stable id"
+
 tmux rename-window -t "$STABLE_WID" fm-renamed-after-create \
   || fail "real tmux: could not simulate a lost task window name"
 fm_backend_tmux_kill_window_id "$STABLE_WID" \

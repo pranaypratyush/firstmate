@@ -532,6 +532,38 @@ test_meta_get_and_backend_of_meta() {
   pass "fm_meta_get / fm_backend_of_meta: read key=value, default backend to tmux"
 }
 
+test_meta_exact_value_contract() {
+  local meta=$TMP_ROOT/meta-exact.meta link=$TMP_ROOT/meta-exact-link.meta
+  fm_write_meta "$meta" "unique=value" "empty=" "duplicate=one" "duplicate=two"
+  [ "$(fm_backend_meta_exact_value "$meta" unique)" = value ] \
+    || fail "fm_backend_meta_exact_value did not read one non-empty field"
+  if fm_backend_meta_exact_value "$meta" empty >/dev/null 2>&1; then
+    fail "fm_backend_meta_exact_value accepted an empty field by default"
+  fi
+  fm_backend_meta_exact_value "$meta" empty allow-empty >/dev/null \
+    || fail "fm_backend_meta_exact_value did not preserve an explicitly allowed empty field"
+  if fm_backend_meta_exact_value "$meta" duplicate allow-empty >/dev/null 2>&1; then
+    fail "fm_backend_meta_exact_value accepted a duplicate field"
+  fi
+  ln -s "$meta" "$link"
+  if fm_backend_meta_exact_value "$link" unique >/dev/null 2>&1; then
+    fail "fm_backend_meta_exact_value followed symbolic metadata"
+  fi
+  pass "fm_backend_meta_exact_value centralizes regular-file, unique, non-empty parsing with explicit legacy empty-field compatibility"
+}
+
+test_tmux_server_identity_validation_contract() {
+  fm_backend_source tmux || fail "tmux adapter did not load for server-identity validation"
+  fm_backend_tmux_server_identity_valid '4242:123456' \
+    || fail "tmux server-identity validator refused a numeric pid/start-time pair"
+  for invalid in '' 4242 ':123456' '4242:' '4242:123456:7' 'pid:123456' '4242:now'; do
+    if fm_backend_tmux_server_identity_valid "$invalid"; then
+      fail "tmux server-identity validator accepted '$invalid'"
+    fi
+  done
+  pass "tmux adapter owns the exact durable and live server-identity grammar"
+}
+
 test_resolve_selector_three_forms() {
   local state=$TMP_ROOT/resolve-state fakebin out
   mkdir -p "$state"
@@ -1133,6 +1165,8 @@ test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
+test_meta_exact_value_contract
+test_tmux_server_identity_validation_contract
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
 test_send_conformance_old_vs_new

@@ -9,7 +9,7 @@
 #   FM_ADOPTED_IDENTITY_BRANCH=
 #   FM_ADOPTED_IDENTITY_HEAD=
 # On refusal it returns nonzero and sets FM_ADOPTED_IDENTITY_ERROR to one of:
-# absolute, newline, missing, resolve, nonphysical, project-root, isolated,
+# absolute, newline, project-newline, missing, resolve, nonphysical, project-root, isolated,
 # common-directory, inventory, registration, named-branch, or head.
 # FM_ADOPTED_IDENTITY_DETAIL carries the resolved path, registration count, or
 # other bounded detail needed for a caller-specific refusal.
@@ -36,6 +36,9 @@ fm_adopted_worktree_snapshot() {  # <worktree-path> <project-root>
   esac
   case "$worktree" in
     *$'\n'*|*$'\r'*) FM_ADOPTED_IDENTITY_ERROR=newline; return 1 ;;
+  esac
+  case "$project" in
+    *$'\n'*|*$'\r'*) FM_ADOPTED_IDENTITY_ERROR='project-newline'; return 1 ;;
   esac
   [ -d "$worktree" ] || { FM_ADOPTED_IDENTITY_ERROR=missing; FM_ADOPTED_IDENTITY_DETAIL=$worktree; return 1; }
   worktree_real=$(cd -- "$worktree" 2>/dev/null && pwd -P) || {

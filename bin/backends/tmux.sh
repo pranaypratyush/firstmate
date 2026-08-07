@@ -103,16 +103,58 @@ fm_backend_tmux_current_path() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null
 }
 
-# fm_backend_tmux_worktree_claim: inspect every live fm-<task-id> window in one
-# exact session while an adoption caller holds its home-wide claim lock.
-# Returns 0 with no output when clear, 1 printing the other task id when another
-# task has the exact physical cwd, and 2 printing a bounded reason when inventory,
-# window identity, pane cardinality, or cwd cannot be proven.
-fm_backend_tmux_worktree_claim() {  # <session> <own-window-name> <worktree>
-  local session=$1 own_window=$2 worktree=$3 inventory format line
-  local window_id window_name window_panes extra pane_path pane_real seen=$'\n'
-  format='#{window_id}|#{window_name}|#{window_panes}'
-  if ! inventory=$(LC_ALL=C tmux list-windows -t "$session" -F "$format" 2>/dev/null); then
+fm_backend_tmux_window_id_valid() {  # <window-id>
+  case "${1:-}" in
+    @|@*[!0-9]*|'') return 1 ;;
+    @*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_tmux_path_within_worktree() {  # <path> <worktree>
+  case "$1" in
+    "$2"|"$2"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_tmux_server_identity_valid() {  # <pid:start-time>
+  case "${1:-}" in
+    :*|*:|*:*:*|*[!0-9:]*) return 1 ;;
+    *:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# A stable window id is meaningful only inside one tmux server lifetime. Bind
+# it to the server process and start epoch so a restarted server cannot make an
+# old pending-delivery record authoritative over a newly reused @<id>.
+fm_backend_tmux_server_identity() {  # <target>
+  local identity pid started
+  identity=$(tmux display-message -p -t "$1" '#{pid}:#{start_time}' 2>/dev/null) || return 1
+  pid=${identity%%:*}
+  started=${identity#*:}
+  [ "$identity" != "$started" ] || return 1
+  fm_backend_tmux_server_identity_valid "$pid:$started" || return 1
+  printf '%s\n' "$identity"
+}
+
+# fm_backend_tmux_worktree_claim: inspect every live pane on the tmux server
+# while an adoption caller holds its home-wide claim lock. The caller's exact
+# session/window pair is excluded only after the live inventory resolves it
+# through a stable pane id; a same-named window in another session is never the
+# caller. Returns 0 with no output when clear, 1 printing the other task id when
+# an fm-<task-id> pane has the worktree-root-or-descendant physical cwd, and 2 printing a bounded
+# reason when inventory or cwd cannot be proven or an unlabelled pane occupies
+# the worktree root or one of its descendants.
+fm_backend_tmux_worktree_claim() {  # <session> <own-window-name> <worktree> [own-window-id]
+  local own_session=$1 own_window=$2 worktree=$3 own_window_id=${4:-} inventory pane_id
+  local pane_session pane_window_id window_name pane_path pane_real seen=$'\n'
+  [ -z "$own_window_id" ] || fm_backend_tmux_window_id_valid "$own_window_id" || {
+    printf '%s\n' own-window-id
+    return 2
+  }
+  if ! inventory=$(LC_ALL=C tmux list-panes -a -F '#{pane_id}' 2>/dev/null); then
     printf '%s\n' inventory
     return 2
   fi
@@ -120,51 +162,66 @@ fm_backend_tmux_worktree_claim() {  # <session> <own-window-name> <worktree>
     printf '%s\n' empty-inventory
     return 2
   }
-  while IFS= read -r line || [ -n "$line" ]; do
-    IFS='|' read -r window_id window_name window_panes extra <<EOF
-$line
-EOF
-    case "$window_id" in
-      @|@*[!0-9]*|'') printf '%s\n' window-id; return 2 ;;
-      @*) ;;
-      *) printf '%s\n' window-id; return 2 ;;
-    esac
-    [ -n "$window_name" ] && [ -z "$extra" ] || {
-      printf '%s\n' window-record
-      return 2
-    }
-    case "$window_panes" in
-      ''|*[!0-9]*) printf '%s\n' window-record; return 2 ;;
+  while IFS= read -r pane_id || [ -n "$pane_id" ]; do
+    case "$pane_id" in
+      %|%*[!0-9]*|'') printf '%s\n' pane-id; return 2 ;;
+      %*) ;;
+      *) printf '%s\n' pane-id; return 2 ;;
     esac
     case "$seen" in
-      *$'\n'"$window_id"$'\n'*) printf '%s\n' duplicate-window-id; return 2 ;;
+      *$'\n'"$pane_id"$'\n'*) printf '%s\n' duplicate-pane-id; return 2 ;;
     esac
-    seen="$seen$window_id"$'\n'
-    case "$window_name" in
-      fm-) printf '%s\n' task-window; return 2 ;;
-      fm-*) ;;
-      *) continue ;;
-    esac
-    [ "$window_name" != "$own_window" ] || continue
-    [ "$window_panes" = 1 ] || {
-      printf 'pane-count:%s\n' "$window_name"
+    seen="$seen$pane_id"$'\n'
+    pane_session=$(tmux display-message -p -t "$pane_id" '#{session_name}' 2>/dev/null) || {
+      printf 'session:%s\n' "$pane_id"
       return 2
     }
-    pane_path=$(fm_backend_tmux_current_path "$window_id") || {
-      printf 'cwd:%s\n' "$window_name"
+    if [ -n "$own_window_id" ]; then
+      pane_window_id=$(tmux display-message -p -t "$pane_id" '#{window_id}' 2>/dev/null) || {
+        printf 'window-id:%s\n' "$pane_id"
+        return 2
+      }
+      fm_backend_tmux_window_id_valid "$pane_window_id" || {
+        printf 'window-id:%s\n' "$pane_id"
+        return 2
+      }
+      if [ "$pane_session" = "$own_session" ] && [ "$pane_window_id" = "$own_window_id" ]; then
+        continue
+      fi
+    fi
+    window_name=$(tmux display-message -p -t "$pane_id" '#{window_name}' 2>/dev/null) || {
+      printf 'window:%s\n' "$pane_id"
+      return 2
+    }
+    [ -n "$pane_session" ] && [ -n "$window_name" ] || {
+      printf 'pane-record:%s\n' "$pane_id"
+      return 2
+    }
+    case "$pane_session$window_name" in
+      *$'\n'*|*$'\r'*|*$'\t'*) printf 'pane-record:%s\n' "$pane_id"; return 2 ;;
+    esac
+    if [ -z "$own_window_id" ] \
+       && [ "$pane_session" = "$own_session" ] && [ "$window_name" = "$own_window" ]; then
+      continue
+    fi
+    pane_path=$(fm_backend_tmux_current_path "$pane_id") || {
+      printf 'cwd:%s\n' "$pane_id"
       return 2
     }
     [ -n "$pane_path" ] || {
-      printf 'cwd:%s\n' "$window_name"
+      printf 'cwd:%s\n' "$pane_id"
       return 2
     }
     pane_real=$(cd -- "$pane_path" 2>/dev/null && pwd -P) || {
-      printf 'cwd:%s\n' "$window_name"
+      printf 'cwd:%s\n' "$pane_id"
       return 2
     }
-    if [ "$pane_real" = "$worktree" ]; then
-      printf '%s\n' "${window_name#fm-}"
-      return 1
+    if fm_backend_tmux_path_within_worktree "$pane_real" "$worktree"; then
+        case "$window_name" in
+          fm-) printf '%s\n' task-window; return 2 ;;
+          fm-*) printf '%s\n' "${window_name#fm-}"; return 1 ;;
+          *) printf 'occupancy:%s:%s\n' "$pane_session" "$pane_id"; return 2 ;;
+        esac
     fi
   done <<EOF
 $inventory
@@ -211,12 +268,79 @@ fm_backend_tmux_kill() {  # <target>
 # selector and returns the real tmux status so its caller can surface failure.
 fm_backend_tmux_kill_window_id() {  # <window-id>
   local window_id=${1:-}
-  case "$window_id" in
-    @|@*[!0-9]*) return 1 ;;
-    @*) ;;
-    *) return 1 ;;
-  esac
+  fm_backend_tmux_window_id_valid "$window_id" || return 1
   tmux kill-window -t "$window_id"
+}
+
+# fm_backend_tmux_retire_adopted_window: remove an adopted endpoint by its
+# durable creation-time window id during same-task retry or teardown. A live
+# id is removed only after its server lifetime, session, sole
+# pane, and physical worktree-root-or-descendant CWD all match. An absent id is already clear;
+# unreadable inventory or any identity mismatch fails closed with a bounded
+# reason on stdout.
+fm_backend_tmux_retire_adopted_window() {  # <window-id> <server-identity> <session> <worktree>
+  local window_id=$1 expected_server=$2 expected_session=$3 worktree=$4
+  local actual_server actual_id inventory actual_session panes pane_id pane_path pane_real
+  fm_backend_tmux_window_id_valid "$window_id" || { printf '%s\n' window-id; return 2; }
+  fm_backend_tmux_server_identity_valid "$expected_server" \
+    || { printf '%s\n' expected-server-identity; return 2; }
+  actual_server=$(fm_backend_tmux_server_identity "$expected_session") || {
+    printf '%s\n' server-identity
+    return 2
+  }
+  [ "$actual_server" = "$expected_server" ] || {
+    printf '%s\n' server-mismatch
+    return 2
+  }
+  if ! actual_id=$(tmux display-message -p -t "$window_id" '#{window_id}' 2>/dev/null); then
+    inventory=$(tmux list-windows -a -F '#{window_id}' 2>/dev/null) || {
+      printf '%s\n' window-inventory
+      return 2
+    }
+    if printf '%s\n' "$inventory" | grep -Fxq "$window_id"; then
+      printf '%s\n' window-unreadable
+      return 2
+    fi
+    return 0
+  fi
+  [ "$actual_id" = "$window_id" ] || {
+    printf '%s\n' window-identity
+    return 2
+  }
+  actual_session=$(tmux display-message -p -t "$window_id" '#{session_name}' 2>/dev/null) || {
+    printf '%s\n' session
+    return 2
+  }
+  [ "$actual_session" = "$expected_session" ] || {
+    printf '%s\n' endpoint-identity
+    return 2
+  }
+  panes=$(tmux list-panes -t "$window_id" -F '#{pane_id}' 2>/dev/null) || {
+    printf '%s\n' pane-inventory
+    return 2
+  }
+  pane_id=$(printf '%s\n' "$panes" | grep -E '^%[0-9]+$' || true)
+  [ -n "$pane_id" ] && [ "$(printf '%s\n' "$pane_id" | wc -l | tr -d '[:space:]')" -eq 1 ] \
+    && [ "$pane_id" = "$panes" ] || {
+      printf '%s\n' pane-count
+      return 2
+    }
+  pane_path=$(fm_backend_tmux_current_path "$pane_id") || {
+    printf '%s\n' cwd
+    return 2
+  }
+  pane_real=$(cd -- "$pane_path" 2>/dev/null && pwd -P) || {
+    printf '%s\n' cwd
+    return 2
+  }
+  fm_backend_tmux_path_within_worktree "$pane_real" "$worktree" || {
+    printf '%s\n' cwd-identity
+    return 2
+  }
+  fm_backend_tmux_kill_window_id "$window_id" || {
+    printf '%s\n' window-kill
+    return 2
+  }
 }
 
 # fm_backend_tmux_current_command: <target>'s live foreground process name -

@@ -63,6 +63,11 @@
 #   supported harnesses are codex, pi, pi-signed, and muse because their spawn
 #   wiring writes nothing inside the worktree; raw commands and adapters that
 #   install worktree-local hooks are refused rather than modifying adopted bytes.
+#   When FM_HOME is a retireable secondmate home, the requested project must be
+#   one direct physical checkout under that home's projects/ directory. This
+#   makes its Git worktree registration rediscoverable after ordinary task meta
+#   retires, so recursive parent teardown can still preserve inside-home and
+#   outside-home adopted descendants.
 #   Spawn creates state/<id>.adopted-brief.md outside the worktree with the exact
 #   expected physical path, branch, and HEAD captured at intake. That addendum
 #   supersedes only the disposable/detached/create-branch setup text in the
@@ -72,9 +77,11 @@
 #   retains the historical Firstmate-owned allocation contract byte-for-byte.
 #   The complete worktree identity is revalidated immediately before atomic meta
 #   publication. Until launch delivery succeeds, abort cleanup owns the endpoint
-#   by its stable tmux window id; a later send refusal removes that endpoint while
-#   retaining aligned durable metadata and addendum state for a collision-free
-#   same-id retry.
+#   by its stable tmux window id. Publication records that id with pending
+#   delivery, and successful brief delivery atomically marks it complete. A
+#   later send refusal retains aligned durable metadata and addendum state; if
+#   abort cleanup also fails, same-id retry verifies and retires only that exact
+#   pending endpoint before creating its replacement, avoiding a name collision.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -686,11 +693,15 @@ ADOPTION_LOCK=
 ADOPTION_LOCK_HELD=0
 ADOPTED_ENDPOINT_ABORT_CLEANUP=0
 ADOPTED_ENDPOINT_ID=
+ADOPTED_RECOVERY_ENDPOINT_ID=
 ADOPTED_TMUX_SESSION=
+ADOPTED_TMUX_SERVER_IDENTITY=
+ADOPTED_RECOVERY_SERVER_IDENTITY=
 ADOPTED_BRIEF_ABORT_CLEANUP=0
 ADOPTED_BRIEF_PREVIOUS_TMP=
 ADOPTED_BRIEF_PREVIOUS_PRESENT=0
 ADOPTED_META_TMP=
+ADOPTED_DELIVERY_TMP=
 ADOPTED_PRIOR_META=0
 
 parse_orca_worktree_result() {
@@ -776,6 +787,7 @@ spawn_abort_cleanup() {
   fi
   [ -z "$ADOPTED_BRIEF_PREVIOUS_TMP" ] || rm -f -- "$ADOPTED_BRIEF_PREVIOUS_TMP"
   [ -z "$ADOPTED_META_TMP" ] || rm -f -- "$ADOPTED_META_TMP"
+  [ -z "$ADOPTED_DELIVERY_TMP" ] || rm -f -- "$ADOPTED_DELIVERY_TMP"
   if [ "$ADOPTION_LOCK_HELD" = 1 ]; then
     ADOPTION_LOCK_HELD=0
     fm_lock_release "$ADOPTION_LOCK" || true
@@ -1503,14 +1515,6 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
-spawn_meta_exact_value() {  # <meta> <key>
-  local meta=$1 key=$2 count
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  count=$(grep -c "^${key}=" "$meta" 2>/dev/null || true)
-  [ "$count" = 1 ] || return 1
-  grep "^${key}=" "$meta" | cut -d= -f2-
-}
-
 verify_adopted_identity() {  # <phase>
   local phase=$1
   fm_adopted_worktree_identity_matches \
@@ -1525,6 +1529,7 @@ report_adopted_snapshot_refusal() {
   case "${FM_ADOPTED_IDENTITY_ERROR:-unknown}" in
     absolute) echo "error: --existing-worktree requires an exact absolute path, got '$EXISTING_WORKTREE_ARG'" >&2 ;;
     newline) echo "error: --existing-worktree path must not contain a newline" >&2 ;;
+    project-newline) echo "error: requested project path must not contain a newline" >&2 ;;
     missing) echo "error: adopted worktree does not exist as a directory: $EXISTING_WORKTREE_ARG" >&2 ;;
     resolve) echo "error: adopted worktree cannot be resolved exactly: $EXISTING_WORKTREE_ARG" >&2 ;;
     nonphysical) echo "error: --existing-worktree must use the exact physical worktree path '$FM_ADOPTED_IDENTITY_DETAIL', not '$EXISTING_WORKTREE_ARG'" >&2 ;;
@@ -1539,9 +1544,32 @@ report_adopted_snapshot_refusal() {
   esac
 }
 
+validate_retireable_home_adoption_project() {
+  local marker="$FM_HOME/$SUB_HOME_MARKER" projects_dir projects_real relative
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    return 0
+  fi
+  projects_dir="$FM_HOME/projects"
+  projects_real=$(cd -- "$projects_dir" 2>/dev/null && pwd -P) || {
+    echo "error: retireable secondmate home '$FM_HOME' has no resolvable projects directory; adopted worktree retirement ownership is uncertain" >&2
+    return 1
+  }
+  case "$PROJ_ABS_REAL" in
+    "$projects_real"/*) relative=${PROJ_ABS_REAL#"$projects_real"/} ;;
+    *) relative= ;;
+  esac
+  case "$relative" in
+    ''|*/*)
+      echo "error: a retireable secondmate home may adopt only from one direct checkout under '$projects_dir'; requested project '$PROJ_ABS_REAL' could not be rediscovered safely after task cleanup" >&2
+      return 1
+      ;;
+  esac
+}
+
 prepare_existing_worktree_adoption() {
   local requested=$EXISTING_WORKTREE_ARG
   local meta meta_id claim claim_real own project branch prior_meta=0 claim_status live_claim
+  local delivery_count endpoint_id_count server_id_count delivery endpoint_id server_id
   local adopted_brief_tmp status_file_q expected_path_q expected_branch_q expected_head_q brief_path
 
   if ! fm_adopted_worktree_snapshot "$requested" "$PROJ_ABS_REAL"; then
@@ -1552,6 +1580,7 @@ prepare_existing_worktree_adoption() {
   ADOPTED_WORKTREE_BRANCH=$FM_ADOPTED_IDENTITY_BRANCH
   ADOPTED_WORKTREE_HEAD=$FM_ADOPTED_IDENTITY_HEAD
   WT=$ADOPTED_WORKTREE_PATH
+  validate_retireable_home_adoption_project || return 1
 
   mkdir -p "$STATE" || return 1
   ADOPTION_LOCK="$STATE/.existing-worktree-adoption.lock"
@@ -1567,7 +1596,7 @@ prepare_existing_worktree_adoption() {
       return 1
     }
     meta_id=$(basename "$meta" .meta)
-    claim=$(spawn_meta_exact_value "$meta" worktree) || {
+    claim=$(fm_backend_meta_exact_value "$meta" worktree) || {
       echo "error: task metadata $meta has an ambiguous worktree claim; adoption refused" >&2
       return 1
     }
@@ -1577,15 +1606,42 @@ prepare_existing_worktree_adoption() {
         echo "error: task $ID already has durable metadata for a different worktree: $claim" >&2
         return 1
       }
-      own=$(spawn_meta_exact_value "$meta" worktree_ownership) || own=
-      project=$(spawn_meta_exact_value "$meta" project) || project=
+      own=$(fm_backend_meta_exact_value "$meta" worktree_ownership) || own=
+      project=$(fm_backend_meta_exact_value "$meta" project) || project=
       project=$(cd -- "$project" 2>/dev/null && pwd -P) || project=
-      branch=$(spawn_meta_exact_value "$meta" adopted_branch) || branch=
+      branch=$(fm_backend_meta_exact_value "$meta" adopted_branch) || branch=
       [ "$own" = adopted ] && [ "$project" = "$PROJ_ABS_REAL" ] \
         && [ "$branch" = "$ADOPTED_WORKTREE_BRANCH" ] || {
         echo "error: existing metadata for task $ID does not prove the same adopted worktree, project, and branch" >&2
         return 1
       }
+      delivery_count=$(grep -c '^adopted_delivery=' "$meta" 2>/dev/null || true)
+      endpoint_id_count=$(grep -c '^adopted_window_id=' "$meta" 2>/dev/null || true)
+      server_id_count=$(grep -c '^adopted_tmux_server_identity=' "$meta" 2>/dev/null || true)
+      if [ "$delivery_count" -eq 0 ] && [ "$endpoint_id_count" -eq 0 ] && [ "$server_id_count" -eq 0 ]; then
+        delivery=legacy
+      elif [ "$delivery_count" -eq 1 ] && [ "$endpoint_id_count" -eq 1 ] && [ "$server_id_count" -eq 1 ]; then
+        delivery=$(fm_backend_meta_exact_value "$meta" adopted_delivery) || delivery=
+        endpoint_id=$(fm_backend_meta_exact_value "$meta" adopted_window_id) || endpoint_id=
+        server_id=$(fm_backend_meta_exact_value "$meta" adopted_tmux_server_identity) || server_id=
+        case "$delivery" in
+          pending|complete) ;;
+          *) delivery= ;;
+        esac
+        fm_backend_tmux_window_id_valid "$endpoint_id" || delivery=
+        fm_backend_tmux_server_identity_valid "$server_id" || delivery=
+        [ -n "$delivery" ] || {
+          echo "error: existing metadata for task $ID has ambiguous adopted endpoint delivery identity" >&2
+          return 1
+        }
+        if [ "$delivery" = pending ]; then
+          ADOPTED_RECOVERY_ENDPOINT_ID=$endpoint_id
+          ADOPTED_RECOVERY_SERVER_IDENTITY=$server_id
+        fi
+      else
+        echo "error: existing metadata for task $ID has ambiguous adopted endpoint delivery identity" >&2
+        return 1
+      fi
       prior_meta=1
     elif [ "$claim_real" = "$WT" ]; then
       echo "error: adopted worktree is already claimed by durable task $meta_id at $meta" >&2
@@ -1598,7 +1654,16 @@ prepare_existing_worktree_adoption() {
     echo "error: live tmux task inventory is ambiguous; adoption could not resolve its exact session" >&2
     return 1
   }
-  if live_claim=$(fm_backend_tmux_worktree_claim "$ADOPTED_TMUX_SESSION" "fm-$ID" "$WT"); then
+  ADOPTED_TMUX_SERVER_IDENTITY=$(fm_backend_tmux_server_identity "$ADOPTED_TMUX_SESSION") || {
+    echo "error: live tmux task inventory is ambiguous; adoption could not bind the current tmux server lifetime" >&2
+    return 1
+  }
+  if [ -n "$ADOPTED_RECOVERY_ENDPOINT_ID" ] \
+     && [ "$ADOPTED_RECOVERY_SERVER_IDENTITY" != "$ADOPTED_TMUX_SERVER_IDENTITY" ]; then
+    ADOPTED_RECOVERY_ENDPOINT_ID=
+  fi
+  if live_claim=$(fm_backend_tmux_worktree_claim \
+    "$ADOPTED_TMUX_SESSION" "fm-$ID" "$WT" "$ADOPTED_RECOVERY_ENDPOINT_ID"); then
     :
   else
     claim_status=$?
@@ -1689,19 +1754,19 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
     }
     target_session=$FM_BACKEND_HERDR_SESSION
     target_pane=$FM_BACKEND_HERDR_PANE
-    old_session=$(spawn_meta_exact_value "$meta" herdr_session) || {
+    old_session=$(fm_backend_meta_exact_value "$meta" herdr_session allow-empty) || {
       echo "error: existing herdr metadata for $ID has an ambiguous session; refusing duplicate launch" >&2
       return 1
     }
-    HERDR_RECOVERY_WORKSPACE_ID=$(spawn_meta_exact_value "$meta" herdr_workspace_id) || {
+    HERDR_RECOVERY_WORKSPACE_ID=$(fm_backend_meta_exact_value "$meta" herdr_workspace_id allow-empty) || {
       echo "error: existing herdr metadata for $ID has an ambiguous workspace; refusing duplicate launch" >&2
       return 1
     }
-    HERDR_RECOVERY_TAB_ID=$(spawn_meta_exact_value "$meta" herdr_tab_id) || {
+    HERDR_RECOVERY_TAB_ID=$(fm_backend_meta_exact_value "$meta" herdr_tab_id allow-empty) || {
       echo "error: existing herdr metadata for $ID has an ambiguous tab; refusing duplicate launch" >&2
       return 1
     }
-    old_pane=$(spawn_meta_exact_value "$meta" herdr_pane_id) || {
+    old_pane=$(fm_backend_meta_exact_value "$meta" herdr_pane_id allow-empty) || {
       echo "error: existing herdr metadata for $ID has an ambiguous pane; refusing duplicate launch" >&2
       return 1
     }
@@ -1736,6 +1801,14 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 W="fm-$ID"
 TASK_CWD=$PROJ_ABS
 [ "$EXISTING_WORKTREE_SET" -eq 0 ] || TASK_CWD=$WT
+if [ -n "$ADOPTED_RECOVERY_ENDPOINT_ID" ]; then
+  recovery_cleanup=$(fm_backend_tmux_retire_adopted_window \
+    "$ADOPTED_RECOVERY_ENDPOINT_ID" "$ADOPTED_RECOVERY_SERVER_IDENTITY" \
+    "$ADOPTED_TMUX_SESSION" "$WT") || {
+      echo "error: pending adopted endpoint $ADOPTED_RECOVERY_ENDPOINT_ID could not be retired safely before retry (${recovery_cleanup:-unknown})" >&2
+      exit 1
+    }
+fi
 case "$BACKEND" in
   tmux)
     if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
@@ -2474,6 +2547,9 @@ fi
     echo "worktree_ownership=adopted"
     echo "adopted_branch=$ADOPTED_WORKTREE_BRANCH"
     echo "adopted_head=$ADOPTED_WORKTREE_HEAD"
+    echo "adopted_window_id=$ADOPTED_ENDPOINT_ID"
+    echo "adopted_tmux_server_identity=$ADOPTED_TMUX_SERVER_IDENTITY"
+    echo "adopted_delivery=pending"
   fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   # Default-off writes no traceparent= line (meta stays byte-identical).
@@ -2514,7 +2590,7 @@ fi
     while IFS= read -r prior_line || [ -n "$prior_line" ]; do
       case "$prior_line" in
         window=*|endpoint_task_id=*|worktree=*|project=*|harness=*|kind=*|mode=*|yolo=*|tasktmp=*|model=*|effort=*|\
-        worktree_ownership=*|adopted_branch=*|adopted_head=*|busy_gen=*|traceparent=*|backend=*|\
+        worktree_ownership=*|adopted_branch=*|adopted_head=*|adopted_window_id=*|adopted_tmux_server_identity=*|adopted_delivery=*|busy_gen=*|traceparent=*|backend=*|\
         herdr_session=*|herdr_workspace_id=*|herdr_tab_id=*|herdr_pane_id=*|\
         zellij_session=*|zellij_tab_id=*|zellij_pane_id=*|orca_worktree_id=*|terminal=*|\
         cmux_workspace_id=*|cmux_surface_id=*|home=*|projects=*) ;;
@@ -2645,7 +2721,31 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   fi
 fi
 
-[ "$EXISTING_WORKTREE_SET" -eq 0 ] || ADOPTED_ENDPOINT_ABORT_CLEANUP=0
+if [ "$EXISTING_WORKTREE_SET" -eq 1 ]; then
+  [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] || {
+    echo "error: adopted endpoint delivery metadata is no longer a regular task record; preserving pending recovery state" >&2
+    exit 1
+  }
+  ADOPTED_DELIVERY_TMP=$(umask 077; mktemp "$STATE/.${ID}.delivery.XXXXXXXX") || exit 1
+  delivery_count=0
+  while IFS= read -r delivery_line || [ -n "$delivery_line" ]; do
+    case "$delivery_line" in
+      adopted_delivery=*)
+        delivery_count=$((delivery_count + 1))
+        printf '%s\n' 'adopted_delivery=complete'
+        ;;
+      *) printf '%s\n' "$delivery_line" ;;
+    esac
+  done < "$STATE/$ID.meta" > "$ADOPTED_DELIVERY_TMP"
+  if [ "$delivery_count" -ne 1 ] || ! mv -f -- "$ADOPTED_DELIVERY_TMP" "$STATE/$ID.meta"; then
+    rm -f -- "$ADOPTED_DELIVERY_TMP"
+    ADOPTED_DELIVERY_TMP=
+    echo "error: adopted endpoint delivery could not be marked complete; preserving pending recovery metadata" >&2
+    exit 1
+  fi
+  ADOPTED_DELIVERY_TMP=
+  ADOPTED_ENDPOINT_ABORT_CLEANUP=0
+fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

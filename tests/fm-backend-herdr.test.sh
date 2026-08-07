@@ -214,9 +214,13 @@ test_version_check_refuses_old_protocol() {
 }
 
 test_version_check_refuses_missing_herdr() {
-  local dir out status
+  local dir out status bash_bin jq_bin
   dir="$TMP_ROOT/version-missing"; mkdir -p "$dir/empty-fakebin"
-  out=$( PATH="$dir/empty-fakebin:/usr/bin:/bin" \
+  bash_bin=$(command -v bash)
+  jq_bin=$(command -v jq)
+  ln -s "$bash_bin" "$dir/empty-fakebin/bash"
+  ln -s "$jq_bin" "$dir/empty-fakebin/jq"
+  out=$( PATH="$dir/empty-fakebin" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_version_check' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "version_check should refuse when herdr is not installed"

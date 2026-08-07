@@ -87,7 +87,18 @@ case "${1:-}" in
     done
     [ -z "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-}" ] || exit 17
     [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && rm -f "$FM_FAKE_TREEHOUSE_LEASE_FILE"
-    [ -n "$target" ] && rm -rf -- "$target"
+    if [ -n "$target" ] && [ -d "$target" ] \
+       && git -C "$target" rev-parse --git-dir >/dev/null 2>&1; then
+      primary=$(git -C "$target" worktree list --porcelain 2>/dev/null \
+        | sed -n 's/^worktree //p' | head -1)
+      if [ -n "$primary" ] && [ "$primary" != "$target" ]; then
+        git -C "$primary" worktree remove --force "$target" || exit 18
+      else
+        rm -rf -- "$target"
+      fi
+    elif [ -n "$target" ]; then
+      rm -rf -- "$target"
+    fi
     exit 0
     ;;
 esac

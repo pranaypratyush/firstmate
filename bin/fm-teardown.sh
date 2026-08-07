@@ -47,9 +47,13 @@
 # refuses teardown, including --force. The marker is accepted only once and only
 # with one adopted_branch= and adopted_head= on the supported tmux ordinary-task
 # contract; any other value or shape refuses before cleanup mutation. Forced
-# recursive secondmate retirement refuses before mutation when any descendant
-# is adopted, because deleting that home could remove the worktree itself or
-# the Git common directory on which an outside worktree still depends.
+# recursive secondmate retirement refuses before mutation when descendant
+# metadata declares adoption or when a direct checkout under the home's projects/
+# directory still registers an unowned secondary Git worktree. fm-spawn refuses
+# adopted secondmate-home tasks whose requested project is not discoverable in
+# that exact inventory. The Git registration remains authoritative after ordinary
+# task metadata cleanup, so deleting that home can never remove an inside worktree
+# or the common directory on which an outside worktree depends.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -452,6 +456,43 @@ validate_adopted_worktree_metadata() {  # <meta> <kind> <backend>
   fi
 }
 
+load_adopted_tmux_endpoint_identity() {  # <meta>
+  local meta=$1 window_id server_identity delivery
+  fm_backend_source tmux || {
+    echo "error: tmux endpoint validation is unavailable for adopted worktree metadata in $meta; preserving task state" >&2
+    return 1
+  }
+  window_id=$(fm_backend_meta_exact_value "$meta" adopted_window_id) || {
+    echo "error: adopted worktree metadata in $meta lacks one exact stable tmux window id; preserving task state" >&2
+    return 1
+  }
+  server_identity=$(fm_backend_meta_exact_value "$meta" adopted_tmux_server_identity) || {
+    echo "error: adopted worktree metadata in $meta lacks one exact tmux server identity; preserving task state" >&2
+    return 1
+  }
+  delivery=$(fm_backend_meta_exact_value "$meta" adopted_delivery) || {
+    echo "error: adopted worktree metadata in $meta lacks one exact endpoint delivery state; preserving task state" >&2
+    return 1
+  }
+  fm_backend_tmux_window_id_valid "$window_id" || {
+    echo "error: adopted worktree metadata in $meta has an invalid stable tmux window id; preserving task state" >&2
+    return 1
+  }
+  fm_backend_tmux_server_identity_valid "$server_identity" || {
+    echo "error: adopted worktree metadata in $meta has an invalid tmux server identity; preserving task state" >&2
+    return 1
+  }
+  case "$delivery" in
+    pending|complete) ;;
+    *)
+      echo "error: adopted worktree metadata in $meta has an invalid endpoint delivery state; preserving task state" >&2
+      return 1
+      ;;
+  esac
+  TEARDOWN_ADOPTED_WINDOW_ID=$window_id
+  TEARDOWN_ADOPTED_SERVER_IDENTITY=$server_identity
+}
+
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
@@ -469,6 +510,7 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 WORKTREE_OWNERSHIP=$(require_worktree_ownership "$META") || exit 1
 if [ "$WORKTREE_OWNERSHIP" = adopted ]; then
   validate_adopted_worktree_metadata "$META" "$KIND" "$BACKEND" || exit 1
+  load_adopted_tmux_endpoint_identity "$META" || exit 1
 fi
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
@@ -1661,6 +1703,108 @@ validate_firstmate_operational_dirs_for_removal() {
   done
 }
 
+validate_firstmate_home_git_worktree_dependencies() {
+  local home=$1 label=$2 projects project project_abs project_top project_top_abs
+  local common common_abs inventory item listed listed_abs listed_git listed_git_abs
+  local allowed allowed_abs permitted dependency primary_count seen_common=$'\n'
+  shift 2
+  projects="$home/projects"
+  [ -e "$projects" ] || [ -L "$projects" ] || return 0
+  [ -d "$projects" ] || {
+    echo "REFUSED: cannot inspect $label projects directory $projects for linked Git worktree dependencies" >&2
+    return 1
+  }
+  for project in "$projects"/* "$projects"/.[!.]* "$projects"/..?*; do
+    [ -e "$project" ] || [ -L "$project" ] || continue
+    [ -d "$project" ] || {
+      echo "REFUSED: cannot inspect $label project entry $project for linked Git worktree dependencies" >&2
+      return 1
+    }
+    project_abs=$(cd -- "$project" 2>/dev/null && pwd -P) || {
+      echo "REFUSED: cannot resolve $label project entry $project while checking linked Git worktree dependencies" >&2
+      return 1
+    }
+    project_top=$(git -C "$project_abs" rev-parse --show-toplevel 2>/dev/null) || {
+      echo "REFUSED: cannot prove $label project entry $project_abs is an exact Git checkout while checking linked Git worktree dependencies" >&2
+      return 1
+    }
+    project_top_abs=$(cd -- "$project_top" 2>/dev/null && pwd -P) || {
+      echo "REFUSED: cannot resolve the Git checkout root for $label project entry $project_abs" >&2
+      return 1
+    }
+    [ "$project_top_abs" = "$project_abs" ] || {
+      echo "REFUSED: $label project entry $project_abs is not its exact Git checkout root; linked Git worktree ownership is uncertain" >&2
+      return 1
+    }
+    common=$(git -C "$project_abs" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || {
+      echo "REFUSED: cannot resolve the Git common directory for $label project $project_abs" >&2
+      return 1
+    }
+    common_abs=$(cd -- "$common" 2>/dev/null && pwd -P) || {
+      echo "REFUSED: cannot inspect the Git common directory for $label project $project_abs" >&2
+      return 1
+    }
+    case "$common_abs" in
+      *$'\n'*|*$'\r'*|*$'\t'*)
+        echo "REFUSED: $label project $project_abs has an unsafe Git common-directory identity" >&2
+        return 1
+        ;;
+    esac
+    case "$seen_common" in
+      *$'\n'"$common_abs"$'\n'*) continue ;;
+    esac
+    seen_common="$seen_common$common_abs"$'\n'
+    inventory=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-home-worktrees.XXXXXXXX") || {
+      echo "REFUSED: cannot stage the Git worktree inventory for $label project $project_abs" >&2
+      return 1
+    }
+    if ! git -C "$project_abs" worktree list --porcelain -z > "$inventory" 2>/dev/null; then
+      rm -f -- "$inventory"
+      echo "REFUSED: cannot read the Git worktree inventory for $label project $project_abs" >&2
+      return 1
+    fi
+    dependency=
+    primary_count=0
+    while IFS= read -r -d '' item; do
+      case "$item" in
+        worktree\ *)
+          listed=${item#worktree }
+          listed_abs=$(removal_target_abs_path "$listed" 2>/dev/null || true)
+          if [ -n "$listed_abs" ] && [ -d "$listed" ]; then
+            listed_git=$(git -C "$listed" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)
+            listed_git_abs=$(cd -- "$listed_git" 2>/dev/null && pwd -P) || listed_git_abs=
+            if [ "$listed_git_abs" = "$common_abs" ]; then
+              primary_count=$((primary_count + 1))
+              continue
+            fi
+          fi
+          permitted=0
+          for allowed in "$@"; do
+            allowed_abs=$(removal_target_abs_path "$allowed" 2>/dev/null || true)
+            if [ -n "$listed_abs" ] && [ "$listed_abs" = "$allowed_abs" ] && [ -d "$listed" ]; then
+              permitted=1
+              break
+            fi
+          done
+          if [ "$permitted" -ne 1 ]; then
+            dependency=1
+            break
+          fi
+          ;;
+      esac
+    done < "$inventory"
+    rm -f -- "$inventory"
+    [ "$primary_count" -eq 1 ] || {
+      echo "REFUSED: $label project $project_abs has no unique primary Git checkout; linked worktree ownership is uncertain" >&2
+      return 1
+    }
+    [ -z "$dependency" ] || {
+      echo "REFUSED: $label project $project_abs has a linked Git worktree dependency; preserving the home and every registered worktree" >&2
+      return 1
+    }
+  done
+}
+
 validate_child_worktree_for_removal() {
   local target=$1 project=$2 abs_target abs_home abs_root
   [ -n "$target" ] || return 0
@@ -1755,8 +1899,13 @@ remove_firstmate_home() {
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
+  validate_firstmate_home_git_worktree_dependencies "$abs_home_path" "$label" || return 1
   process_event_backup=$(snapshot_firstmate_home_process_events "$abs_home_path" "$label") || return 1
   if ! cleanup_firstmate_home_process_events "$abs_home_path" "$label"; then
+    restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+    return 1
+  fi
+  if ! validate_firstmate_home_git_worktree_dependencies "$abs_home_path" "$label"; then
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
     return 1
   fi
@@ -1912,41 +2061,47 @@ preflight_firstmate_home_process_event_tree() {
 
 validate_firstmate_home_children_removal() {
   local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_ownership
+  local -a removable_worktrees=()
   sub_state="$home/state"
-  [ -d "$sub_state" ] || return 0
-  for child_meta in "$sub_state"/*.meta; do
-    [ -e "$child_meta" ] || continue
-    child_id=$(basename "$child_meta" .meta)
-    fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
-    validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
-    child_wt=$(meta_value "$child_meta" worktree)
-    child_kind=$(meta_value "$child_meta" kind)
-    [ -n "$child_kind" ] || child_kind=ship
-    child_backend=$(fm_backend_of_meta "$child_meta")
-    child_ownership=$(require_worktree_ownership "$child_meta") || return 1
-    if [ "$child_ownership" = adopted ]; then
-      validate_adopted_worktree_metadata "$child_meta" "$child_kind" "$child_backend" || return 1
-    fi
-    if [ "$child_kind" = secondmate ]; then
-      child_home=$(meta_value "$child_meta" home)
-      [ -n "$child_home" ] || child_home=$child_wt
-      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
-      validate_firstmate_home_children_removal "$child_home" || return 1
-    elif [ "$child_ownership" = adopted ]; then
-      echo "REFUSED: secondmate retirement found adopted descendant $child_id at $child_wt; preserving the descendant, its Git common-directory dependency, the parent home, and every durable record" >&2
-      return 1
-    elif [ "$child_backend" = orca ]; then
-      child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
-      if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
+  if [ -d "$sub_state" ]; then
+    for child_meta in "$sub_state"/*.meta; do
+      [ -e "$child_meta" ] || continue
+      child_id=$(basename "$child_meta" .meta)
+      fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
+      validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
+      child_wt=$(meta_value "$child_meta" worktree)
+      child_kind=$(meta_value "$child_meta" kind)
+      [ -n "$child_kind" ] || child_kind=ship
+      child_backend=$(fm_backend_of_meta "$child_meta")
+      child_ownership=$(require_worktree_ownership "$child_meta") || return 1
+      if [ "$child_ownership" = adopted ]; then
+        validate_adopted_worktree_metadata "$child_meta" "$child_kind" "$child_backend" || return 1
+      fi
+      if [ "$child_kind" = secondmate ]; then
+        child_home=$(meta_value "$child_meta" home)
+        [ -n "$child_home" ] || child_home=$child_wt
+        validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
+        validate_firstmate_home_children_removal "$child_home" || return 1
+      elif [ "$child_ownership" = adopted ]; then
+        echo "REFUSED: secondmate retirement found adopted descendant $child_id at $child_wt; preserving the descendant, its Git common-directory dependency, the parent home, and every durable record" >&2
+        return 1
+      elif [ "$child_backend" = orca ]; then
+        child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
+        if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
+          child_proj=$(meta_value "$child_meta" project)
+          validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+          require_orca_worktree_path_match "$child_orca_worktree_id" "$child_wt" || return 1
+          removable_worktrees+=("$child_wt")
+        fi
+      elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
         child_proj=$(meta_value "$child_meta" project)
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        require_orca_worktree_path_match "$child_orca_worktree_id" "$child_wt" || return 1
+        removable_worktrees+=("$child_wt")
       fi
-    elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
-      child_proj=$(meta_value "$child_meta" project)
-      validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-    fi
-  done
+    done
+  fi
+  validate_firstmate_home_git_worktree_dependencies \
+    "$home" "secondmate home" "${removable_worktrees[@]}" || return 1
 }
 
 TEARDOWN_HERDR_LOCK_RECORDS=
@@ -2219,6 +2374,7 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
       exit 1
     done
   fi
+  validate_firstmate_home_git_worktree_dependencies "$HOME_PATH" "secondmate home" || exit 1
 fi
 
 if [ "$KIND" = secondmate ]; then
@@ -2437,6 +2593,14 @@ elif [ "$BACKEND" = herdr ]; then
   else
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
+elif [ "$WORKTREE_OWNERSHIP" = adopted ]; then
+  adopted_tmux_session=${T%%:*}
+  adopted_endpoint_cleanup=$(fm_backend_tmux_retire_adopted_window \
+    "$TEARDOWN_ADOPTED_WINDOW_ID" "$TEARDOWN_ADOPTED_SERVER_IDENTITY" \
+    "$adopted_tmux_session" "$WT") || {
+      echo "error: adopted endpoint $TEARDOWN_ADOPTED_WINDOW_ID could not be closed safely (${adopted_endpoint_cleanup:-unknown}); retaining every durable task record" >&2
+      exit 1
+    }
 elif [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi

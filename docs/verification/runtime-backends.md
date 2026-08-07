@@ -182,8 +182,8 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, and Muse share that backend 
 
 ### Adopted-worktree endpoint placement
 
-Exact adopted-worktree CWD placement, live task-claim inventory, and stable-window-id abort cleanup were verified on 2026-08-07 with tmux 3.7b on Linux.
-The real-socket guard waits until the pane foreground is structurally a shell without interrupting startup, uses shell-neutral command payloads, creates a task window in a path containing a space, verifies the physical pane CWD, detects that live task as a different-task claim while excluding its own name, deliberately renames the window, removes it by the creation-time `@<id>`, and proves an independent control window remains.
+Exact adopted-worktree CWD placement, server-wide live task-claim inventory, ambiguous renamed-window refusal, and stable-window-id abort cleanup were verified on 2026-08-07 with tmux 3.7b on Linux.
+The real-socket guard waits until the pane foreground is structurally a shell without interrupting startup, uses shell-neutral command payloads, creates task windows in paths containing spaces, verifies their physical pane CWDs, detects a different-session task claim, refuses a descendant-CWD pane after its task-like name is removed, excludes only the exact same-session task window, removes a separately renamed window by its creation-time `@<id>`, and proves an independent control window remains.
 
 ```sh
 tmux -V
@@ -194,6 +194,8 @@ Observed bounded output:
 
 ```text
 tmux 3.7b
+ok - real tmux: adopted CWD inventory detects cross-session and same-name/different-id claims and refuses renamed metadata-free occupancy
+ok - real tmux: adopted endpoint cleanup refuses multi-pane ambiguity and retires a renamed single-pane window by stable id
 ok - real tmux: adopted task creation reports exact cwd, live claims, and stable-id cleanup after a lost name
 ok - real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
