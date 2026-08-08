@@ -19,8 +19,8 @@
 # Usage:
 #   fm-decision-hold.sh id <origin-id> <decision-key>
 #   fm-decision-hold.sh hold <origin-id> <decision-key> \
-#     --title <title> --reason <reason> [--repo <repo>] [--evidence <findings>] \
-#     [--action <review-changes|merge-decision|missing-choice>...]
+#     --title <title> --reason <reason> --evidence <findings> \
+#     --action <review-changes|merge-decision|missing-choice>... [--repo <repo>]
 #   fm-decision-hold.sh complete <origin-id> (--none | <decision-key>...)
 #   fm-decision-hold.sh verify <origin-id>
 #   fm-decision-hold.sh resolve <origin-id> <decision-key> \
@@ -35,6 +35,8 @@
 # source before this gate has succeeded.
 # `--evidence` persists the concrete findings behind the captain action and is
 # capped at 240 characters so the canonical snapshot can carry it without loss.
+# New holds require both --evidence and at least one --action; the optional
+# legacy omission is accepted only when retrying an existing matching hold.
 #
 # `resolve` requires every --routed-to task to exist and to be blocked by the hold.
 # It writes the captain decision and routed identities into the hold body, clears

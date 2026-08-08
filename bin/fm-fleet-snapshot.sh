@@ -833,6 +833,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
       if (joined_context($body; $report)) == "" then
         "Evidence gap: no bounded " + $kind + " was recorded for " + $id
       else null end;
+    def explicit_next($context; $fallback):
+      ([($context // "")
+        | capture("(?i)(?:^|[.!?][[:space:]]+)next:[[:space:]]*(?<next>.+)$")?.next][0])
+      // $fallback;
     def context_projection_truncated($body; $report):
       (joined_context($body; $report) | gsub("\\s+"; " ") | length) > 800;
     ([ $backlog.records[]?
@@ -869,7 +873,10 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
             context_byte_truncated:report_byte_truncated(.id),
             context_character_truncated:report_character_truncated(.id),
             context_report_count_omitted:report_count_omitted(.id),
-            context_projection_truncated:context_projection_truncated(.body_excerpt; report_context(.id)),completion} ]
+            context_projection_truncated:context_projection_truncated(.body_excerpt; report_context(.id)),
+            next_action:(explicit_next((joined_context(.body_excerpt; report_context(.id))); "No follow-up recorded") | trunc(320)),
+            next_action_truncated:((explicit_next((joined_context(.body_excerpt; report_context(.id))); "No follow-up recorded") | length) > 320),
+            next_owner:"unassigned",completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
     | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children
     | ([ $owned_in_flight[]
@@ -906,16 +913,21 @@ secondmate_home_summary_json() {  # <backlog-json> <tasks-json> <scout-reports-j
          | select($work.current_role != "program")
          | $tasks[]
          | select(.id == $work.id and .current_state.state == "working")
+         | joined_context($work.body_excerpt; report_context(.id)) as $context_raw
+         | (if $context_raw == "" then null else ($context_raw | trunc(800)) end) as $context
+         | explicit_next($context_raw; null) as $explicit_next
          | {id,kind,state:.current_state.state,source:.current_state.source,
             objective:(($work.title // .id) | trunc(160)),
             doing:((.current_state.detail // "") | trunc(160)),
-            next_action:(if context_value($work.body_excerpt; report_context(.id)) == null
+            next_action:(if $explicit_next == null
               then ("Evidence gap: record the immediate next step for " + .id)
-              else ("Continue objective: " + ($work.title // .id)) end | trunc(320)),
-            next_action_evidence_gap:context_gap("immediate next step"; .id; $work.body_excerpt; report_context(.id)),
-            next_action_truncated:((if context_value($work.body_excerpt; report_context(.id)) == null
+              else $explicit_next end | trunc(320)),
+            next_action_evidence_gap:(if $explicit_next == null
+              then "Evidence gap: no bounded immediate next step was recorded for " + .id
+              else null end),
+            next_action_truncated:((if $explicit_next == null
               then ("Evidence gap: record the immediate next step for " + .id)
-              else ("Continue objective: " + ($work.title // .id)) end | length) > 320),
+              else $explicit_next end | length) > 320),
             milestone:((.hints.last_event_text // "") | trunc(200)),
             context:(context_value($work.body_excerpt; report_context(.id))
               // context_gap("causal context"; .id; $work.body_excerpt; report_context(.id))),
@@ -1583,7 +1595,10 @@ secondmate_current_json() {  # <parent-tasks-json>
               or .completion.verb == "reported" or .completion.verb == "done")
             and (.completion.date == null or (.completion.date | nonempty_string)) and legacy_context;
           def valid_landed_modern:
-            valid_landed_legacy and causal_context;
+            valid_landed_legacy and causal_context
+            and (.next_action | bounded_nonempty(320))
+            and (.next_action_truncated | type) == "boolean"
+            and (.next_owner | nonempty_string);
           def valid_endpoint_legacy:
             type == "object" and (.id | nonempty_string)
             and (.state == "working" or .state == "unknown" or .state == "parked" or .state == "paused"

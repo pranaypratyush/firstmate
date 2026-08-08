@@ -31,7 +31,7 @@ Bearings reads the resulting structured state and must never compensate by scrap
 
 1. Read the complete investigation result and complete the visual review before declaring either complete.
 2. Inventory only genuine unresolved choices that require the captain.
-3. For each choice, choose a stable key and use the script's `hold` command with a concise title, reason, repository, bounded findings, and every applicable structured action.
+3. For each choice, choose a stable key and follow the structured registration requirement in Policy.
 4. Run the script's `complete` command with the full unresolved-key inventory for that review pass.
 5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
 6. After the captain decides, record dependent work with normal tasks-axi commands and block it by the hold identity.

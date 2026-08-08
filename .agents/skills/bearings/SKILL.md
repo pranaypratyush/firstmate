@@ -98,6 +98,7 @@ Rules that keep the contract unambiguous:
 - An unavailable live harness state is a caveat attached to the snapshot's last trustworthy structured milestone, context, immediate `next_action`, and `next_owner`, never the whole item.
 - Captain's Call names the concrete action from the structured action flags: review the changes, decide whether to merge, or provide the missing choice; never collapse those actions into generic approval wording.
 - Recently Landed states the useful evidence-backed `outcome`, material `caveat`, immediate `next_action`, and `next_owner`, and discloses every active source or projection limit.
+- Recently Landed carries `next_action_truncated` with its bounded `next_action`; when true, `caveat` names the next-action projection limit.
 - When `outcome_evidence_available` is false, render `outcome_evidence_gap` as the result instead of substituting the task title for an outcome.
 - Charted Next states the queue reason and uses `advance_when` as the exact condition that moves the item forward.
 - Do not suppress separately projected decisions, landed records, or gates from a `partial-structured` home merely because that secondmate's own row is `unknown`.

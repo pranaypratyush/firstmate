@@ -2105,6 +2105,7 @@ EOF
       and (.landed | any(.id == "nsm-salvage-watch" and (.outcome | contains("already superseded")) and (.outcome | contains("omits this path"))))
       and (.landed | any(.id == "nsm-salvage-restart" and (.outcome | contains("evidence is missing")) and (.outcome | contains("adds the missing restart test"))))
       and (.landed | any(.id == "nsm-salvage-routing" and (.outcome | contains("already present upstream")) and (.outcome | contains("ports only the fixture"))))
+      and (.landed | any(.id == "nsm-salvage-watch" and .next_owner == "unassigned"))
       and (.in_flight | any(.id == "nsm-integrator"
         and .state == "unknown"
         and .objective == "Integrate surviving NSM salvage into the canonical state model"
@@ -2171,6 +2172,27 @@ EOF
       and (.caveat | contains("character limit"))
   ' >/dev/null || fail "report character truncation was not disclosed in landed context: $json"
   pass "landed context discloses byte, character, and final projection truncation"
+}
+
+test_landed_next_action_truncation_is_disclosed() {
+  local home fakebin json i
+  home=$(make_home landed-next-truncation)
+  : > "$home/data/secondmates.md"
+  mkdir -p "$home/data/long-next"
+  printf '%s\n' '## In flight' '## Queued' '## Done' +    '- [x] long-next - Long follow-up report data/long-next/report.md (repo: firstmate) (kind: scout) (reported 2026-07-23)' +    > "$home/data/backlog.md"
+  printf '# Long follow-up. Next: ' > "$home/data/long-next/report.md"
+  i=0
+  while [ "$i" -lt 500 ]; do printf 'n' >> "$home/data/long-next/report.md"; i=$((i + 1)); done
+  printf '\nOutcome: bounded result.\n' >> "$home/data/long-next/report.md"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .landed[] | select(.id == "long-next")
+    | .next_action_truncated == true
+      and (.next_action | length) == 320
+      and (.caveat | contains("next-action projection limit reached"))
+  ' >/dev/null || fail "landed next-action truncation was not disclosed: $json"
+  pass "landed next-action truncation is bounded and disclosed"
 }
 
 test_report_count_and_decision_gate_projection_truncation_are_disclosed() {
@@ -2944,6 +2966,36 @@ SH
   pass "simultaneous secondmate live work and captain decisions remain independently visible"
 }
 
+test_secondmate_underway_uses_recorded_explicit_next_step() {
+  local home mate fakebin json
+  home=$(make_home secondmate-explicit-next)
+  : > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/secondmate-explicit-next-mate"
+  make_valid_secondmate_home explicit-next "$mate"
+  append_secondmate_registry "$home" explicit-next "$mate"
+  {
+    printf '%s\n' '## In flight' '- [ ] live-child - Ship the live implementation (repo: sample) (kind: ship)'
+    printf '%s\n' '  Implementation is ready. Next: Run the focused cross-home tests.'
+    printf '%s\n' '## Queued' '## Done'
+  } > "$mate/data/backlog.md"
+  fm_write_meta "$mate/state/live-child.meta" \
+    "window=firstmate:fm-live-child" "worktree=$mate/projects/live-child" \
+    "project=sample" "harness=claude" "kind=ship" "mode=no-mistakes"
+  mkdir -p "$mate/projects/live-child"
+  record_claude_state "$mate/state" live-child busy
+  printf '%s\n' 'working: implementation is ready' > "$mate/state/live-child.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    .in_flight[] | select(.id == "explicit-next")
+    | .state == "active_child_work"
+      and (.objective | contains("live implementation"))
+      and (.next_action | contains("Run the focused cross-home tests"))
+      and (.next_action | contains("Continue objective") | not)
+  ' >/dev/null || fail "secondmate Underway discarded its recorded explicit next step: $json"
+  pass "secondmate Underway preserves the structured explicit next step"
+}
+
 test_missing_causal_evidence_is_disclosed_not_replaced_by_titles() {
   local home fakebin json
   home=$(make_home missing-causal-evidence)
@@ -3132,6 +3184,7 @@ test_captain_call_carries_executable_review_and_merge_context
 test_captain_actions_ignore_incidental_evidence_prose
 test_salvage_dispositions_and_unknown_integrator_milestone_surface
 test_landed_discloses_byte_character_and_projection_truncation
+test_landed_next_action_truncation_is_disclosed
 test_report_count_and_decision_gate_projection_truncation_are_disclosed
 test_malformed_nested_cross_home_fields_fall_back_without_jq_abort
 test_hostile_remote_charted_capsule_is_bounded_and_disclosed
@@ -3147,6 +3200,7 @@ test_remote_decision_evidence_is_defensively_bounded
 test_legacy_v1_remote_summary_projects_safely
 test_hostile_remote_reason_and_documented_caps_are_exact
 test_secondmate_active_work_and_captain_decision_are_both_visible
+test_secondmate_underway_uses_recorded_explicit_next_step
 test_missing_causal_evidence_is_disclosed_not_replaced_by_titles
 test_remote_omission_counts_are_bound_and_disclosed
 test_completed_scout_report_not_pending

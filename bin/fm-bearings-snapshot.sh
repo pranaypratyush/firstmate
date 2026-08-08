@@ -790,7 +790,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                            | ($context_raw | trunc(800)) as $context
                            | ((.context_projection_truncated // false)
                               or (($context_raw | length) > 800)) as $context_projection_cut
-                           | (explicit_next($context; "No follow-up recorded")) as $next
+                           | (explicit_next($context_raw; "No follow-up recorded")) as $next
+                           | ((.next_action_truncated // false) or (($next | length) > 320)) as $next_cut
                            | {id, what:(.title | trunc(180)),
                             outcome:(if $outcome_evidence then (.context | trunc(800)) else null end),
                             outcome_evidence_available:$outcome_evidence,
@@ -802,14 +803,16 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                             context_character_truncated:(.context_character_truncated // false),
                             context_report_count_omitted:(.context_report_count_omitted // false),
                             context_projection_truncated:$context_projection_cut,
-                            caveat:context_caveat((.context != null); (.context_backlog_truncated // false);
-                                                   (.context_byte_truncated // false);
-                                                   (.context_character_truncated // false);
-                                                   (.context_report_count_omitted // false);
-                                                   $context_projection_cut),
+                            caveat:combine_caveats(
+                              context_caveat((.context != null); (.context_backlog_truncated // false);
+                                             (.context_byte_truncated // false);
+                                             (.context_character_truncated // false);
+                                             (.context_report_count_omitted // false);
+                                             $context_projection_cut);
+                              (if $next_cut then "next-action projection limit reached" else null end)),
                             next_action:($next | trunc(320)),
-                            next_owner:(if $next == "No follow-up recorded" then "unassigned"
-                                        else explicit_owner($next; "unassigned") end),
+                            next_action_truncated:$next_cut,
+                            next_owner:((.next_owner // "") | if . == "" then "unassigned" else . end),
                             artifact:(.pr_url // .report_path // .local_note // "-"),owner:.home_id})),
       gates: (if $all_queued == 1 then $gates_all else $gates_all[:$gates_n] end),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),

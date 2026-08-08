@@ -141,6 +141,8 @@ EOF
   help=$(run_decisions "$home" --help)
   assert_contains "$help" "--evidence <findings>" "decision hold help omitted structured evidence input"
   assert_contains "$help" "capped at 240 characters" "decision hold help omitted the evidence bound"
+  assert_contains "$help" '--title <title> --reason <reason> --evidence <findings>' "decision hold help did not make evidence required"
+  assert_contains "$help" '--action <review-changes|merge-decision|missing-choice>... [--repo <repo>]' "decision hold help did not make action required"
 
   if run_decisions "$home" complete "$id" route access > "$home/early-complete.out" 2> "$home/early-complete.err"; then
     fail "completion succeeded before unresolved decisions had captain holds"
