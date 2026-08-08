@@ -17,6 +17,8 @@ new_fixture() {
   printf 'ID=cachyos\nID_LIKE=arch\n' > "$dir/os-release"
   printf 'MemTotal:       16777216 kB\nMemAvailable:   12582912 kB\nSwapTotal:       2097152 kB\nSwapFree:        2097152 kB\n' > "$dir/meminfo"
   printf '0.10 0.20 0.30 1/100 123\n' > "$dir/loadavg"
+  printf '1048576\n' > "$dir/inotify-max-user-watches"
+  printf '128\n' > "$dir/inotify-max-user-instances"
   mkdir -p "$dir/thermal/class/thermal/thermal_zone0"
   printf '45000\n' > "$dir/thermal/class/thermal/thermal_zone0/temp"
   vector=$(jq -nc '[range(0;768) | 0]')
@@ -44,17 +46,37 @@ SH
   cat > "$fakebin/systemctl" <<'SH'
 #!/usr/bin/env bash
 [ -n "${FM_FAKE_LOG:-}" ] && printf 'systemctl args=%s\n' "$*" >> "$FM_FAKE_LOG"
+state_prefix=${FM_FAKE_SYSTEMCTL_STATE_PREFIX:?}
+if [ ! -e "$state_prefix.initialized" ]; then
+  : > "$state_prefix.initialized"
+  [ "${FM_FAKE_SERVICE_ACTIVE_BEFORE:-no}" != yes ] || : > "$state_prefix.active"
+  [ "${FM_FAKE_SERVICE_ENABLED_BEFORE:-no}" != yes ] || : > "$state_prefix.enabled"
+  if [ "${FM_FAKE_SERVICE_ACTIVE_BEFORE:-no}" = yes ] && [ -n "${FM_FAKE_OLLAMA_STATE:-}" ]; then
+    : > "$FM_FAKE_OLLAMA_STATE"
+  fi
+fi
 case "${1:-}" in
-  is-active|is-enabled) exit 1 ;;
+  is-active) [ -e "$state_prefix.active" ] ;;
+  is-enabled) [ -e "$state_prefix.enabled" ] ;;
   show) printf '/usr/lib/systemd/system/ollama.service\n' ;;
+  enable)
+    : > "$state_prefix.enabled"
+    [ "${FM_FAKE_SYSTEMCTL_ENABLE_FAIL_AFTER_CHANGE:-no}" != yes ] || exit 54
+    ;;
+  disable)
+    rm -f "$state_prefix.enabled"
+    ;;
   start)
+    : > "$state_prefix.active"
     [ -n "${FM_FAKE_OLLAMA_STATE:-}" ] && : > "$FM_FAKE_OLLAMA_STATE"
+    [ "${FM_FAKE_SYSTEMCTL_START_FAIL_AFTER_CHANGE:-no}" != yes ] || exit 56
     ;;
   stop)
     if [ "${FM_FAKE_SYSTEMCTL_STOP_FAIL:-no}" = yes ]; then
       printf 'fake Ollama stop failure\n' >&2
       exit 55
     fi
+    rm -f "$state_prefix.active"
     [ -z "${FM_FAKE_OLLAMA_STATE:-}" ] || rm -f "$FM_FAKE_OLLAMA_STATE"
     ;;
   *) printf 'unexpected systemctl mutation: %s\n' "$*" >&2; exit 92 ;;
@@ -71,10 +93,17 @@ exit 0
 SH
   cat > "$fakebin/ollama" <<'SH'
 #!/usr/bin/env bash
+[ -n "${FM_FAKE_LOG:-}" ] && printf 'ollama args=%s\n' "$*" >> "$FM_FAKE_LOG"
 case "${1:-}" in
   --version) printf 'ollama version 0.32.6\n' ;;
-  ps) printf 'NAME ID SIZE PROCESSOR\nnomic-embed-text:latest abc 274 MB 100%% CPU\n' ;;
-  stop) printf 'unexpected model stop\n' >&2; exit 93 ;;
+  ps)
+    printf 'NAME ID SIZE PROCESSOR\n'
+    [ -z "${FM_FAKE_MODEL_RUNTIME_STATE:-}" ] || [ ! -e "$FM_FAKE_MODEL_RUNTIME_STATE" ] \
+      || printf 'nomic-embed-text:latest abc 274 MB 100%% CPU\n'
+    ;;
+  stop)
+    [ -z "${FM_FAKE_MODEL_RUNTIME_STATE:-}" ] || rm -f "$FM_FAKE_MODEL_RUNTIME_STATE"
+    ;;
   *) printf 'unexpected ollama call: %s\n' "$*" >&2; exit 94 ;;
 esac
 SH
@@ -113,12 +142,20 @@ case "${1:-}" in
           exit 40
         }
         if [ "${FM_FAKE_WATCH_HANG:-no}" = yes ]; then
-          sleep 30 &
+          if [ "${FM_FAKE_WATCH_TERM_RESISTANT:-no}" = yes ]; then
+            bash -c 'trap "" TERM; end=$((SECONDS + 8)); while [ "$SECONDS" -lt "$end" ]; do sleep 1; done' &
+          else
+            sleep 30 &
+          fi
           child=$!
-          [ -n "${FM_FAKE_CHILD_PID_FILE:-}" ] && printf '%s\n' "$child" > "$FM_FAKE_CHILD_PID_FILE"
+          [ -n "${FM_FAKE_CHILD_PID_FILE:-}" ] && printf '%s\n%s\n' "$child" "$(date +%s)" > "$FM_FAKE_CHILD_PID_FILE"
           wait "$child"
         else
-          setsid sleep 60 </dev/null >/dev/null 2>&1 &
+          if [ "${FM_FAKE_WATCH_CPU_BURST:-no}" = yes ]; then
+            setsid bash -c 'end=$((SECONDS + 1)); while [ "$SECONDS" -lt "$end" ]; do :; done; sleep 60' </dev/null >/dev/null 2>&1 &
+          else
+            setsid sleep 60 </dev/null >/dev/null 2>&1 &
+          fi
           watcher_pid=$!
           disown "$watcher_pid" 2>/dev/null || true
           printf '%s\n' "$watcher_pid" > .grepai/fake-watcher.pid
@@ -141,12 +178,20 @@ case "${1:-}" in
     esac
     ;;
   mcp-serve)
+    [ -z "${FM_FAKE_MCP_PID_FILE:-}" ] || printf '%s\n' "$$" > "$FM_FAKE_MCP_PID_FILE"
+    if [ "${FM_FAKE_MCP_TERM_RESISTANT:-no}" = yes ]; then
+      trap '' TERM
+    fi
     while IFS= read -r line; do
       case "$line" in
         *'"id":1'*) printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"grepai","version":"test"}}}\n' ;;
         *'"id":2'*) printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"grepai_search"}]}}\n' ;;
       esac
     done
+    if [ "${FM_FAKE_MCP_TERM_RESISTANT:-no}" = yes ]; then
+      end=$((SECONDS + 8))
+      while [ "$SECONDS" -lt "$end" ]; do sleep 1; done
+    fi
     ;;
   *) printf 'unexpected grepai mutation: %s\n' "$*" >&2; exit 95 ;;
 esac
@@ -246,6 +291,7 @@ SH
 #!/usr/bin/env bash
 case "$*" in
   *'/api/version'*)
+    [ "${FM_FAKE_API_UNHEALTHY:-no}" != yes ] || exit 7
     if [ "${FM_FAKE_API_REQUIRES_START:-no}" = yes ] \
       && { [ -z "${FM_FAKE_OLLAMA_STATE:-}" ] || [ ! -f "$FM_FAKE_OLLAMA_STATE" ]; }; then
       exit 7
@@ -266,6 +312,12 @@ case "$*" in
     ;;
   *'/api/embed'*)
     if [ "${FM_FAKE_HANG_MICRO:-no}" = yes ] && [[ "$*" != *local_index_health_probe* ]]; then sleep 3; fi
+    if [[ "$*" != *local_index_health_probe* ]] && [ "${FM_FAKE_REQUIRE_COLD_MICRO:-no}" = yes ] \
+      && { [ -z "${FM_FAKE_COLD_PROOF:-}" ] || [ ! -e "$FM_FAKE_COLD_PROOF" ]; }; then
+      [ -z "${FM_FAKE_MODEL_RUNTIME_STATE:-}" ] || [ ! -e "$FM_FAKE_MODEL_RUNTIME_STATE" ] || exit 67
+      [ -z "${FM_FAKE_COLD_PROOF:-}" ] || : > "$FM_FAKE_COLD_PROOF"
+    fi
+    [ -z "${FM_FAKE_MODEL_RUNTIME_STATE:-}" ] || : > "$FM_FAKE_MODEL_RUNTIME_STATE"
     cat "$FM_FAKE_EMBED_RESPONSE"
     ;;
   *) printf 'unexpected curl network request: %s\n' "$*" >&2; exit 99 ;;
@@ -283,16 +335,27 @@ run_kit() {
     FM_INDEX_LOADAVG="$dir/loadavg" \
     FM_INDEX_UNAME_M=x86_64 \
     FM_INDEX_THERMAL_ROOT="$dir/thermal" \
+    FM_INDEX_INOTIFY_MAX_USER_WATCHES="$dir/inotify-max-user-watches" \
+    FM_INDEX_INOTIFY_MAX_USER_INSTANCES="$dir/inotify-max-user-instances" \
+    FM_INDEX_PHYSICAL_CORES=8 \
+    FM_REAL_GIT="${FM_REAL_GIT:-}" \
     FM_FAKE_EMBED_RESPONSE="$dir/embed-response.json" \
     FM_FAKE_LOG="${FM_FAKE_LOG:-}" \
     FM_FAKE_WATCH_HANG="${FM_FAKE_WATCH_HANG:-no}" \
+    FM_FAKE_WATCH_TERM_RESISTANT="${FM_FAKE_WATCH_TERM_RESISTANT:-no}" \
     FM_FAKE_WATCH_STATUS_FAIL="${FM_FAKE_WATCH_STATUS_FAIL:-no}" \
+    FM_FAKE_WATCH_CPU_BURST="${FM_FAKE_WATCH_CPU_BURST:-no}" \
+    FM_FAKE_MCP_TERM_RESISTANT="${FM_FAKE_MCP_TERM_RESISTANT:-no}" \
+    FM_FAKE_MCP_PID_FILE="${FM_FAKE_MCP_PID_FILE:-}" \
     FM_FAKE_CHILD_PID_FILE="${FM_FAKE_CHILD_PID_FILE:-}" \
     FM_FAKE_GENERATOR_LOG="${FM_FAKE_GENERATOR_LOG:-}" \
     FM_FAKE_MODEL_DIGEST="${FM_FAKE_MODEL_DIGEST:-}" \
     FM_FAKE_MODEL_SIZE="${FM_FAKE_MODEL_SIZE:-}" \
     FM_FAKE_MODEL_QUANTIZATION="${FM_FAKE_MODEL_QUANTIZATION:-}" \
     FM_FAKE_MODEL_DIMENSIONS="${FM_FAKE_MODEL_DIMENSIONS:-}" \
+    FM_FAKE_MODEL_RUNTIME_STATE="$dir/model.running" \
+    FM_FAKE_REQUIRE_COLD_MICRO="${FM_FAKE_REQUIRE_COLD_MICRO:-no}" \
+    FM_FAKE_COLD_PROOF="${FM_FAKE_COLD_PROOF:-}" \
     FM_FAKE_GREPAI_HEALTH="${FM_FAKE_GREPAI_HEALTH:-}" \
     FM_FAKE_CODEGRAPH_HEALTH="${FM_FAKE_CODEGRAPH_HEALTH:-}" \
     FM_FAKE_SERENA_HEALTH="${FM_FAKE_SERENA_HEALTH:-}" \
@@ -301,7 +364,13 @@ run_kit() {
     FM_FAKE_PARTIAL_INITIALIZER="${FM_FAKE_PARTIAL_INITIALIZER:-}" \
     FM_FAKE_SS_LISTENER="${FM_FAKE_SS_LISTENER:-}" \
     FM_FAKE_API_REQUIRES_START="${FM_FAKE_API_REQUIRES_START:-no}" \
+    FM_FAKE_API_UNHEALTHY="${FM_FAKE_API_UNHEALTHY:-no}" \
     FM_FAKE_OLLAMA_STATE="${FM_FAKE_OLLAMA_STATE:-}" \
+    FM_FAKE_SYSTEMCTL_STATE_PREFIX="$dir/systemctl-state" \
+    FM_FAKE_SERVICE_ACTIVE_BEFORE="${FM_FAKE_SERVICE_ACTIVE_BEFORE:-no}" \
+    FM_FAKE_SERVICE_ENABLED_BEFORE="${FM_FAKE_SERVICE_ENABLED_BEFORE:-no}" \
+    FM_FAKE_SYSTEMCTL_ENABLE_FAIL_AFTER_CHANGE="${FM_FAKE_SYSTEMCTL_ENABLE_FAIL_AFTER_CHANGE:-no}" \
+    FM_FAKE_SYSTEMCTL_START_FAIL_AFTER_CHANGE="${FM_FAKE_SYSTEMCTL_START_FAIL_AFTER_CHANGE:-no}" \
     FM_FAKE_SYSTEMCTL_STOP_FAIL="${FM_FAKE_SYSTEMCTL_STOP_FAIL:-no}" \
     FM_FAKE_SERENA_OFFLINE_RERUN="${FM_FAKE_SERENA_OFFLINE_RERUN:-no}" \
     FM_FAKE_SERENA_MANAGED_ROOT="${FM_FAKE_SERENA_MANAGED_ROOT:-}" \
@@ -342,11 +411,43 @@ test_help_and_plan_are_read_only() {
   after_exclude=$(sha256sum "$dir/project/.git/info/exclude")
   assert_contains "$out" "platform os=cachyos arch=x86_64" "plan platform inventory"
   assert_contains "$out" "grepai_candidates files=3" "plan scanner census"
+  assert_contains "$out" "extensions=" "plan extension distribution"
+  assert_contains "$out" "inotify_max_user_watches=1048576" "plan inotify capacity"
+  assert_contains "$out" "cpu_physical_cores=8" "plan physical CPU evidence"
+  assert_contains "$out" "accelerator=cpu" "plan accelerator evidence"
+  assert_contains "$out" "filesystem=ext4" "plan filesystem topology evidence"
   assert_contains "$out" "plan complete; no package, service, model, index, MCP, or rollback-manifest state was changed" "plan no-mutation result"
   [ "$before" = "$after" ] || fail "plan changed project state"
   [ "$before_exclude" = "$after_exclude" ] || fail "plan changed the local exclude file"
   [ ! -e "$dir/install-parent/tools" ] || fail "plan created the install root"
   pass "indexing recovery: help is explicit and plan inventories without mutation"
+}
+
+test_inventory_is_hard_bounded_and_inotify_capacity_fails_closed() {
+  local dir out rc real_git before_exclude
+  dir=$(new_fixture inventory-timeout)
+  real_git=$(command -v git)
+  # shellcheck disable=SC2016 # The generated fake expands these variables at runtime.
+  printf '#!/usr/bin/env bash\ncase " $* " in *" ls-files "*) sleep 3 ;; esac\nexec "$FM_REAL_GIT" "$@"\n' \
+    > "$dir/fakebin/git"
+  chmod +x "$dir/fakebin/git"
+  FM_REAL_GIT="$real_git" \
+    out=$(run_kit "$dir" --action plan --pull-model no --start-ollama no --persist-ollama no --install-tools no \
+      --init none --inventory-timeout-seconds 1 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "hung source inventory passed"
+  assert_contains "$out" "source inventory exceeded its 1s hard timeout" "inventory hard-timeout refusal"
+
+  dir=$(new_fixture inotify-exhaustion)
+  printf '2\n' > "$dir/inotify-max-user-watches"
+  before_exclude=$(sha256sum "$dir/project/.git/info/exclude")
+  out=$(run_kit "$dir" --action apply --pull-model no --start-ollama no --persist-ollama no --install-tools no \
+    --init serena --allow-language-downloads yes --rollback-manifest "$dir/rollback.log" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "exhausted inotify capacity passed"
+  assert_contains "$out" "inotify max_user_watches" "inotify capacity refusal"
+  [ "$before_exclude" = "$(sha256sum "$dir/project/.git/info/exclude")" ] || fail "inotify refusal happened after exclude mutation"
+  [ ! -e "$dir/rollback.log" ] || fail "inotify refusal happened after manifest mutation"
+  unset FM_REAL_GIT
+  pass "indexing recovery: complete inventory is bounded and inotify capacity fails closed"
 }
 
 test_fail_closed_preflight_matrix() {
@@ -372,6 +473,12 @@ test_fail_closed_preflight_matrix() {
   out=$(run_kit "$dir" --action plan --pull-model no --start-ollama no --persist-ollama no --install-tools no --init none --persistent-grepai-watch yes 2>&1); rc=$?
   [ "$rc" -ne 0 ] || fail "persistent grepai watch passed"
   assert_contains "$out" "persistent grepai watching is intentionally unsupported" "watcher refusal"
+
+  out=$(run_kit "$dir" --action plan --pull-model no --start-ollama no --persist-ollama no --install-tools no --init none \
+    --benchmark yes --benchmark-query 'one=a' --benchmark-query 'two=b' --benchmark-query 'three=c' \
+    --benchmark-query 'four=d' --benchmark-query 'five=e' --benchmark-query 'six=f' 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "six-query benchmark passed the exact-five contract"
+  assert_contains "$out" "requires exactly five" "exact-five benchmark refusal"
   pass "indexing recovery: OS, polyglot, resource, and daemon hazards fail closed"
 }
 
@@ -450,6 +557,77 @@ test_temporary_ollama_stop_failure_is_terminal_without_masking_primary_failure()
   assert_contains "$out" "could not stop task-started Ollama service" "surfaced secondary cleanup failure"
   unset FM_FAKE_LOG FM_FAKE_API_REQUIRES_START FM_FAKE_OLLAMA_STATE FM_FAKE_SYSTEMCTL_STOP_FAIL FM_FAKE_MODEL_DIGEST
   pass "indexing recovery: task-started Ollama cleanup failure is terminal without masking the primary failure"
+}
+
+test_preexisting_active_ollama_is_never_adopted_or_stopped() {
+  local dir out rc before_exclude after_exclude
+  dir=$(new_fixture preexisting-active-ollama)
+  : > "$dir/fake.log"
+  before_exclude=$(sha256sum "$dir/project/.git/info/exclude")
+  FM_FAKE_LOG="$dir/fake.log" FM_FAKE_SERVICE_ACTIVE_BEFORE=yes FM_FAKE_API_UNHEALTHY=yes \
+    FM_FAKE_OLLAMA_STATE="$dir/ollama.started" \
+    out=$(run_kit "$dir" --action apply --pull-model no --start-ollama yes --persist-ollama no --install-tools no \
+      --init none --rollback-manifest "$dir/rollback.log" 2>&1); rc=$?
+  after_exclude=$(sha256sum "$dir/project/.git/info/exclude")
+  [ "$rc" -ne 0 ] || fail "unhealthy pre-existing active Ollama was adopted"
+  assert_contains "$out" "pre-existing active Ollama service" "pre-existing service ownership refusal"
+  ! grep -Eq 'systemctl args=(start|stop|enable|disable)' "$dir/fake.log" \
+    || fail "pre-existing active Ollama was mutated or stopped"
+  [ "$before_exclude" = "$after_exclude" ] || fail "pre-existing Ollama refusal happened after exclude mutation"
+  [ ! -e "$dir/rollback.log" ] || fail "pre-existing Ollama refusal happened after rollback-manifest mutation"
+  unset FM_FAKE_LOG FM_FAKE_SERVICE_ACTIVE_BEFORE FM_FAKE_API_UNHEALTHY FM_FAKE_OLLAMA_STATE
+  pass "indexing recovery: pre-existing active Ollama is never adopted or stopped"
+}
+
+test_canonical_grepai_watcher_is_reconciled_without_adoption() {
+  local dir out rc watcher_pid
+  dir=$(new_fixture canonical-watcher)
+  mkdir -p "$dir/project/.grepai"
+  printf 'provider: ollama\nmodel: nomic-embed-text:latest\nbackend: gob\nendpoint: http://127.0.0.1:11434\n' \
+    > "$dir/project/.grepai/config.yaml"
+  setsid sleep 30 &
+  watcher_pid=$!
+  printf '%s\n' "$watcher_pid" > "$dir/project/.grepai/fake-watcher.pid"
+  : > "$dir/fake.log"
+  FM_FAKE_LOG="$dir/fake.log" \
+    out=$(run_kit "$dir" --action health --pull-model no --start-ollama no --persist-ollama no --install-tools no \
+      --init none 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "pre-existing canonical grepai watcher passed no-persistence policy"
+  assert_contains "$out" "pre-existing canonical grepai watcher" "canonical watcher ownership refusal"
+  grep -Fq 'args=watch --status' "$dir/fake.log" || fail "canonical watcher state was not inventoried"
+  ! grep -Fq 'args=watch --stop' "$dir/fake.log" || fail "pre-existing canonical watcher was stopped"
+  kill -0 "$watcher_pid" 2>/dev/null || fail "pre-existing canonical watcher was terminated"
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  unset FM_FAKE_LOG
+  pass "indexing recovery: canonical grepai watcher is reconciled without adoption"
+}
+
+test_partial_ollama_service_transitions_are_reconciled() {
+  local dir out rc
+  dir=$(new_fixture partial-ollama-enable)
+  : > "$dir/fake.log"
+  FM_FAKE_LOG="$dir/fake.log" FM_FAKE_API_REQUIRES_START=yes FM_FAKE_OLLAMA_STATE="$dir/ollama.started" \
+    FM_FAKE_SYSTEMCTL_ENABLE_FAIL_AFTER_CHANGE=yes \
+    out=$(run_kit "$dir" --action apply --pull-model no --start-ollama yes --persist-ollama yes --install-tools no \
+      --init none --rollback-manifest "$dir/rollback.log" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "partial Ollama enable failure passed"
+  grep -Fq 'systemctl args=disable ollama' "$dir/fake.log" || fail "partial Ollama enable was not reconciled"
+  ! grep -Fq 'systemctl args=stop ollama' "$dir/fake.log" || fail "enable-only failure stopped an Ollama service it did not start"
+
+  dir=$(new_fixture partial-ollama-start)
+  : > "$dir/fake.log"
+  FM_FAKE_LOG="$dir/fake.log" FM_FAKE_API_REQUIRES_START=yes FM_FAKE_OLLAMA_STATE="$dir/ollama.started" \
+    FM_FAKE_SYSTEMCTL_ENABLE_FAIL_AFTER_CHANGE=no FM_FAKE_SYSTEMCTL_START_FAIL_AFTER_CHANGE=yes \
+    out=$(run_kit "$dir" --action apply --pull-model no --start-ollama yes --persist-ollama yes --install-tools no \
+      --init none --rollback-manifest "$dir/rollback.log" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "partial Ollama start failure passed"
+  grep -Fq 'systemctl args=stop ollama' "$dir/fake.log" || fail "partial Ollama start was not reconciled"
+  grep -Fq 'systemctl args=disable ollama' "$dir/fake.log" || fail "persistent enable was not reconciled after start failure"
+  assert_contains "$(cat "$dir/rollback.log")" "planned_service_transition=ollama active:no->yes" "planned Ollama start transition"
+  unset FM_FAKE_LOG FM_FAKE_API_REQUIRES_START FM_FAKE_OLLAMA_STATE \
+    FM_FAKE_SYSTEMCTL_ENABLE_FAIL_AFTER_CHANGE FM_FAKE_SYSTEMCTL_START_FAIL_AFTER_CHANGE
+  pass "indexing recovery: partial Ollama enable/start transitions are durably reconciled"
 }
 
 test_serena_download_refusal_and_exact_model_identity() {
@@ -603,7 +781,7 @@ test_incompatible_existing_indexes_refuse_before_mutation() {
 }
 
 test_benchmark_timeout_reaps_process_group_and_stops_watcher() {
-  local dir out rc child_pid index
+  local dir out rc child_pid child_started index elapsed
   dir=$(new_fixture benchmark-timeout)
   for index in $(seq 1 100); do
     printf 'pub fn timeout_%03d() -> usize { %d }\n' "$index" "$index" > "$dir/project/src/timeout-$index.rs"
@@ -611,7 +789,7 @@ test_benchmark_timeout_reaps_process_group_and_stops_watcher() {
   git -C "$dir/project" add src
   git -C "$dir/project" -c user.name=Test -c user.email=test@example.invalid commit -qm 'benchmark timeout corpus'
   : > "$dir/fake.log"
-  FM_FAKE_LOG="$dir/fake.log" FM_FAKE_WATCH_HANG=yes FM_FAKE_CHILD_PID_FILE="$dir/child.pid" \
+  FM_FAKE_LOG="$dir/fake.log" FM_FAKE_WATCH_HANG=yes FM_FAKE_WATCH_TERM_RESISTANT=yes FM_FAKE_CHILD_PID_FILE="$dir/child.pid" \
     out=$(run_kit "$dir" --action apply --pull-model no --start-ollama no --persist-ollama no --install-tools no --init none --benchmark yes --max-index-seconds 1 \
       --benchmark-query 'one=src/main.rs' --benchmark-query 'two=src/main.rs' --benchmark-query 'three=src/main.rs' --benchmark-query 'four=src/main.rs' --benchmark-query 'five=src/main.rs' \
       --rollback-manifest "$dir/rollback.log" 2>&1); rc=$?
@@ -619,10 +797,13 @@ test_benchmark_timeout_reaps_process_group_and_stops_watcher() {
   assert_contains "$out" "scratch grepai index exceeded the 1s hard bound" "benchmark timeout refusal"
   grep -F 'args=watch --stop' "$dir/fake.log" >/dev/null || fail "benchmark timeout did not invoke grepai watch --stop"
   [ -s "$dir/child.pid" ] || fail "benchmark fixture did not record its child"
-  child_pid=$(cat "$dir/child.pid")
+  child_pid=$(sed -n '1p' "$dir/child.pid")
+  child_started=$(sed -n '2p' "$dir/child.pid")
+  elapsed=$(($(date +%s) - child_started))
   [ ! -e "/proc/$child_pid" ] || fail "benchmark child process $child_pid survived process-group cleanup"
-  unset FM_FAKE_WATCH_HANG FM_FAKE_CHILD_PID_FILE FM_FAKE_LOG
-  pass "indexing recovery: benchmark timeout reaps its process group and stops the watcher"
+  [ "$elapsed" -le 5 ] || fail "TERM-resistant benchmark cleanup exceeded its hard shutdown bound (${elapsed}s)"
+  unset FM_FAKE_WATCH_HANG FM_FAKE_WATCH_TERM_RESISTANT FM_FAKE_CHILD_PID_FILE FM_FAKE_LOG
+  pass "indexing recovery: benchmark timeout KILL-reaps a TERM-resistant process group within a hard bound"
 }
 
 test_codegraph_mcp_entry_is_project_bound() {
@@ -636,6 +817,26 @@ test_codegraph_mcp_entry_is_project_bound() {
   pass "indexing recovery: CodeGraph MCP entry is project-bound"
 }
 
+test_mcp_probe_kill_reaps_term_resistant_server_within_hard_bound() {
+  local dir out rc pid started elapsed
+  dir=$(new_fixture mcp-term-resistant)
+  mkdir -p "$dir/project/.grepai"
+  printf 'provider: ollama\nmodel: nomic-embed-text:latest\nbackend: gob\nendpoint: http://127.0.0.1:11434\n' \
+    > "$dir/project/.grepai/config.yaml"
+  started=$SECONDS
+  FM_FAKE_MCP_TERM_RESISTANT=yes FM_FAKE_MCP_PID_FILE="$dir/mcp.pid" \
+    out=$(run_kit "$dir" --action health --pull-model no --start-ollama no --persist-ollama no --install-tools no \
+      --init none --mcp-timeout-seconds 3 2>&1); rc=$?
+  elapsed=$((SECONDS - started))
+  [ "$rc" -eq 0 ] || fail "TERM-resistant MCP health failed: $out"
+  [ -s "$dir/mcp.pid" ] || fail "TERM-resistant MCP fixture did not record its PID"
+  pid=$(cat "$dir/mcp.pid")
+  [ ! -e "/proc/$pid" ] || fail "TERM-resistant MCP server $pid survived health cleanup"
+  [ "$elapsed" -le 7 ] || fail "TERM-resistant MCP cleanup exceeded its hard shutdown bound (${elapsed}s)"
+  unset FM_FAKE_MCP_TERM_RESISTANT FM_FAKE_MCP_PID_FILE
+  pass "indexing recovery: MCP probe KILL-reaps a TERM-resistant server within a hard bound"
+}
+
 test_complete_benchmark_reports_every_gate() {
   local dir out index
   dir=$(new_fixture complete-benchmark)
@@ -646,7 +847,8 @@ test_complete_benchmark_reports_every_gate() {
   git -C "$dir/project" -c user.name=Test -c user.email=test@example.invalid commit -qm 'benchmark corpus'
   : > "$dir/fake.log"
 
-  FM_FAKE_LOG="$dir/fake.log" out=$(run_kit "$dir" --action apply --pull-model no --start-ollama no --persist-ollama no --install-tools no --init grepai --benchmark yes \
+  FM_FAKE_LOG="$dir/fake.log" FM_FAKE_REQUIRE_COLD_MICRO=yes FM_FAKE_COLD_PROOF="$dir/cold.proof" FM_FAKE_WATCH_CPU_BURST=yes \
+    out=$(run_kit "$dir" --action apply --pull-model no --start-ollama no --persist-ollama no --install-tools no --init grepai --benchmark yes \
     --benchmark-query 'one=src/main.rs' --benchmark-query 'two=src/main.rs' --benchmark-query 'three=src/main.rs' --benchmark-query 'four=src/main.rs' --benchmark-query 'five=src/main.rs' \
     --max-index-seconds 5 --max-micro-batch-seconds 60 --max-search-ms 2000 --max-incremental-seconds 10 \
     --max-swap-growth-mib 0 --max-temperature-celsius 90 --max-load-per-cpu-percent 100 --max-watcher-idle-cpu-percent 5 \
@@ -658,9 +860,12 @@ test_complete_benchmark_reports_every_gate() {
   assert_contains "$out" "search_median_ms=" "search latency evidence"
   assert_contains "$out" "incremental_seconds=" "incremental convergence evidence"
   assert_contains "$out" "watcher_idle_cpu_percent=" "watcher idle evidence"
+  assert_contains "$out" "watcher_idle_window_seconds=" "watcher idle delta window"
+  assert_contains "$out" "cold_model_boundary=verified_unloaded" "cold model boundary evidence"
+  [ -e "$dir/cold.proof" ] || fail "first micro-batch request did not start from an unloaded model"
   grep -Fxq 'endpoint: http://127.0.0.1:11434' "$dir/project/.grepai/config.yaml" || fail "canonical grepai config lacks an explicit loopback endpoint"
   [ "$(grep -Fc 'args=watch --background' "$dir/fake.log")" -eq 2 ] || fail "scratch and canonical watchers were not both loopback-bound"
-  unset FM_FAKE_LOG
+  unset FM_FAKE_LOG FM_FAKE_REQUIRE_COLD_MICRO FM_FAKE_COLD_PROOF FM_FAKE_WATCH_CPU_BURST
   pass "indexing recovery: benchmark reports every bounded acceptance gate"
 }
 
@@ -820,22 +1025,30 @@ test_required_service_inventory_and_listener_refuse_before_mutation() {
 
 test_bounded_indexer_commands_and_micro_requests() {
   local dir out rc index
-  for command in grepai-status grepai-search codegraph-status codegraph-query codegraph-init; do
+  for command in grepai-status grepai-search codegraph-status codegraph-query; do
     dir=$(new_fixture "timeout-$command")
     case "$command" in
       grepai-*) mkdir -p "$dir/project/.grepai"; printf 'provider: ollama\nmodel: nomic-embed-text:latest\nbackend: gob\nendpoint: http://127.0.0.1:11434\n' > "$dir/project/.grepai/config.yaml" ;;
       codegraph-status|codegraph-query) mkdir -p "$dir/project/.codegraph"; printf db > "$dir/project/.codegraph/codegraph.db" ;;
     esac
-    if [ "$command" = codegraph-init ]; then
-      FM_FAKE_HANG_COMMAND=$command out=$(run_kit "$dir" --action apply --pull-model no --start-ollama no --persist-ollama no --install-tools no \
-        --init codegraph --allow-language-downloads yes --command-timeout-seconds 1 --rollback-manifest "$dir/rollback.log" 2>&1); rc=$?
-    else
-      FM_FAKE_HANG_COMMAND=$command out=$(run_kit "$dir" --action health --pull-model no --start-ollama no --persist-ollama no --install-tools no \
-        --init none --command-timeout-seconds 1 2>&1); rc=$?
-    fi
+    FM_FAKE_HANG_COMMAND=$command out=$(run_kit "$dir" --action health --pull-model no --start-ollama no --persist-ollama no --install-tools no \
+      --init none --command-timeout-seconds 1 2>&1); rc=$?
     [ "$rc" -ne 0 ] || fail "$command exceeded its bound without failing"
     assert_contains "$out" "1s hard timeout" "$command hard-timeout refusal"
   done
+
+  dir=$(new_fixture codegraph-init-index-budget)
+  FM_FAKE_HANG_COMMAND=codegraph-init out=$(run_kit "$dir" --action apply --pull-model no --start-ollama no --persist-ollama no --install-tools no \
+    --init codegraph --allow-language-downloads yes --command-timeout-seconds 1 --max-index-seconds 5 \
+    --rollback-manifest "$dir/rollback.log" 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "CodeGraph init incorrectly used the 1s command timeout: $out"
+
+  dir=$(new_fixture codegraph-init-index-timeout)
+  FM_FAKE_HANG_COMMAND=codegraph-init out=$(run_kit "$dir" --action apply --pull-model no --start-ollama no --persist-ollama no --install-tools no \
+    --init codegraph --allow-language-downloads yes --command-timeout-seconds 10 --max-index-seconds 1 \
+    --rollback-manifest "$dir/rollback.log" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "CodeGraph init exceeded max-index without failing"
+  assert_contains "$out" "CodeGraph init exceeded its 1s hard timeout" "CodeGraph max-index timeout"
 
   dir=$(new_fixture timeout-grepai-stop)
   for index in $(seq 1 100); do
@@ -971,6 +1184,46 @@ test_lazy_mcp_symlink_topology_is_refused_without_target_changes() {
   pass "indexing recovery: lazy-mcp symlink topology is refused transactionally"
 }
 
+test_state_ancestors_and_serena_languages_are_semantically_exact() {
+  local dir target before out rc
+  dir=$(new_fixture state-child-symlink)
+  mkdir -p "$dir/project/.codegraph"
+  target="$dir/codegraph-target.db"
+  printf 'sqlite fixture\n' > "$target"
+  ln -s "$target" "$dir/project/.codegraph/codegraph.db"
+  before=$(sha256sum "$target")
+  out=$(run_kit "$dir" --action plan --pull-model no --start-ollama no --persist-ollama no --install-tools no \
+    --init none 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "symlink CodeGraph database passed canonical state topology"
+  assert_contains "$out" "project state topology contains a symlink" "state child symlink refusal"
+  [ "$before" = "$(sha256sum "$target")" ] || fail "state child symlink target changed"
+
+  dir=$(new_fixture serena-language-semantics)
+  seed_healthy_indexes "$dir"
+  printf 'languages:\n- rust\n- typescript\n# - python\n- go\n' > "$dir/project/.serena/project.yml"
+  out=$(run_kit "$dir" --action health --pull-model no --start-ollama no --persist-ollama no --install-tools no \
+    --init none 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "commented/mismatched Serena languages passed"
+  assert_contains "$out" "Serena languages do not exactly match" "semantic Serena language refusal"
+
+  dir=$(new_fixture lazy-symlink-ancestor)
+  seed_healthy_indexes "$dir"
+  mkdir -p "$dir/lazy-real/hierarchy"
+  printf '{"mcpProxy":{"type":"stdio","addr":":9090"},"mcpServers":{}}\n' > "$dir/lazy-real/config.json"
+  printf '{"mcpServers":{},"outputDir":"hierarchy"}\n' > "$dir/lazy-real/gen_config.json"
+  printf '{"overview":"Root: 0 servers, 0 tools"}\n' > "$dir/lazy-real/hierarchy/root.json"
+  printf '#!/usr/bin/env bash\nexit 100\n' > "$dir/lazy-real/structure_generator"
+  chmod +x "$dir/lazy-real/structure_generator"
+  ln -s "$dir/lazy-real" "$dir/lazy-link"
+  out=$(run_kit "$dir" --action apply --pull-model no --start-ollama no --persist-ollama no --install-tools no \
+    --init grepai,codegraph,serena --allow-language-downloads yes --mcp-client lazy-mcp --mcp-scope user \
+    --lazy-mcp-dir "$dir/lazy-link" --rollback-manifest "$dir/rollback.log" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "symlink lazy-mcp ancestor passed"
+  assert_contains "$out" "lazy-mcp topology contains a symlink" "lazy-mcp ancestor symlink refusal"
+  [ ! -e "$dir/rollback.log" ] || fail "lazy-mcp ancestor refusal occurred after manifest mutation"
+  pass "indexing recovery: project/lazy state topology and Serena languages are exact"
+}
+
 test_source_inventory_rejects_symlink_and_fifo_without_following() {
   local dir outside before out rc pid waited
   dir=$(new_fixture tracked-source-symlink)
@@ -1052,9 +1305,13 @@ test_watcher_fast_exit_cleanup_does_not_reuse_stale_identity() {
 }
 
 test_help_and_plan_are_read_only
+test_inventory_is_hard_bounded_and_inotify_capacity_fails_closed
 test_fail_closed_preflight_matrix
 test_unset_runtime_uses_private_home_lock_without_following_public_symlink
 test_temporary_ollama_stop_failure_is_terminal_without_masking_primary_failure
+test_preexisting_active_ollama_is_never_adopted_or_stopped
+test_canonical_grepai_watcher_is_reconciled_without_adoption
+test_partial_ollama_service_transitions_are_reconciled
 test_serena_download_refusal_and_exact_model_identity
 test_grepai_config_rejects_commented_local_values_and_missing_endpoint
 test_grepai_config_rejects_deceptive_remote_endpoint
@@ -1062,6 +1319,7 @@ test_dirty_apply_refuses_before_mutation
 test_linked_worktree_state_uses_git_canonical_exclude
 test_incompatible_existing_indexes_refuse_before_mutation
 test_codegraph_mcp_entry_is_project_bound
+test_mcp_probe_kill_reaps_term_resistant_server_within_hard_bound
 test_benchmark_timeout_reaps_process_group_and_stops_watcher
 test_complete_benchmark_reports_every_gate
 test_read_only_health_observes_local_model
@@ -1075,6 +1333,7 @@ test_partial_initializer_state_is_planned_and_reconciled
 test_existing_model_is_validated_before_apply_mutation
 test_unmanaged_grepai_destination_is_never_overwritten
 test_lazy_mcp_symlink_topology_is_refused_without_target_changes
+test_state_ancestors_and_serena_languages_are_semantically_exact
 test_source_inventory_rejects_symlink_and_fifo_without_following
 test_git_exclude_refuses_symlink_without_following
 test_watcher_fast_exit_cleanup_does_not_reuse_stale_identity
