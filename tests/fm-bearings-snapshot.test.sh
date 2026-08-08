@@ -2175,7 +2175,7 @@ EOF
 }
 
 test_landed_next_action_truncation_is_disclosed() {
-  local home fakebin json i
+  local home fakebin json help i
   home=$(make_home landed-next-truncation)
   : > "$home/data/secondmates.md"
   mkdir -p "$home/data/long-next"
@@ -2185,10 +2185,14 @@ test_landed_next_action_truncation_is_disclosed() {
   while [ "$i" -lt 500 ]; do printf 'n' >> "$home/data/long-next/report.md"; i=$((i + 1)); done
   printf '\nOutcome: bounded result.\n' >> "$home/data/long-next/report.md"
   fakebin=$(make_fakebin "$home")
+  help=$("$ROOT/bin/fm-bearings-snapshot.sh" --help)
+  printf '%s' "$help" | grep -F 'landed{id,what,outcome,outcome_evidence_available,outcome_evidence_gap,context,context_*_truncated,context_report_count_omitted,caveat,next_action,next_action_truncated,next_owner,artifact,owner}' >/dev/null ||
+    fail "public landed help inventory omitted next_action_truncated"
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     .landed[] | select(.id == "long-next")
-    | .next_action_truncated == true
+    | has("next_action_truncated")
+      and .next_action_truncated == true
       and (.next_action | length) == 320
       and (.caveat | contains("next-action projection limit reached"))
   ' >/dev/null || fail "landed next-action truncation was not disclosed: $json"
