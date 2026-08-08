@@ -299,6 +299,8 @@ command_hold() {
     [ "$existing_evidence" = "$evidence" ] \
       || fail "existing captain hold $id has different structured decision evidence"
   else
+    [ -n "$evidence" ] || fail "new captain hold requires --evidence findings"
+    [ -n "$actions" ] || fail "new captain hold requires at least one --action"
     if [ -z "$repo" ] && [ -f "$STATE/$origin.meta" ]; then
       repo=$(meta_value "$STATE/$origin.meta" project)
       repo=${repo%/}

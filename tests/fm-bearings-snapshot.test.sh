@@ -2111,7 +2111,8 @@ EOF
         and (.milestone | contains("mapped all four scout dispositions"))
         and (.state_caveat | length) > 0
         and (.context | contains("retain unique recovery behavior"))
-        and (.next_action | contains("Integrate surviving NSM salvage"))
+        and (.next_action | contains("Re-establish current harness state"))
+        and (.next_action | contains("record the immediate next step"))
         and (.next_action | contains("mapped all four scout dispositions") | not)
         and (.caveat | contains("Current harness state unavailable"))
         and .next_owner == "nsm-integrator"
@@ -2951,6 +2952,7 @@ test_missing_causal_evidence_is_disclosed_not_replaced_by_titles() {
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] evidence-less - A title is not causal evidence (repo: firstmate) (kind: ship)
+  Implementation is ready. Next: Run focused tests.
 
 ## Queued
 - [ ] queue-without-context - Another title is not queue rationale (repo: firstmate) (kind: ship)
@@ -2965,11 +2967,11 @@ EOF
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     (.in_flight[] | select(.id == "evidence-less")
-      | (.context | ascii_downcase | contains("evidence gap"))
-        and (.context | contains("A title is not causal evidence") | not)
-        and (.context_evidence_gap | length) > 0
-        and (.next_action_evidence_gap | length) > 0
-        and (.caveat | ascii_downcase | contains("evidence gap")))
+        | (.context | contains("Implementation is ready"))
+        and (.next_action | contains("Run focused tests"))
+        and (.next_action | contains("Continue objective") | not)
+        and (.next_action_evidence_gap == null)
+        and (.caveat | contains("Current harness state unavailable")))
       and (.gates[] | select(.id == "queue-without-context")
         | (.context | ascii_downcase | contains("evidence gap"))
           and (.context | contains("Another title is not queue rationale") | not)

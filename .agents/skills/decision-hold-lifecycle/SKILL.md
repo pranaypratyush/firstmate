@@ -17,6 +17,7 @@ This skill is the single policy owner for unresolved captain decisions discovere
 Every unresolved decision that belongs to the captain and is discovered while producing, reading, presenting, or ending an investigation or visual review must become a structured captain-held work item in the authoritative backlog of the home that owns the originating work before that work or review may be treated as complete.
 The agent performs the semantic inventory because scripts must not infer decisions from report prose, visual-review artifacts, terminal output, or chat.
 Give each distinct unresolved decision a stable privacy-safe key, register it through `bin/fm-decision-hold.sh hold`, pass every applicable structured captain action with repeatable `--action`, and use the same key on retry so registration is idempotent while different decisions retain different durable identities.
+Every newly registered hold also requires concise bounded findings through `--evidence` and at least one applicable `--action`; an existing legacy hold without either remains an explicit evidence gap until it is repaired.
 Existing holds without structured action intent remain explicit evidence gaps; do not infer the missing action from their prose.
 After inventorying the whole report and review surface, run `bin/fm-decision-hold.sh complete` with every unresolved key, or with `--none` only when the reviewed surface contains no unresolved captain decision.
 A completed investigation and an ended visual review use this same owner and completion command; a visual tool, including Lavish, never owns a parallel completion policy.
@@ -30,7 +31,7 @@ Bearings reads the resulting structured state and must never compensate by scrap
 
 1. Read the complete investigation result and complete the visual review before declaring either complete.
 2. Inventory only genuine unresolved choices that require the captain.
-3. For each choice, choose a stable key and use the script's `hold` command with a concise title, reason, and repository.
+3. For each choice, choose a stable key and use the script's `hold` command with a concise title, reason, repository, bounded findings, and every applicable structured action.
 4. Run the script's `complete` command with the full unresolved-key inventory for that review pass.
 5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
 6. After the captain decides, record dependent work with normal tasks-axi commands and block it by the hold identity.

@@ -550,12 +550,14 @@ MODEL=$(printf '%s' "$SNAP" | jq \
             "Evidence gap: no bounded causal context was recorded for " + .id
           else null end) as $context_gap
        | ($recorded_context // $context_gap) as $context_raw
+       | (explicit_next($recorded_context; null)) as $explicit_next
        | (if $recorded_context == null then
             "Evidence gap: record the immediate next step for " + .id
           elif (.current_state.state == "unknown") then
-            "Re-establish current harness state, then continue objective: " + (.backlog.title // .id)
-          else "Continue objective: " + (.backlog.title // .id) end) as $next_raw
-       | (if $recorded_context == null then
+            "Re-establish current harness state, then " + ($explicit_next // ("record the immediate next step for " + .id))
+          elif $explicit_next != null then $explicit_next
+          else "Record the immediate next step for " + .id end) as $next_raw
+       | (if $recorded_context == null or $explicit_next == null then
             "Evidence gap: no bounded immediate next step was recorded for " + .id
           else null end) as $next_gap
        | {id, kind,

@@ -708,44 +708,43 @@ secondmate_causal_capsule_json() {
     def bounded($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:($n - 1)] + "…" else . end;
-    def invalidity_next($invalidity; $id):
+    def invalidity_guidance($invalidity; $id):
       if $invalidity.kind == "malformed_structured_home" then
-        "Repair malformed structured home snapshot for " + $id
+        {next_action:"Repair malformed structured home snapshot for " + $id,
+         advance_when:"When " + $id + " emits a schema-valid bounded snapshot"}
       elif $invalidity.kind == "missing_backlog" or $invalidity.kind == "unstructured_current" then
-        "Repair the structured backlog for " + $id
+        {next_action:"Repair the structured backlog for " + $id,
+         advance_when:"When a valid structured backlog is available for " + $id}
       elif $invalidity.kind == "orphan_in_flight" then
-        "Restore child metadata for " + (($invalidity.ids // []) | join(", "))
+        {next_action:"Restore child metadata for " + (($invalidity.ids // []) | join(", ")),
+         advance_when:"When child metadata is available for " + (($invalidity.ids // []) | join(", "))}
       elif $invalidity.kind == "unowned_current" then
-        "Reconcile unowned child state for " + (($invalidity.ids // []) | join(", "))
+        {next_action:"Reconcile unowned child state for " + (($invalidity.ids // []) | join(", ")),
+         advance_when:"When " + (($invalidity.ids // []) | join(", ")) + " are owned by the backlog or retired"}
       elif $invalidity.kind == "terminal_in_flight" then
-        "Move terminal in-flight items to Done or relaunch " + (($invalidity.ids // []) | join(", "))
+        {next_action:"Move terminal in-flight items to Done or relaunch " + (($invalidity.ids // []) | join(", ")),
+         advance_when:"When backlog and terminal child state agree for " + (($invalidity.ids // []) | join(", "))}
       elif $invalidity.kind == "child_current_unavailable" then
-        "Restore current child state for " + (($invalidity.ids // []) | join(", "))
-      else "Restore readable structured state for " + $id end;
-    def invalidity_advance($invalidity; $id):
-      if $invalidity.kind == "malformed_structured_home" then
-        "When " + $id + " emits a schema-valid bounded snapshot"
-      elif $invalidity.kind == "missing_backlog" or $invalidity.kind == "unstructured_current" then
-        "When a valid structured backlog is available for " + $id
-      elif $invalidity.kind == "orphan_in_flight" then
-        "When child metadata is available for " + (($invalidity.ids // []) | join(", "))
-      elif $invalidity.kind == "unowned_current" then
-        "When " + (($invalidity.ids // []) | join(", ")) + " are owned by the backlog or retired"
-      elif $invalidity.kind == "terminal_in_flight" then
-        "When backlog and terminal child state agree for " + (($invalidity.ids // []) | join(", "))
-      elif $invalidity.kind == "child_current_unavailable" then
-        "When current child state is available for " + (($invalidity.ids // []) | join(", "))
-      else "When trustworthy structured state is available for " + $id end;
-    def source_caveat($backlog; $byte; $character; $count; $projection; $hold_reason; $gap):
-      [$gap,
+        {next_action:"Restore current child state for " + (($invalidity.ids // []) | join(", ")),
+         advance_when:"When current child state is available for " + (($invalidity.ids // []) | join(", "))}
+      else {next_action:"Restore readable structured state for " + $id,
+            advance_when:"When trustworthy structured state is available for " + $id} end;
+    def externally_held_caveat($backlog; $byte; $character; $count; $projection; $hold_reason; $next; $advance; $gap):
+      [
        if $backlog then "backlog body limit reached" else empty end,
        if $byte then "report byte limit reached" else empty end,
        if $character then "report character limit reached" else empty end,
        if $count then "report-count limit reached" else empty end,
        if $projection then "final projection limit reached" else empty end,
-       if $hold_reason then "hold-reason limit reached" else empty end]
-      | map(select(. != null and . != ""))
-      | if length == 0 then null else join("; ") end;
+       if $hold_reason then "hold-reason limit reached" else empty end,
+       if $next then "next-action projection limit reached" else empty end,
+       if $advance then "gate condition projection limit reached" else empty end]
+      | join("; ") as $labels
+      | ("Structured child work is externally held" + (if $labels == "" then "" else "; " + $labels end)) as $base
+      | if ($gap // "") == "" then $base
+        else (320 - ($base | length) - 2) as $remaining
+        | if $remaining > 1 then $base + "; " + ($gap | bounded($remaining)) else $base end
+        end | bounded(320);
     def state: (.state // .current.state // "unknown");
     def reason: (.reason // .current.reason // "Current home state unavailable");
     if state == "externally_held" then
@@ -778,23 +777,19 @@ secondmate_causal_capsule_json() {
           context_projection_truncated:($projection_cut or $context_cut),hold_reason_truncated:$hold_cut,
           next_action:($next | bounded(320)),next_action_truncated:$next_cut,
           advance_when:($advance | bounded(320)),advance_when_truncated:$advance_cut,
-          caveat:(["Structured child work is externally held",
-            source_caveat($backlog_cut;$byte_cut;$character_cut;$count_cut;($projection_cut or $context_cut);$hold_cut;
-              (if $gaps == "" then null else $gaps end)) // empty,
-            if $next_cut then "next-action projection limit reached" else empty end,
-            if $advance_cut then "gate condition projection limit reached" else empty end]
-            | join("; ") | bounded(320))}
+          caveat:externally_held_caveat($backlog_cut;$byte_cut;$character_cut;$count_cut;
+            ($projection_cut or $context_cut);$hold_cut;$next_cut;$advance_cut;
+            (if $gaps == "" then null else $gaps end))}
     elif state == "unknown" then
       reason as $context
-      | (invalidity_next((.invalidity // {kind:null,ids:[]}); (.id // "this home"))) as $next
-      | (invalidity_advance((.invalidity // {kind:null,ids:[]}); (.id // "this home"))) as $advance
+      | (invalidity_guidance((.invalidity // {kind:null,ids:[]}); (.id // "this home"))) as $guidance
       | .charted_next = {
           context:($context | bounded(800)),context_truncated:(($context | length) > 800),
           context_backlog_truncated:false,context_byte_truncated:false,
           context_character_truncated:false,context_report_count_omitted:false,
           context_projection_truncated:(($context | length) > 800),hold_reason_truncated:false,
-          next_action:($next | bounded(320)),next_action_truncated:(($next | length) > 320),
-          advance_when:($advance | bounded(320)),advance_when_truncated:(($advance | length) > 320),
+          next_action:($guidance.next_action | bounded(320)),next_action_truncated:(($guidance.next_action | length) > 320),
+          advance_when:($guidance.advance_when | bounded(320)),advance_when_truncated:(($guidance.advance_when | length) > 320),
           caveat:(((if ($context | length) > 800 then "Structured-home reason limit reached; " else "" end)
             + "Structured home state unavailable (" + ((.invalidity.kind // "unknown") | tostring)
             + "): " + $context)

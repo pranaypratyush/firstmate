@@ -184,9 +184,16 @@ EOF
   if run_decisions "$home" complete "$id" route access > "$home/partial-complete.out" 2> "$home/partial-complete.err"; then
     fail "completion succeeded while one of two distinct decisions lacked a hold"
   fi
+  if run_decisions "$home" hold "$id" access \
+    --title "Choose the sample access level" --reason "captain access choice pending" --repo sample \
+    > "$home/missing-inputs.out" 2> "$home/missing-inputs.err"; then
+    fail "new captain hold accepted missing evidence and action intent"
+  fi
   access_hold=$(run_decisions "$home" hold "$id" access \
-    --title "Choose the sample access level" --reason "captain access choice pending" --repo sample) \
-    || fail "could not register access hold"
+    --title "Choose the sample access level" --reason "captain access choice pending" --repo sample \
+    --evidence "The access boundary remains undecided after the review findings." \
+    --action missing-choice) \
+    || fail "could not register access hold with required durable inputs"
   [ "$access_hold" = "$id-decision-access" ] || fail "access hold identity was not distinct: $access_hold"
   [ "$(grep -cE "^- \[ \] $route_hold -" "$home/data/backlog.md")" = 1 ] \
     || fail "idempotent retry duplicated the route hold"
@@ -215,11 +222,11 @@ EOF
       and .merge_decision_required == true
       and .missing_choice_required == false))
       and (.decisions_open | any(.id == $access and .verb == "captain-hold" and .owner == "(main)"
-        and .evidence == null
-        and (.evidence_gap | contains("no bounded decision evidence"))
-        and (.evidence_caveat | contains("no bounded decision evidence"))
-        and .action_types == []
-        and (.action_type_evidence_gap | contains("No structured captain action"))))
+        and .evidence == "The access boundary remains undecided after the review findings."
+        and .evidence_gap == null
+        and .action_types == ["missing-choice"]
+        and .action_type_evidence_gap == null
+        and .missing_choice_required == true))
       and (.gates | any(.id == $route or .id == $access) | not)
   ' >/dev/null || fail "Bearings did not surface structured captain holds: $json"
 
@@ -386,7 +393,8 @@ test_visual_review_uses_shared_completion_owner() {
   mkdir -p "$home/.lavish"
   printf '<html><body>Synthetic sample board</body></html>\n' > "$home/.lavish/sample-board.html"
   hold=$(run_decisions "$home" hold "$id" layout \
-    --title "Choose the sample layout" --reason "captain layout choice pending" --repo sample) \
+    --title "Choose the sample layout" --reason "captain layout choice pending" --repo sample \
+    --evidence "The board review leaves the layout choice unresolved." --action missing-choice) \
     || fail "post-teardown visual review could not use the shared hold owner"
   run_decisions "$home" complete "$id" layout >/dev/null \
     || fail "post-teardown visual review could not use the shared completion owner"
@@ -479,7 +487,8 @@ EOF
   printf 'done: report and visual review complete\n' > "$mate/state/$origin.status"
   printf '# Sample secondmate review\n\nOne captain choice remains.\n' > "$mate/data/$origin/report.md"
   hold=$(run_decisions "$mate" hold "$origin" release \
-    --title "Choose the sample release" --reason "captain release choice pending" --repo sample) \
+    --title "Choose the sample release" --reason "captain release choice pending" --repo sample \
+    --evidence "The secondmate review leaves the release choice unresolved." --action missing-choice) \
     || fail "secondmate-owned hold creation failed"
   run_decisions "$mate" complete "$origin" release >/dev/null \
     || fail "secondmate-owned completion failed"
@@ -515,16 +524,20 @@ test_resolve_matches_quoted_blocked_by_edges() {
   printf '# Quote edge review\n\nThree edge decisions and one absent control.\n' > "$home/data/$origin/report.md"
 
   hold_first=$(run_decisions "$home" hold "$origin" edge-first \
-    --title "First edge decision" --reason "captain first pending" --repo sample) \
+    --title "First edge decision" --reason "captain first pending" --repo sample \
+    --evidence "The first edge remains unresolved after review." --action missing-choice) \
     || fail "could not register first-edge hold"
   hold_mid=$(run_decisions "$home" hold "$origin" edge-mid \
-    --title "Middle edge decision" --reason "captain mid pending" --repo sample) \
+    --title "Middle edge decision" --reason "captain mid pending" --repo sample \
+    --evidence "The middle edge remains unresolved after review." --action missing-choice) \
     || fail "could not register mid-edge hold"
   hold_last=$(run_decisions "$home" hold "$origin" edge-last \
-    --title "Last edge decision" --reason "captain last pending" --repo sample) \
+    --title "Last edge decision" --reason "captain last pending" --repo sample \
+    --evidence "The last edge remains unresolved after review." --action missing-choice) \
     || fail "could not register last-edge hold"
   hold_absent=$(run_decisions "$home" hold "$origin" edge-absent \
-    --title "Absent edge decision" --reason "captain absent pending" --repo sample) \
+    --title "Absent edge decision" --reason "captain absent pending" --repo sample \
+    --evidence "The absent edge control remains unresolved after review." --action missing-choice) \
     || fail "could not register absent-edge hold"
 
   tasks_in "$home" add pad-a "Pad A" --kind ship --repo sample >/dev/null \
