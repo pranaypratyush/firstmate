@@ -12,6 +12,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
+CONFIGURATION="$ROOT/docs/configuration.md"
 TMP_ROOT=$(fm_test_tmproot fm-send-strict)
 
 make_stubs() {  # <dir> -> echoes fakebin dir
@@ -206,15 +207,20 @@ test_home_argument_supports_secondmate_home_callers() {
 }
 
 test_help_documents_home_argument_contract() {
-  local out err rc
+  local out err rc configuration
   out="$TMP_ROOT/help.out"; err="$TMP_ROOT/help.err"
   env -u FM_HOME "$SEND" --help >"$out" 2>"$err"; rc=$?
   expect_code 0 "$rc" "--help should not require a home"
   assert_contains "$(cat "$out")" "fm-send.sh --home <absolute-firstmate-home>" "help should show the approval-prefix-shaped invocation"
   assert_contains "$(cat "$out")" "takes precedence over FM_HOME and operational-directory overrides" "help should define argument precedence"
   assert_contains "$(cat "$out")" "never falls back to the repo root" "help should retain the no-ambient-fallback contract"
+  configuration=$(cat "$CONFIGURATION")
+  assert_contains "$configuration" "See \`bin/fm-send.sh --help\` for the exact argument shape, validation, precedence, and fallback contract." \
+    "operator guidance should point exact home mechanics to the helper-owned help"
+  assert_not_contains "$configuration" "It must be the first argument" \
+    "operator guidance should not duplicate helper-owned home mechanics"
   [ ! -s "$err" ] || fail "--help should not write an error"$'\n'"$(cat "$err")"
-  pass "fm-send help: home argument, precedence, and no-fallback contract are inspectable"
+  pass "fm-send help: exact home mechanics have one inspectable owner"
 }
 
 test_unset_fm_home_fails() {
