@@ -787,8 +787,8 @@ EOF
 elif [ "$AFK_PRESENT" -eq 1 ]; then
   cat <<'EOF'
 Away mode is active. Follow the supervision operating instructions block above:
-load /afk and ensure the daemon is running, because the daemon owns watcher
-supervision.
+load the afk skill and ensure the daemon is running, because the daemon owns
+watcher supervision. Only explicit helm invocation leaves away mode.
 
 EOF
 elif [ -f "$CONFIG/x-mode.env" ]; then

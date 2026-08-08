@@ -258,8 +258,8 @@ test_scenario_a() {
   afk_enter "$STATE_DIR"
   start_daemon
 
-  # Type partial text into the supervisor pane with NO Enter. This simulates the
-  # captain returning and starting to type before afk has been cleared.
+  # Type partial ordinary captain input into the supervisor pane with NO Enter.
+  # Away mode remains active, and the composer guard must protect the draft.
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" -l "human draft text"
   wait_for_pane_input_pending \
     || fail "Scenario A: human draft text did not become detectable as pending input"

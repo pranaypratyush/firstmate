@@ -9,7 +9,7 @@
 #   - the existing wedge alarm remains observable and deduped;
 #   - clearing the draft makes the genuinely idle Pi composer injectable;
 #   - verified submit preserves the terminal-safe marker and clears delivery state;
-#   - an unmarked return request opens the catch-up gate before Bearings;
+#   - ordinary input preserves AFK and explicit helm opens catch-up before Bearings;
 #   - remediation/resolution clears the gate, and re-entry is idempotent.
 set -u
 
@@ -241,20 +241,22 @@ message_is_injection "$INJECT_PROMPT" || fail "terminal-delivered Pi escalation 
 assert_blocker_open 'after successful marked injection'
 pass "real idle Pi/Herdr accepts one marked escalation promptly, verifies submit, clears wedge state, and emits no duplicate alert"
 
-# The captain returns with an ordinary unmarked Bearings request. The request is
-# captured byte-exact, then the public return owner must gate it on the blocker.
+# Ordinary captain input stays away, then explicit helm selects the public
+# return owner and gates ordinary work on the blocker.
 wait_for_idle || fail "real Pi did not settle after the injected catch-up"
 for _ in $(seq 1 80); do
   composer=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" fm_backend_composer_state herdr "$PRIMARY_TARGET")
   [ "$composer" = empty ] && break
   sleep 0.1
 done
-[ "$composer" = empty ] || fail "real Pi composer was not ready for the unmarked return request"
+[ "$composer" = empty ] || fail "real Pi composer was not ready for the ordinary request"
 "$LAB_HELPER" run "$SESSION" pane send-text "$PRIMARY_PANE" 'Synthetic Bearings request' >/dev/null
 "$LAB_HELPER" run "$SESSION" pane send-keys "$PRIMARY_PANE" enter >/dev/null
-wait_for_prompt 'any(.[]; .prompt == "Synthetic Bearings request")' || fail "real Pi did not receive the unmarked return request"
+wait_for_prompt 'any(.[]; .prompt == "Synthetic Bearings request")' || fail "real Pi did not receive the ordinary request"
 RETURN_PROMPT=$(jq -r 'select(.prompt == "Synthetic Bearings request") | .prompt' "$CAPTURE" | tail -1)
-should_exit_afk "$STATE" "$RETURN_PROMPT" || fail "unmarked Pi return request did not trigger the away exit contract"
+should_exit_afk "$STATE" "$RETURN_PROMPT" && fail "ordinary Pi request selected the away exit contract"
+[ -e "$STATE/.afk" ] || fail "ordinary Pi request cleared away mode"
+should_exit_afk "$STATE" '/helm' || fail "explicit Pi helm invocation did not select the away exit contract"
 assert_blocker_open 'before return catch-up'
 [ -f "$STATE/repair-task.meta" ] || fail "live blocker metadata disappeared before return catch-up"
 
@@ -272,7 +274,7 @@ BEARINGS_OUT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_O
 BEARINGS_RC=$?
 set -e
 [ "$BEARINGS_RC" -eq 3 ] || fail "Bearings bypassed the return gate (rc=$BEARINGS_RC): $BEARINGS_OUT"
-pass "real unmarked Pi return opens catch-up and blocks Bearings before the unresolved blocker can be deferred"
+pass "ordinary Pi input preserves AFK and explicit helm blocks Bearings behind catch-up"
 
 printf 'resolved [key=synthetic-dependency]: refreshed the synthetic token and resumed the task\n' >> "$STATE/repair-task.status"
 PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" FM_ROOT_OVERRIDE="$PROJECT" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$STATE" \
@@ -294,4 +296,4 @@ DAEMON_STARTED=0
 pass "resolved return catch-up allows Bearings and a clean idempotent away re-entry"
 
 printf 'evidence: herdr=%s pi=%s target=%s inject-hex-prefix=%s notifier-count=1\n' \
-  "$(herdr --version)" "$(pi --version)" "$PRIMARY_TARGET" "${INJECT_HEX:0:6}"
+  "$("$LAB_HELPER" run "$SESSION" --version)" "$(pi --version)" "$PRIMARY_TARGET" "${INJECT_HEX:0:6}"

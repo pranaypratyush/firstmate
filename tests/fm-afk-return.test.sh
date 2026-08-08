@@ -23,6 +23,10 @@ install_runner() {  # <case-dir>
 #!/usr/bin/env bash
 [ "${1:-}" = stop ] || exit 2
 printf 'stop\n' >> "$FM_HOME/stop.log"
+if [ -e "$FM_HOME/state/.fail-lifecycle-stop-once" ]; then
+  rm -f "$FM_HOME/state/.fail-lifecycle-stop-once"
+  exit 1
+fi
 rm -f "$FM_HOME/state/.afk"
 if [ -e "$FM_HOME/state/.fail-terminal-stop-once" ]; then
   rm -f "$FM_HOME/state/.fail-terminal-stop-once"
@@ -165,8 +169,31 @@ EOF
   printf '1784074271\t1\tsignal\tdecision-task.status\tsignal: synthetic decision\n' > "$dir/home/state/.fake-drain"
   out=$(run_return "$dir" begin) || fail "approval decision should not be treated as a firstmate blocker: $out"
   assert_contains "$out" 'catch-up wake:' "approval decision notification was not surfaced in catch-up"
+  [ ! -e "$dir/home/state/.afk" ] || fail "successful explicit helm return left away mode active"
   [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "approval decision incorrectly opened a firstmate blocker gate"
   pass "needs-decision remains reportable without masquerading as a firstmate-actionable blocker"
+}
+
+test_failed_helm_shutdown_preserves_lifecycle_and_gate() {
+  local dir gate out rc
+  dir="$TMP_ROOT/failed-shutdown"
+  install_runner "$dir"
+  gate="$dir/home/state/.afk-return-catchup"
+  date +%s > "$dir/home/state/.afk"
+  touch "$dir/home/state/.fail-lifecycle-stop-once"
+
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "failed helm shutdown did not block ordinary work (rc=$rc): $out"
+  [ -e "$dir/home/state/.afk" ] || fail "failed helm shutdown cleared the AFK lifecycle"
+  [ -e "$gate" ] || fail "failed helm shutdown did not retain the catch-up gate"
+
+  out=$(run_return "$dir" check) || fail "helm check did not retry the preserved shutdown: $out"
+  [ ! -e "$dir/home/state/.afk" ] || fail "successful helm retry left away mode active"
+  [ ! -e "$gate" ] || fail "successful helm retry left the catch-up gate active"
+  pass "failed helm shutdown preserves AFK and blocks work until guarded retry succeeds"
 }
 
 test_away_reentry_refuses_pending_return_gate() {
@@ -212,5 +239,6 @@ test_check_retries_recorded_terminal_teardown() {
 test_return_gate_orders_catchup_before_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
+test_failed_helm_shutdown_preserves_lifecycle_and_gate
 test_away_reentry_refuses_pending_return_gate
 test_check_retries_recorded_terminal_teardown

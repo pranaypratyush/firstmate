@@ -11,10 +11,10 @@
 # declared-pause recheck reach the LLM, and even then as one pre-read digest per
 # batch window.
 #
-# PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
+# PRESENCE-GATING (the afk contract). The daemon is the away-mode engine: it
 # injects ONLY when the durable away-mode flag state/.afk is present. Invoking
-# the /afk skill sets that flag and starts this daemon; any real (unmarked)
-# user message clears it and firstmate resumes full responsiveness.
+# the afk skill sets that flag and starts this daemon; ordinary user and
+# operational messages preserve it until the captain explicitly invokes helm.
 # When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
 # Any buffered daemon escalations that remain while afk is off survive in
 # state/.subsuper-escalations and are flushed on the next "while you were out"
@@ -25,13 +25,12 @@
 # FM_OPERATIONAL_PREFIX. A human cannot type its leading U+2063 from a normal
 # keyboard at the start of a message, and Herdr transports it as text.
 # Firstmate's contract: a message that starts with the current prefix, or a
-# legacy bare-marker daemon escalation, is internal (stay afk); an unmarked
-# message means the captain is back (exit afk, flush catch-up, resume per-wake
-# responsiveness). The prefix and busy-guard solve the same problem - the
+# legacy bare-marker daemon escalation, is internal; every non-helm message
+# also stays afk. The prefix and busy-guard solve the same problem - the
 # daemon and the human share one input channel - so they live together under
-# /afk.
+# afk.
 #
-# Reliability model (see the /afk skill):
+# Reliability model (see the afk skill):
 #   - Nothing is lost in away mode: while state/.afk exists, the watcher reverts
 #     to daemon-owned one-shot behavior and enqueues every wake to
 #     state/.wake-queue BEFORE advancing its suppression markers, so a
@@ -61,7 +60,7 @@
 # escalations before exit.
 #
 # Usage: fm-supervise-daemon.sh
-#          Long-lived background loop. Normally started by the /afk skill, which
+#          Long-lived background loop. Normally started by the afk skill, which
 #          sets state/.afk first. Env knobs:
 #          FM_SUPERVISOR_TARGET     supervisor pane target (override; otherwise
 #                                   auto-discovered per backend - $TMUX_PANE
@@ -252,9 +251,9 @@ afk_active() {  # <state>
   [ -e "$1/$AFK_FLAG_NAME" ]
 }
 
-# afk_enter / afk_exit: write/clear the away-mode flag. Called by the /afk
-# skill (enter) and by firstmate on user return (exit). Durable: a plain file,
-# so recovery (§5) re-enters afk if it is present after a restart.
+# afk_enter / afk_exit: write/clear the away-mode flag. Called by the afk entry
+# and guarded helm return paths. Durable: a plain file, so recovery (§5)
+# re-enters afk if it is present after a restart.
 afk_enter() {  # <state>
   mkdir -p "$1"
   date '+%s' > "$1/$AFK_FLAG_NAME"
@@ -264,27 +263,22 @@ afk_exit() {  # <state>
   rm -f "$1/$AFK_FLAG_NAME"
 }
 
-# should_exit_afk: encodes firstmate's afk-exit contract as a testable function.
-#   afk inactive            -> 1 (nothing to exit)
-#   message has marker      -> 1 (internal escalation; stay afk)
-#   message is /afk command -> 1 (re-entering/extending afk; stay afk)
-#   anything else           -> 0 (captain is back; exit afk)
-# Bias toward exit: only the marker and an explicit /afk invocation keep afk
-# alive. A false exit is self-correcting (the captain re-runs /afk).
+# should_exit_afk: encodes the explicit helm-only exit contract as a testable
+# function. Known command carriers are accepted for harness independence;
+# harnesses without a verified command carrier resolve explicit skill
+# invocation before applying this lifecycle contract.
 should_exit_afk() {  # <state> <message-text>
   local state=$1 msg=$2
   afk_active "$state" || return 1
-  message_is_injection "$msg" && return 1
   case "$msg" in
-    /afk*) return 1 ;;
+    "\$helm"|"\$helm "*) return 0 ;;
+    /helm|'/helm '*) return 0 ;;
   esac
-  return 0
+  return 1
 }
 
 # message_is_injection: 0 if the given message text starts with the sentinel
-# marker (a daemon escalation), 1 otherwise (a real user message). Firstmate's
-# afk-exit contract uses this: marker present -> stay afk; absent -> captain is
-# back. Bias ambiguous cases toward exit (a false exit is self-correcting).
+# marker (a daemon escalation), 1 otherwise (ordinary captain input).
 message_is_injection() {  # <message-text>
   local msg=$1
   [ -n "$msg" ] || return 1

@@ -121,7 +121,7 @@ repair_line() {
     return 0
   fi
   if [ "$AFK" -eq 1 ]; then
-    printf '%s\n' 'Away mode owns watcher supervision; load /afk and ensure the daemon is running instead of starting normal supervision directly.'
+    printf '%s\n' 'Away mode owns watcher supervision; load the afk skill and ensure the daemon is running instead of starting normal supervision directly; only explicit helm invocation exits.'
     return 0
   fi
 
@@ -194,7 +194,7 @@ else
   printf '%s\n' '- Lock: held by this session; this session owns normal supervision unless away mode says otherwise.'
 fi
 if [ "$AFK" -eq 1 ]; then
-  printf '%s\n' '- Away mode: active; load /afk and keep normal harness supervision paused while the daemon owns the watcher.'
+  printf '%s\n' '- Away mode: active; load the afk skill and keep normal harness supervision paused while the daemon owns the watcher; only explicit helm invocation exits.'
 else
   printf '%s\n' '- Away mode: inactive.'
 fi

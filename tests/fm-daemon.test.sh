@@ -778,32 +778,36 @@ test_marker_detection() {
   message_is_injection "how's it going?" \
     && fail "plain message misdetected as injection"
   message_is_injection "" && fail "empty message misdetected as injection"
-  # should_exit_afk: the full afk-exit contract
+  # Ordinary and operational input preserve the durable AFK lifecycle.
   local dir state
   dir=$(make_supercase marker-detect)
   state="$dir/state"
   afk_enter "$state"
-  should_exit_afk "$state" "${FM_INJECT_MARK}escalate" \
-    && fail "marker message should not exit afk (internal escalation)"
+  should_exit_afk "$state" "${FM_OPERATIONAL_PREFIX}v1 away-supervisor: escalate" \
+    && fail "operational message should not exit afk"
   should_exit_afk "$state" "status update please" \
-    || fail "plain message should exit afk (captain is back)"
-  pass "marker detection: marker -> stay afk, no marker -> exit afk"
+    && fail "ordinary captain message should not exit afk"
+  [ -e "$state/.afk" ] || fail "ordinary or operational input cleared the AFK lifecycle"
+  pass "ordinary captain and operational input both preserve AFK"
 }
 
-test_afk_turn_exemption() {
+test_helm_only_exit_contract() {
   local dir state
-  dir=$(make_supercase afk-exempt)
+  dir=$(make_supercase helm-only-exit)
   state="$dir/state"
   afk_enter "$state"
-  # /afk while already away must NOT self-cancel (re-entering/extending)
   should_exit_afk "$state" "/afk" \
     && fail "bare /afk should not exit afk"
   should_exit_afk "$state" "/afk back in an hour" \
     && fail "/afk with args should not exit afk"
-  # a non-/afk skill invocation DOES exit (the captain is actively working)
   should_exit_afk "$state" "/no-mistakes" \
-    || fail "non-afk skill should exit afk"
-  pass "/afk invocation is exempt from afk exit (no self-cancel)"
+    && fail "unrelated skill invocation should not exit afk"
+  should_exit_afk "$state" "\$helm" \
+    || fail "codex helm invocation did not select the guarded exit"
+  should_exit_afk "$state" "/helm" \
+    || fail "slash-form helm invocation did not select the guarded exit"
+  [ -e "$state/.afk" ] || fail "classification mutated the AFK lifecycle"
+  pass "only explicit helm invocation selects the AFK exit contract"
 }
 
 test_should_exit_afk_when_afk_inactive() {
@@ -1867,7 +1871,7 @@ test_collapse_newlines_pure
 test_afk_absent_daemon_does_not_inject
 test_busy_guard_defers_when_supervisor_busy
 test_marker_detection
-test_afk_turn_exemption
+test_helm_only_exit_contract
 test_should_exit_afk_when_afk_inactive
 test_strip_injection_marker
 test_pane_input_pending_detects_partial_input

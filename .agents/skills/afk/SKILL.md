@@ -1,8 +1,8 @@
 ---
 name: afk
 description: >-
-  Enter away-mode supervision when the captain invokes /afk, says they are going afk, `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It sets a durable away-mode flag so the sub-supervisor daemon can self-handle routine wakes and escalate captain-relevant events plus bounded declared-external-wait rechecks as batched digests during walk-away stretches, then exits automatically when any real unmarked message returns firstmate to full per-wake responsiveness.
+  Enter and maintain away-mode supervision when the captain explicitly invokes afk, says they are going afk, `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
+  It keeps the durable away-mode flag active across ordinary and operational messages until the captain explicitly invokes the complementary helm skill.
 user-invocable: true
 metadata:
   internal: true
@@ -10,11 +10,9 @@ metadata:
 
 # afk
 
-Away-mode supervision. When invoked, `/afk` makes the daemon's token-saving
-tradeoff **consented** and **explicit**: the captain is stepping away, so the
-sub-supervisor may triage routine wakes in bash instead of waking firstmate's
-LLM for each one. Escalations still reach the captain, but as one pre-read,
-batched digest rather than per-wake injections.
+Away-mode supervision.
+When invoked, the `afk` skill makes the daemon's token-saving tradeoff **consented** and **explicit**: the captain is stepping away, so the sub-supervisor may triage routine wakes in bash instead of waking firstmate's LLM for each one.
+Escalations still reach the captain, but as one pre-read, batched digest rather than per-wake injections.
 
 ## What it does
 
@@ -52,24 +50,14 @@ batched digest rather than per-wake injections.
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
    its child; the singleton lock no-ops a stray arm harmlessly.
 
-4. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
+4. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you invoke helm."
 
-## How to exit afk
+## Persistence and exit handoff
 
-No `/back` is needed. The first genuine message is the return signal:
-
-- A message **without** the current operational prefix or a legacy bare marker, and **not** starting with `/afk` -> the captain is back.
-  Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
-  That script owns correct-ordered daemon shutdown, durable wake draining, escalation and wedge evidence, and the return-catch-up gate.
-  If it reports a firstmate-actionable `blocked:` event, remediate it immediately through the normal lifecycle, or explicitly reclassify it with a durable reason and close its decision key with `resolved [key=...]`, then run `bin/fm-afk-return.sh check`.
-  Once the daemon stops, resume full per-wake responsiveness through the emitted primary-harness supervision protocol while blocker handling proceeds, so the gate never creates a blind wait.
-  Do not answer a Bearings request or perform any other ordinary captain work until the check exits successfully.
-- A message **with** the current operational prefix (`FM_OPERATIONAL_PREFIX`, U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `), or a legacy bare `FM_INJECT_MARK` daemon escalation -> stay afk and process it.
-- Re-invoking `/afk` while already away -> stay afk (refresh the flag); this
-  does **not** trigger an exit.
-
-Bias ambiguous cases toward exit: a present captain beats token savings, and
-a false exit is self-correcting (the captain re-runs `/afk`).
+While `state/.afk` exists, ordinary captain messages and operational injections remain in away mode and are handled without calling the return path.
+Re-invoking `afk` refreshes the flag without exiting.
+Only the captain's explicit invocation of the complementary `helm` skill begins exit.
+Load `helm`; it alone owns the guarded shutdown and catch-up procedure.
 
 ## Orthogonal to approval authority
 
@@ -83,7 +71,7 @@ The daemon only batches the notification.
 The daemon constructs every current injection as the `away-supervisor` kind owned by `bin/fm-operational-input.sh`, beginning with `FM_OPERATIONAL_PREFIX`: `FM_INJECT_MARK` (U+2063 INVISIBLE SEPARATOR) followed by the stable `FIRSTMATE_OP: ` label.
 The bare `FM_INJECT_MARK` form remains accepted for legacy daemon escalations during rollout.
 U+2063 has no normal keyboard keystroke and survives terminal transport as UTF-8 text.
-This is how firstmate tells a daemon escalation apart from a real message in the same pane.
+This is how firstmate tells a daemon escalation apart from ordinary captain input in the same pane without changing the away-mode lifecycle.
 The operational prefix travels with the message text; it does not rely on harness-level typed-vs-injected detection, which is not portable across claude, codex, opencode, pi, pi-signed, grok, and kimi.
 
 ## Busy-guard and composer guard
@@ -101,7 +89,7 @@ backend (tmux or herdr; see "Auto-discovered supervisor pane" below):
   `pane_input_pending` remains the tested predicate for callers that only need to know whether real unsubmitted text is present, but it is insufficient for an injection-safety decision because it cannot distinguish `empty` from `unknown`.
 
 A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.
-In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window between the captain returning and their message landing, a dead shell, and the daemon's own previous injection sitting unsent.
+In afk mode the composer guard is belt-and-suspenders (no human is typing), but it protects against the race window around explicit helm invocation, a dead shell, and the daemon's own previous injection sitting unsent.
 
 **Max-defer escape (the daemon must never silently wedge).**
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon

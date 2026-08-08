@@ -129,7 +129,7 @@ clear_delivery_artifacts() {
 
 return_guard() {
   if [ -e "$STATE/.afk" ]; then
-    printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work\n' >&2
+    printf 'fm-afk-return: away mode is still active; explicitly invoke helm before ordinary captain work\n' >&2
     return 3
   fi
   if [ -e "$GATE" ]; then
