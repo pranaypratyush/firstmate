@@ -5,6 +5,8 @@
 # The default check is network-free and verifies the checked-in adapted skill
 # directories, their shared Firstmate contract, and the .claude/skills discovery
 # symlink.
+# Directory hashes use a stable, length-delimited encoding of sorted paths and
+# file contents so each filename is cryptographically bound to its bytes.
 # --source-root additionally verifies one local checkout of the pinned upstream
 # repository at the exact recorded revision, including every source directory
 # hash.
@@ -90,14 +92,24 @@ async function collectFiles(baseDir, currentDir, results) {
   }));
 }
 
+function updateDirectoryEntry(hash, relativePath, content) {
+  const path = Buffer.from(relativePath, 'utf8');
+  const length = Buffer.alloc(8);
+  length.writeBigUInt64BE(BigInt(path.length));
+  hash.update(length);
+  hash.update(path);
+  length.writeBigUInt64BE(BigInt(content.length));
+  hash.update(length);
+  hash.update(content);
+}
+
 async function directoryHash(directory) {
   const files = [];
   await collectFiles(directory, directory, files);
   files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
   const hash = createHash('sha256');
   for (const file of files) {
-    hash.update(file.relativePath);
-    hash.update(file.content);
+    updateDirectoryEntry(hash, file.relativePath, file.content);
   }
   return hash.digest('hex');
 }
@@ -118,8 +130,11 @@ function gitTreeHash(repository, revision, prefix) {
   paths.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
   const hash = createHash('sha256');
   for (const file of paths) {
-    hash.update(file.relativePath);
-    hash.update(execFileSync('git', ['-C', repository, 'show', `${revision}:${file.path}`]));
+    updateDirectoryEntry(
+      hash,
+      file.relativePath,
+      execFileSync('git', ['-C', repository, 'show', `${revision}:${file.path}`]),
+    );
   }
   return hash.digest('hex');
 }
@@ -127,7 +142,7 @@ function gitTreeHash(repository, revision, prefix) {
 async function main() {
   const lockPath = join(root, 'skills-lock.json');
   const lock = JSON.parse(await readFile(lockPath, 'utf8'));
-  if (lock.version !== 2) fail(`unsupported skills lock version: ${lock.version}`);
+  if (lock.version !== 3) fail(`unsupported skills lock version: ${lock.version}`);
 
   const sources = Object.entries(lock.sources || {});
   if (sources.length !== 1) fail('skills lock must declare exactly one pinned source');

@@ -7,6 +7,7 @@ They are available to every supported harness from a fresh Firstmate clone witho
 `skills-lock.json` records the exact upstream revision, the upstream directory hash for every selected skill, the adapted Firstmate directory hash, and the shared adaptation-contract hash.
 `bin/fm-skills-lock.sh` is the executable owner of the network-free integrity and discovery check and the optional upstream-checkout verification.
 The upstream MIT notice is retained at `.agents/skills/VENDORED-ENGINEERING-LICENSE.md` and is integrity-bound by the same lock validator.
+Lock version 3 uses a canonical length-delimited tree encoding that binds each relative filename to its exact content bytes.
 
 The source snapshot is `mattpocock/skills@84fdeffd12f2ee307994d1eb6feb48173b6e0502`, captured from `refs/heads/main` on 2026-08-07.
 The selected snapshot intentionally excludes four upstream entries after a file-level adaptation review:
@@ -76,6 +77,8 @@ The exact result was:
 ```text
 ok - checked-in vendored snapshot and discovery paths validate through the public checker
 ok - public checker rejects a changed vendored skill without trusting its lock
+ok - public checker rejects a filename/content-boundary collision
+ok - public checker integrity-binds the upstream redistribution notice
 ok - public checker documents optional pinned-upstream verification
 # all fm-skills-lock tests passed
 ```

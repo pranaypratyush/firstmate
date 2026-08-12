@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "sources": {
     "mattpocock/skills": {
       "sourceType": "github",
@@ -25,128 +25,128 @@
     "ask-matt": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/ask-matt/SKILL.md",
-      "computedHash": "48b3d774f861de6f1fac38ee525b3fe22b68e0e5f313998cf350d1b0d96bfe98",
-      "sourceHash": "b2e8ef5ffc2f142022c1e1e1bba68073f0821356a8e1cf1b23670f61d13fe50b"
+      "computedHash": "2d088dd083c43df967f98428eebb55733f4ce8e49ae213eebdf9645aae32ac37",
+      "sourceHash": "107b53000fa5d474a1a0055b2cb0d46d23ae3366a1fb744ad32631b77ad2c641"
     },
     "code-review": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/code-review/SKILL.md",
-      "computedHash": "446307e123f0e4f216719e68d2a00587754549520595fc0131e41a4faa77eefd",
-      "sourceHash": "1d5e7242a98674635be79ab310cdda0e555d36a9903d2526ebf4263d0b7997ca"
+      "computedHash": "bc9c35d6a5878bc1ffbd23c0d82613926fe99e34857f9487f8e0c7d1baf3baca",
+      "sourceHash": "31d0833c92be3ff9ef8ad4a78c1f375e0a37649c3e5c5dd32042f56fef7263a3"
     },
     "codebase-design": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/codebase-design/SKILL.md",
-      "computedHash": "15852e521d6a9977e1c85dc3cca1c2f2b406241885bef24e6a013333b8b84815",
-      "sourceHash": "e6394592ecf4b5aa5bc93f95a20d0a56314788bde2e1221f87296d3becb734a2"
+      "computedHash": "270f7d675e634db448b9e7b972605b1233bbc25ac8b0edfef196c57a7704493f",
+      "sourceHash": "ac3b1a4041142a6cac9cb2e63aeb4dc243e40d8e4e610bffde353f42e1cca4fe"
     },
     "diagnosing-bugs": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/diagnosing-bugs/SKILL.md",
-      "computedHash": "429dee40afd9a923b0853a314b61c6547201ed0122a24cb6547e55f7d27a5e8e",
-      "sourceHash": "c86c725ad271ba57d7e9ffd86122b898438314ef9c20ec1dbe03f3e8f149c3b2"
+      "computedHash": "f6e55efd33692e0d9e32b4837f1ec4d69096afd8339177dbf1e4dc07bb65a780",
+      "sourceHash": "ff3fc77dc43627188850c8a5e432c9170453a2d153c5cdfa772b93d821157152"
     },
     "domain-modeling": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/domain-modeling/SKILL.md",
-      "computedHash": "3962a24515fb8e41913a0d47f55bbbdab4008a7a163fa4c13063eeb9b7915fb7",
-      "sourceHash": "363cb0f53b0b431e7c00086ad1f823500b7e1b70b5616ee969c979f0934e9e6e"
+      "computedHash": "b90ea4b1678b0445840f616519873c6695b9096ac6e647b6c5f254ff0dd12e0b",
+      "sourceHash": "35919e456dd2a5747ed708cc61ad06356be2b4ca20d936aec00619f0a4a5224b"
     },
     "grill-with-docs": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/grill-with-docs/SKILL.md",
-      "computedHash": "28957225680c79605d820b34b49e248d5f5d752a2c928e715039e508463ef3d9",
-      "sourceHash": "9c460cbd94fd3c63cdef967dbdb6e66ca687103cdc380cd37834e4d10b738f78"
+      "computedHash": "bed0addb3db0ee538eba4de1b6a0651ca9d1e054d71243af198c586e768fced0",
+      "sourceHash": "7b160199153a87d28852ee37d97cc23f1d4c818db2261ead1b1d8ba3378475b3"
     },
     "grilling": {
       "source": "mattpocock/skills",
       "skillPath": "skills/productivity/grilling/SKILL.md",
-      "computedHash": "5cf20915ec49427e196d187c6fe5f0abf72778db7a5cc15cc31546a7f0cc50f8",
-      "sourceHash": "4ebdd12fe61ff3abf20cff6683740e2b9b3739454be0a3f4a928a1c4d07d6b34"
+      "computedHash": "e07a1d83628046ea7c5f2443f167e1f69b809c0e9b98429ed538a70f779bc37c",
+      "sourceHash": "766c93922a698a99f799e9ac0bb3f86d4679759434964e64c481b6b98a8b09a9"
     },
     "handoff": {
       "source": "mattpocock/skills",
       "skillPath": "skills/productivity/handoff/SKILL.md",
-      "computedHash": "7484e1f0caca97a163e942ef85642b4b55c1df7c44bad61e0309c29cdd96912d",
-      "sourceHash": "ad03e8d4ea3cbbff66420eb7ba3cc375b5cbe1821a2449b53e863256cf5b5cde"
+      "computedHash": "3b8f8e86a1472f2a082c0b7f6df436bfcb920195c5314b86c5dd3a159c44ac8b",
+      "sourceHash": "0de9a4bd5af988cc746036e0bd10dce369e88868246fc4c79a3cbd61c9b8a5d9"
     },
     "implement": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/implement/SKILL.md",
-      "computedHash": "83094696d028db5586cf3334f90e975118ea33f2a91315a773236b3f63371d76",
-      "sourceHash": "2139cfedf24791adbc839aaab6019cff158af1e28bfead020ec6e0ce01b3e74d"
+      "computedHash": "36914ab703ba157f6acf3db575d57ec594dfd6d8652e0c0e67c20d51671746c1",
+      "sourceHash": "c79887f918a4ae3166153e13992fc5628981d4f370eaaea70e16bc5ea59c90be"
     },
     "improve-codebase-architecture": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/improve-codebase-architecture/SKILL.md",
-      "computedHash": "ae626d2697e32525f745503ff5d3eb85a9f94949ff9b317bfb4251ac16873e53",
-      "sourceHash": "bce096b49db40761adb1d5348f064c303fc152e4e50fc3fd81b79df8b6cf137f"
+      "computedHash": "9733bfbc298ba7408784e0c5f044da095656af77f24d2563e86e12e1b539df14",
+      "sourceHash": "0b512003d17407357415dc3d2cbc01c372dab7521efcfd83a6ffb40322e1e3d3"
     },
     "prototype": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/prototype/SKILL.md",
-      "computedHash": "06fb856a4b82cc3b26aebb3141329b929b649d5f0f60ed6dc027ca929150b7fb",
-      "sourceHash": "73862de6cd32acf30799bfb2220357b96c1a58ab0e3d01126b769fd659d6555a"
+      "computedHash": "f78ab8a10fc9605fb0ce836809e94450d2b2aa76ebb359f710c3b274488105ac",
+      "sourceHash": "74b48c94da7bc52cc6131d724f8ba5b1195647880ec94a9f0c707ea36a2082f9"
     },
     "research": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/research/SKILL.md",
-      "computedHash": "0347133bb528b4c485198cb805cbe02dc9a38a4164d3027ba7f8c801c0e7bd1b",
-      "sourceHash": "bd3e2c6826671d82c86ed0da3dac3370ebcf63b0fe847f91bb444e1fb7dac21b"
+      "computedHash": "33de6b0a59bbc59f8c4a820ad6eff15bf68b8d796d3b1b6ad1a508083bd446de",
+      "sourceHash": "abdb1c98bc18db9904d8c286899a03e70a4084d4b61a1f2cb1daa25b31591713"
     },
     "resolving-merge-conflicts": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/resolving-merge-conflicts/SKILL.md",
-      "computedHash": "10e0d7e4742029ee7ca13a57f30dad7666f4bed0fc16c94d32ab801219c919b7",
-      "sourceHash": "28aad6f8b1b7025abc8892fa8890f68fe1533499b28a565f416b159131d22fad"
+      "computedHash": "4cc91723607956b39c60f507bb1c00f23d7257a70958e2a7f72ccba1226aab9b",
+      "sourceHash": "518c0f988805d140ccde59816949637b461ca316af035afa5853da0252c4fd2c"
     },
     "setup-matt-pocock-skills": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/setup-matt-pocock-skills/SKILL.md",
-      "computedHash": "2eb2d89cdbe31cb38ca26436fb338394d3f0d15e0e3765808286fc214e00ce36",
-      "sourceHash": "f9c2b933dda18eea572e96f6ebbcd5b30e0d1bfdc074af53cc99728dc5f0bdac"
+      "computedHash": "2601eebf084d782af6c5a17fcf8b249c9d231e3d7a051cbf069c7125b5c13124",
+      "sourceHash": "d1f4faa01ea5669cff4eb884ec895b3fa0c7f010088eca25a45efec9353aba54"
     },
     "tdd": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/tdd/SKILL.md",
-      "computedHash": "b14b7b19b036c0c3376327c63c6056a809b811ead62bc7591781447634e91429",
-      "sourceHash": "614ac2e45fb0ec02f6ce422d26bd9aa4e33aa4867323f5a3a5c0c20b96f78ff4"
+      "computedHash": "719e86d2256efdce00da10c25e37c19bd9bae2d5b4ed2a71b3634ae0cda76fbb",
+      "sourceHash": "dfcc11f07130f846e0975f837d596c5310a2458d9d082108c5056ccc4e3cb1d0"
     },
     "to-spec": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/to-spec/SKILL.md",
-      "computedHash": "acee394480db6460e92f34713560e5a65316692558b4334a9a5b36fb070d2466",
-      "sourceHash": "7e07d4cfabd1a4f61627ebe2705601784fae7b9aca7e13af3e201ace75738200"
+      "computedHash": "c7d3c0e99f9ea2e1cf265a6048fe72b10fff2ed7f83b258bd6b54301c0a64d67",
+      "sourceHash": "21262655133f99865c1509d0644e07c43e494988752d1f37d2ee5dea45268176"
     },
     "to-tickets": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/to-tickets/SKILL.md",
-      "computedHash": "89bfa0f1f0152c3446671bf3f6ef49d5085bb4674c6203616aa1909138f5e16d",
-      "sourceHash": "0349eee265e7005e667b4543de849672106c46d545e998f37d3319300bb07751"
+      "computedHash": "23ac201ea99ed7aef979b3d96f24f8e121b76a77d0c4f38181b934595e59a7f9",
+      "sourceHash": "216c8417a278144cd337d6bb5d6ba052aefcfe0ea9a2b138a5faeded92e3b64c"
     },
     "triage": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/triage/SKILL.md",
-      "computedHash": "b654a5ea6f261f9a706d0c42a7ac7b376ed03960d65eac963958ad6fb67fff78",
-      "sourceHash": "1bc5349f0b61e19a6df61496b5a03d88cd69595dd303353f87945997a9e4a884"
+      "computedHash": "950181b5f59aa2571645e5ece17f8f72544053c8b156a80f39ac05c23f24981a",
+      "sourceHash": "846a11e959e2f3c621f4ba7905dee4397ba70573f9e49c6ad56839a70a514765"
     },
     "wayfinder": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/wayfinder/SKILL.md",
-      "computedHash": "e8c94bed948f80d2e0b697ea901463f5b802905562ff8ad1f837c4e3dda234f2",
-      "sourceHash": "f343ecf46157cb645a5494644418308ad95391e9fc696faa47ae5a412bf5f6e4"
+      "computedHash": "49c0c935d367e8b7ffd5b8e878db7615d0ad0b721f885eac2b2a3036aba0c377",
+      "sourceHash": "eb08f622591bad8ba38b7caed4cd112ada3326c864cdd7f811525e940a7dfc6d"
     },
     "wizard": {
       "source": "mattpocock/skills",
       "skillPath": "skills/engineering/wizard/SKILL.md",
-      "computedHash": "ea672d5431882f94d166213d37bf139bf8e95f54c9dfda1a5bfe7c94c4ad0ddb",
-      "sourceHash": "2c0d1187398b1b7ebb9902a4c91b24181ee07892f285615b46c59f45e2c4229c"
+      "computedHash": "a5620b05e74d0e88d1a2b96952b2b391fdc3e122550f68a18c729dfb7e5b2ce9",
+      "sourceHash": "23ded9b65b32c787bee5a28250e2d5d7df640ab4a24edb9d0f159a35d6e18bec"
     },
     "writing-for-agents": {
       "source": "mattpocock/skills",
       "skillPath": "skills/productivity/writing-for-agents/SKILL.md",
-      "computedHash": "c38bd7e30a55d6c106332b68ce007ee2e1cd82f1fddb184da5c1dbb6dc63da50",
-      "sourceHash": "ccfa1e94d8f6ab5c6a1edd55293ca477faf93c39207771331efdb1e798ed21d6"
+      "computedHash": "e1f4b1d7329cf84da689b821842c4805c44e4fceac84f49cdde72596494c158e",
+      "sourceHash": "b2b8aeb03d4c1a814ebb1ea5581d1fdedf75e3ad20f24d9c01b3170f433a2f0e"
     }
   }
 }

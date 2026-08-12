@@ -33,6 +33,25 @@ pass "public checker rejects a changed vendored skill without trusting its lock"
 
 cp "$ROOT/.agents/skills/code-review/SKILL.md" \
   "$fixture/.agents/skills/code-review/SKILL.md"
+cp "$fixture/.agents/skills/code-review/agents/openai.yaml" "$TMP_ROOT/openai.yaml"
+mv "$fixture/.agents/skills/code-review/agents/openai.yaml" \
+  "$fixture/.agents/skills/code-review/agents/openai.yam"
+{
+  printf 'l'
+  cat "$fixture/.agents/skills/code-review/agents/openai.yam"
+} > "$fixture/.agents/skills/code-review/agents/openai.yaml.tmp"
+mv "$fixture/.agents/skills/code-review/agents/openai.yaml.tmp" \
+  "$fixture/.agents/skills/code-review/agents/openai.yam"
+
+out=$(FM_ROOT_OVERRIDE="$fixture" "$CHECK" 2>&1)
+status=$?
+[ "$status" -ne 0 ] || fail "boundary-colliding vendored snapshot unexpectedly validated"
+assert_contains "$out" "code-review: lock=" \
+  "boundary-colliding snapshot did not identify the changed skill"
+pass "public checker rejects a filename/content-boundary collision"
+
+rm "$fixture/.agents/skills/code-review/agents/openai.yam"
+cp "$TMP_ROOT/openai.yaml" "$fixture/.agents/skills/code-review/agents/openai.yaml"
 printf '\ntampered\n' >> "$fixture/.agents/skills/VENDORED-ENGINEERING-LICENSE.md"
 
 out=$(FM_ROOT_OVERRIDE="$fixture" "$CHECK" 2>&1)
