@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Enter away mode and run the sub-supervisor daemon in a harness-tracked
-# foreground process when one is not already alive.
+# Run the current supervisor mode in a harness-tracked foreground process when
+# one is not already alive.
 #
 # Usage: fm-afk-start.sh
-#   Sets state/.afk unless FM_AFK_STATE_PREPARED=1, checks
+#   Sets state/$FM_SUPERVISE_FLAG unless FM_AFK_STATE_PREPARED=1, checks
 #   state/.supervise-daemon.lock, and:
 #     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
 #       lock is held by a live daemon (a REFRESH: no stale-artifact clear);
@@ -11,6 +11,10 @@
 #       (fm_afk_clear_stale_artifacts) for a direct, non-prepared start, then
 #       execs bin/fm-supervise-daemon.sh in the foreground. A prepared start was
 #       already cleared transactionally by bin/fm-afk-launch.sh.
+#   FM_SUPERVISE_FLAG=.afk is normal captain away mode.
+#   FM_SUPERVISE_FLAG=.self-supervise is a marked secondmate's same-home child
+#   successor mode and uses the same daemon only while that home owns children.
+# End usage.
 #
 # This file is sourceable: its BASH_SOURCE guard keeps main from running, while
 # exposing the daemon-lock helpers and fm_afk_clear_stale_artifacts. Sourcing it
@@ -43,29 +47,54 @@ FM_SUPERVISE_FLAG="${FM_SUPERVISE_FLAG:-.afk}"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
 
-fm_afk_validate_supervise_marker() {
-  local marker_path
+fm_afk_validate_supervise_marker() {  # [<state>]
+  local state=${1:-$FM_AFK_STATE} marker_path
   case "$FM_SUPERVISE_FLAG" in
     .afk|.self-supervise) ;;
     *) echo "error: invalid supervisor mode marker: $FM_SUPERVISE_FLAG" >&2; return 1 ;;
   esac
-  marker_path="$FM_AFK_STATE/$FM_SUPERVISE_FLAG"
+  marker_path="$state/$FM_SUPERVISE_FLAG"
   if [ -L "$marker_path" ] || { [ -e "$marker_path" ] && [ ! -f "$marker_path" ]; }; then
     echo "error: invalid supervisor mode marker: $FM_SUPERVISE_FLAG" >&2
     return 1
   fi
 }
 
+fm_afk_supervise_marker_is_owned_regular() {  # <marker-path>
+  [ -f "$1" ] && [ ! -L "$1" ] && [ -O "$1" ]
+}
+
+# Publish through rename(2), not mv: mv treats a replacement final symlink to
+# a directory as a directory destination and can follow it.  The pending file
+# lives beside its final name, so rename(2) is same-directory and atomic.
+fm_afk_publish_supervise_marker() {  # [<state>]
+  local state=${1:-$FM_AFK_STATE} pending perl_bin
+  fm_afk_validate_supervise_marker "$state" || return 1
+  perl_bin=$(command -v perl) || {
+    echo "error: perl is required for safe supervisor marker publication" >&2
+    return 1
+  }
+  (
+    cd "$state" || exit 1
+    pending=$(mktemp "$FM_SUPERVISE_FLAG.pending.XXXXXX") || exit 1
+    date '+%s' > "$pending" || { rm -f "$pending"; exit 1; }
+    "$perl_bin" -e 'rename $ARGV[0], $ARGV[1] or exit 1' "$pending" "$FM_SUPERVISE_FLAG" \
+      || { rm -f "$pending"; exit 1; }
+    fm_afk_supervise_marker_is_owned_regular "$FM_SUPERVISE_FLAG" \
+      || { rm -f "$FM_SUPERVISE_FLAG"; exit 1; }
+  )
+}
+
 fm_afk_write_supervise_marker() {
-  local pending
-  fm_afk_validate_supervise_marker || return 1
-  pending=$(mktemp "$FM_AFK_STATE/$FM_SUPERVISE_FLAG.pending.XXXXXX") || return 1
-  date '+%s' > "$pending" || { rm -f "$pending"; return 1; }
-  mv "$pending" "$FM_AFK_STATE/$FM_SUPERVISE_FLAG" || { rm -f "$pending"; return 1; }
+  fm_afk_publish_supervise_marker "$FM_AFK_STATE"
 }
 
 fm_afk_start_usage() {
-  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk '
+    /^# Usage:/ { show=1 }
+    /^# End usage\./ { exit }
+    show { sub(/^# ?/, ""); print }
+  ' "${BASH_SOURCE[0]}"
 }
 
 # fm_afk_clear_stale_artifacts: on a FRESH away-session entry (the daemon is not

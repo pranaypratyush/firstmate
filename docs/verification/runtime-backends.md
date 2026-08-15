@@ -308,6 +308,14 @@ No ambient `herdr server stop` command is a supported test operation.
 The same-home successor binding was read-only verified on 2026-08-15 against Herdr 0.8.0 with client and server protocol 19.
 The binding combined the exact pane id and its current shell process id only after `pane get` reported the owning home as `foreground_cwd`.
 The portable parser and rejection regression is `tests/fm-backend-herdr.test.sh`.
+The non-sensitive observed guard output was:
+
+```text
+ok - same-home Herdr binding reads one exact existing pane and its shell incarnation
+evidence: herdr=Herdr 0.8.0 client_protocol=19 server_protocol=19 binding=accepted read_only=true
+```
+
+The guard intentionally redacts the pane and shell-incarnation values from its evidence line.
 Refresh the vendor-owned pane and process-info contract after every Herdr upgrade with an existing pane only:
 
 ```sh

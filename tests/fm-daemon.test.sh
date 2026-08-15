@@ -114,7 +114,7 @@ test_self_supervise_idle_exit_yields_to_afk_started_during_handoff() {
       fi
       return 1
     }
-    ! self_supervise_idle_exit_ready "$state"
+    ! self_supervise_retire_idle_owner "$state"
   )
   status=$?
 

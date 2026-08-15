@@ -53,4 +53,4 @@ case "$binding" in
 esac
 
 pass "same-home Herdr binding reads one exact existing pane and its shell incarnation"
-printf 'evidence: herdr=%s client_protocol=%s server_protocol=%s binding=%s read_only=true\n' "$version" "$client_protocol" "$server_protocol" "$binding"
+printf 'evidence: herdr=%s client_protocol=%s server_protocol=%s binding=accepted read_only=true\n' "$version" "$client_protocol" "$server_protocol"

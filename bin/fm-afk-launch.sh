@@ -41,6 +41,7 @@
 #                              Stop only this secondmate home's successor.
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
+# End usage.
 #
 # Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.
@@ -155,7 +156,11 @@ fm_afk_launch_lock_release() {
 }
 
 fm_afk_launch_usage() {
-  sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk '
+    /^# Usage:/ { show=1 }
+    /^# End usage\./ { exit }
+    show { sub(/^# ?/, ""); print }
+  ' "${BASH_SOURCE[0]}"
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -173,11 +178,7 @@ fm_afk_launch_record_write() {  # <backend> <target> <extra>
 }
 
 fm_afk_launch_flag_write() {
-  local pending
-  fm_afk_validate_supervise_marker || return 1
-  pending=$(mktemp "$FM_AFK_LAUNCH_STATE/$FM_SUPERVISE_FLAG.pending.XXXXXX") || return 1
-  date '+%s' > "$pending" || { rm -f "$pending"; return 1; }
-  mv "$pending" "$FM_AFK_LAUNCH_STATE/$FM_SUPERVISE_FLAG" || { rm -f "$pending"; return 1; }
+  fm_afk_publish_supervise_marker "$FM_AFK_LAUNCH_STATE"
 }
 
 # Read the recorded terminal into FM_AFK_REC_BACKEND/FM_AFK_REC_TARGET. The third

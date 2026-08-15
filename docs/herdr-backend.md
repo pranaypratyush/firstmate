@@ -315,6 +315,13 @@ Recovery reconciles only the recorded exact id.
 On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, the recorded terminal is closed, and the AFK flag is removed last.
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
 
+The same daemon also provides a marked secondmate home's `.self-supervise` successor mode.
+When that home has active child metadata, `ensure-self-supervise` binds the secondmate's own current tmux or Herdr pane to its backend-native incarnation before it publishes the target and starts the successor.
+The target record and delivery-handoff lock serialize a pane or process rollover, so the old owner stops only after the replacement binding is valid and no old-bound completion can inject during transfer.
+The primary daemon never scans secondmate homes.
+The successor retires only after that home has no active children, and an overlapping `.afk` transition retains the shared daemon instead of clearing successor ownership.
+The portable tests and the read-only Herdr binding guard are recorded in [runtime backend verification](verification/runtime-backends.md#same-home-successor-binding).
+
 ## Destructive lab safety
 
 Never use ambient `herdr server stop` for Firstmate verification.

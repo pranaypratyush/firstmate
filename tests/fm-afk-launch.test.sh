@@ -41,6 +41,23 @@ GLOBAL_CLEANUP() {
 trap GLOBAL_CLEANUP EXIT
 
 # ---------------------------------------------------------------------------
+# USAGE: supervisor lifecycle commands and modes remain discoverable from the
+# script-owned help headers.
+# ---------------------------------------------------------------------------
+unit_supervisor_help_lists_same_home_modes() {
+  local launch_help start_help
+  launch_help=$("$LAUNCH" --help 2>&1)
+  start_help=$("$START" --help 2>&1)
+  if printf '%s\n' "$launch_help" | grep -F 'fm-afk-launch.sh ensure-self-supervise' >/dev/null \
+    && printf '%s\n' "$launch_help" | grep -F 'fm-afk-launch.sh stop-self-supervise' >/dev/null \
+    && printf '%s\n' "$start_help" | grep -F 'FM_SUPERVISE_FLAG=.self-supervise' >/dev/null; then
+    pass "supervisor help: same-home successor commands and mode are complete"
+  else
+    fail "supervisor help: same-home successor lifecycle is incomplete ($launch_help | $start_help)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
 # ---------------------------------------------------------------------------
 unit_clear_stale() {
@@ -912,6 +929,53 @@ unit_supervisor_marker_publish_ignores_precreated_pending_symlink() {
   rm -rf "$st"
 }
 
+unit_supervisor_marker_publish_refuses_final_directory_symlink_race() {
+  local st home state outside mode out status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-marker-final.XXXXXX")
+  home="$st/home"
+  state="$home/state"
+  outside="$st/outside"
+  mkdir -p "$state" "$outside"
+
+  for mode in launcher start; do
+    rm -f "$state/.self-supervise"
+    find "$outside" -mindepth 1 -maxdepth 1 -exec rm -f {} +
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_SUPERVISE_FLAG=.self-supervise FM_AFK_DAEMON=/bin/true \
+      bash -c '
+        outside=$2
+        mode=$3
+        . "$1"
+        mktemp() {
+          local made
+          made=$(command mktemp "$@") || return 1
+          case "$1" in
+            .self-supervise.pending.XXXXXX|"$FM_AFK_STATE"/.self-supervise.pending.XXXXXX|"$FM_AFK_LAUNCH_STATE"/.self-supervise.pending.XXXXXX)
+              ln -s "$outside" "$FM_AFK_STATE/.self-supervise" || return 1
+              ;;
+          esac
+          printf "%s\\n" "$made"
+        }
+        case "$mode" in
+          launcher) fm_afk_launch_main start-native ;;
+          start)
+            FM_AFK_DAEMON=/bin/true
+            fm_afk_start_main
+            ;;
+        esac
+      ' _ "$LAUNCH" "$outside" "$mode" 2>&1)
+    status=$?
+    if [ "$status" -eq 0 ] && [ -f "$state/.self-supervise" ] \
+      && [ ! -L "$state/.self-supervise" ] && [ -O "$state/.self-supervise" ] \
+      && ! find "$outside" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+      pass "supervisor marker: $mode publication does not follow a final directory-symlink replacement"
+    else
+      fail "supervisor marker: $mode publication followed a final directory-symlink replacement ($out)"
+    fi
+  done
+
+  rm -rf "$st"
+}
+
 unit_self_supervisor_refuses_missing_or_unreadable_target_record() {
   local st state sleeper lock case_name out status
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-selfsup-record.XXXXXX")
@@ -1070,10 +1134,12 @@ e2e_tmux() {
   rm -rf "$home_tmp" 2>/dev/null || true
 }
 
+unit_supervisor_help_lists_same_home_modes
 unit_clear_stale
 unit_relative_paths_are_absolute_before_daemon_launch
 unit_supervisor_marker_rejects_escaped_inputs
 unit_supervisor_marker_publish_ignores_precreated_pending_symlink
+unit_supervisor_marker_publish_refuses_final_directory_symlink_race
 unit_self_supervisor_refuses_missing_or_unreadable_target_record
 unit_fresh_vs_refresh
 unit_stop_ordering

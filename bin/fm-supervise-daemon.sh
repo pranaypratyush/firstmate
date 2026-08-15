@@ -270,7 +270,7 @@ in_flight_count() {  # <state>
 # away mode, and retiring self-supervision for an idle home.
 # The caller must keep that lock through its daemon cleanup so an AFK launch
 # cannot publish a mode flag while still treating this daemon as its owner.
-self_supervise_idle_exit_ready() {  # <state>
+self_supervise_retire_idle_owner() {  # <state>
   local state=$1 launcher_lock
   if ! self_supervise_active "$state"; then
     rm -f "$state/.self-supervise-idle-since" 2>/dev/null || true
@@ -1646,7 +1646,7 @@ fm_super_main() {
       housekeeping "$STATE"
     fi
 
-    self_supervise_idle_exit_ready "$STATE" && cleanup
+    self_supervise_retire_idle_owner "$STATE" && cleanup
   done
 }
 
