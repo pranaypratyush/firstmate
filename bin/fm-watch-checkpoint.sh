@@ -8,17 +8,23 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
 
-ensure_secondmate_successor() {
+secondmate_successor_needed() {
   local home state meta
   home=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}
-  [ -f "$home/.fm-secondmate-home" ] || return 0
+  [ -f "$home/.fm-secondmate-home" ] || return 1
   state=${FM_STATE_OVERRIDE:-$home/state}
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
-    FM_HOME="$home" "$SCRIPT_DIR/fm-afk-launch.sh" ensure-self-supervise
-    return $?
+    return 0
   done
-  return 0
+  return 1
+}
+
+ensure_secondmate_successor() {
+  local home
+  home=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}
+  secondmate_successor_needed || return 0
+  FM_HOME="$home" "$SCRIPT_DIR/fm-afk-launch.sh" ensure-self-supervise
 }
 
 usage() {
@@ -28,6 +34,7 @@ Usage: fm-watch-checkpoint.sh [--seconds <n>]
 Run bin/fm-watch.sh in the foreground for a bounded checkpoint.
 On an actionable watcher wake, pass through the watcher output and exit 0.
 On a quiet checkpoint, print "checkpoint: no actionable wake within <n>s" and exit 124.
+For an active secondmate home, a successor-owned watcher checkpoint retargets that home and exits 124.
 EOF
 }
 
@@ -110,6 +117,14 @@ fi
 if grep -E '^watcher: already running' "$OUT" "$ERR" >/dev/null 2>&1; then
   [ ! -s "$OUT" ] || cat "$OUT"
   [ ! -s "$ERR" ] || cat "$ERR" >&2
+  if secondmate_successor_needed; then
+    if ! ensure_secondmate_successor; then
+      echo "checkpoint: failed to retarget the secondmate same-home successor" >&2
+      exit 1
+    fi
+    printf 'checkpoint: same-home successor remains active\n'
+    exit 124
+  fi
   echo "checkpoint: watcher is already running outside this foreground checkpoint" >&2
   exit 1
 fi

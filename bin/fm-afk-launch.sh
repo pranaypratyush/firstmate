@@ -659,26 +659,44 @@ fm_afk_launch_in_flight_count() {
 }
 
 fm_afk_launch_ensure_self_supervise() {
-  local backend target
+  local backend target record_backend= record_target= has_record=0 current_target=0
   [ "$(fm_afk_launch_in_flight_count)" -gt 0 ] || return 0
   if fm_afk_launch_selfsup_record_read; then
-    backend=$FM_SELFSUP_BACKEND
-    target=$FM_SELFSUP_TARGET
-  elif [ -n "${TMUX_PANE:-}" ]; then
+    record_backend=$FM_SELFSUP_BACKEND
+    record_target=$FM_SELFSUP_TARGET
+    has_record=1
+  fi
+  if [ -n "${TMUX_PANE:-}" ]; then
     backend=tmux
     target=$TMUX_PANE
+    current_target=1
   elif [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ]; then
     backend=herdr
     target="${HERDR_SESSION:-default}:$HERDR_PANE_ID"
+    current_target=1
+  elif [ "$has_record" -eq 1 ]; then
+    backend=$record_backend
+    target=$record_target
   else
     fm_afk_launch_log "ensure-self-supervise: no same-home secondmate pane for $FM_HOME"
     return 1
   fi
+  FM_SUPERVISE_FLAG=.self-supervise
+  export FM_SUPERVISE_FLAG
+  if [ "$current_target" -eq 1 ] && [ "$has_record" -eq 1 ] \
+    && { [ "$backend" != "$record_backend" ] || [ "$target" != "$record_target" ]; } \
+    && daemon_lock_held_by_live_daemon; then
+    if [ -e "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+      fm_afk_launch_log "ensure-self-supervise: refusing to replace an away-mode daemon"
+      return 1
+    fi
+    rm -f "$FM_AFK_LAUNCH_STATE/.self-supervise" || return 1
+    fm_afk_launch_stop || return 1
+  fi
   fm_afk_launch_selfsup_record_write "$backend" "$target" || return 1
   FM_SUPERVISOR_BACKEND=$backend
   FM_SUPERVISOR_TARGET=$target
-  FM_SUPERVISE_FLAG=.self-supervise
-  export FM_SUPERVISOR_BACKEND FM_SUPERVISOR_TARGET FM_SUPERVISE_FLAG
+  export FM_SUPERVISOR_BACKEND FM_SUPERVISOR_TARGET
   fm_afk_launch_start
 }
 

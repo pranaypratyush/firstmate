@@ -16,6 +16,8 @@ SHIM=
 SECOND_HOME=
 SECOND_PANE=
 SUBMITTED=
+SECOND_NEXT_PANE=
+NEXT_SUBMITTED=
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -88,7 +90,7 @@ cat > "$ENTRY" <<ENTRY
 export PATH="$SHIM:\$PATH"
 exec env FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \\
   FM_HOUSEKEEPING_TICK=1 FM_ESCALATE_BATCH_SECS=0 FM_STALE_ESCALATE_SECS=999999 \\
-  FM_INJECT_CONFIRM_SLEEP=0.1 FM_INJECT_CONFIRM_RETRIES=5 "$DAEMON"
+  FM_INJECT_CONFIRM_SLEEP=0.1 FM_INJECT_CONFIRM_RETRIES=5 FM_SELF_SUPERVISE_IDLE_EXIT_SECS=1 "$DAEMON"
 ENTRY
 chmod +x "$ENTRY"
 
@@ -110,9 +112,9 @@ grep -Fx $'tmux\t'"$SECOND_PANE" "$SECOND_HOME/state/.self-supervise-target" >/d
   || fail "same-home successor did not record the secondmate pane"
 
 wait_for_injections() {
-  local wanted=$1 attempts=0 actual
+  local submitted=$1 wanted=$2 attempts=0 actual
   while [ "$attempts" -lt 160 ]; do
-    actual=$(wc -l < "$SUBMITTED" | tr -d ' ')
+    actual=$(wc -l < "$submitted" | tr -d ' ')
     [ "$actual" -ge "$wanted" ] && return 0
     sleep 0.1
     attempts=$((attempts + 1))
@@ -122,13 +124,52 @@ wait_for_injections() {
 
 meta_before=$(cat "$SECOND_HOME/state/child-c1.meta")
 printf 'done: first child completion after rollover\n' >> "$SECOND_HOME/state/child-c1.status"
-wait_for_injections 1 || fail "first child completion was not routed to the idle secondmate"
+wait_for_injections "$SUBMITTED" 1 || fail "first child completion was not routed to the idle secondmate"
 printf 'done: second child completion after rollover\n' >> "$SECOND_HOME/state/child-c1.status"
-wait_for_injections 2 || fail "same-home successor stopped after the first child completion"
+wait_for_injections "$SUBMITTED" 2 || fail "same-home successor stopped after the first child completion"
 
 [ "$(cat "$SECOND_HOME/state/child-c1.meta")" = "$meta_before" ] \
   || fail "successor mutated child metadata instead of routing its events"
 grep -q $'\342\201\243FIRSTMATE_OP: v1 away-supervisor:' "$SUBMITTED" \
   || fail "successor did not route a marked operational wake to the secondmate pane"
 
-pass "two child completions survive a bounded Codex checkpoint rollover through one same-home successor"
+# The old detached owner remains live while the secondmate gets a new pane, so
+# the next checkpoint must atomically transfer ownership before it can inject
+# another child transition into the stale pane.
+[ -s "$SECOND_HOME/state/.self-supervise-target" ] \
+  || fail "pane rollover fixture lost the persisted old successor target"
+printf 'working: child continues after pane rollover\n' > "$SECOND_HOME/state/child-c1.status"
+NEXT_SUBMITTED="$WORK/submitted-next.log"
+: > "$NEXT_SUBMITTED"
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s secondmate-next -x 180 -y 40
+SECOND_NEXT_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t secondmate-next '#{pane_id}')
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$SECOND_NEXT_PANE" "bash '$LOOP' '$NEXT_SUBMITTED'" Enter
+sleep 1
+checkpoint_status=0
+env -u TMUX PATH="$SHIM:$PATH" FM_HOME="$SECOND_HOME" FM_BACKEND=tmux TMUX_PANE="$SECOND_NEXT_PANE" \
+  FM_AFK_LAUNCH_ENTRY="$ENTRY" \
+  FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+  "$CHECKPOINT" --seconds 1 >"$checkpoint_out" 2>"$checkpoint_err" || checkpoint_status=$?
+[ "$checkpoint_status" -eq 124 ] || fail "pane-rollover checkpoint did not roll over cleanly: $(cat "$checkpoint_out" "$checkpoint_err")"
+grep -Fx $'tmux\t'"$SECOND_NEXT_PANE" "$SECOND_HOME/state/.self-supervise-target" >/dev/null \
+  || fail "same-home successor did not atomically retarget after pane rollover"
+printf 'done: child completion after pane rollover\n' >> "$SECOND_HOME/state/child-c1.status"
+wait_for_injections "$NEXT_SUBMITTED" 1 || fail "retargeted successor did not route to the current secondmate pane"
+[ "$(wc -l < "$SUBMITTED" | tr -d ' ')" -eq 2 ] \
+  || fail "stale successor target received a child completion after pane rollover"
+
+rm -f "$SECOND_HOME/state/child-c1.meta"
+attempts=0
+while [ "$attempts" -lt 160 ]; do
+  [ ! -e "$SECOND_HOME/state/.self-supervise" ] \
+    && [ ! -e "$SECOND_HOME/state/.supervise-daemon.lock" ] \
+    && break
+  sleep 0.1
+  attempts=$((attempts + 1))
+done
+[ ! -e "$SECOND_HOME/state/.self-supervise" ] \
+  || fail "same-home successor did not clear its mode after child work ended"
+[ ! -e "$SECOND_HOME/state/.supervise-daemon.lock" ] \
+  || fail "same-home successor did not exit after child work ended"
+
+pass "same-home successor survives two completions, retargets on pane rollover, and exits idle"
