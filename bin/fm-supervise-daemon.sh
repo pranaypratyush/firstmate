@@ -271,10 +271,13 @@ self_supervise_delivery_lock() {  # <state>
 }
 
 self_supervise_target_matches() {  # <state> <backend> <target>
-  local state=$1 backend=$2 target=$3 recorded_backend recorded_target
+  local state=$1 backend=$2 target=$3 recorded_backend recorded_target recorded_binding binding
   [ -f "$state/.self-supervise-target" ] || return 1
-  IFS=$'\t' read -r recorded_backend recorded_target < "$state/.self-supervise-target" || return 1
-  [ "$recorded_backend" = "$backend" ] && [ "$recorded_target" = "$target" ]
+  IFS=$'\t' read -r recorded_backend recorded_target recorded_binding < "$state/.self-supervise-target" || return 1
+  [ "$recorded_backend" = "$backend" ] && [ "$recorded_target" = "$target" ] && [ -n "$recorded_binding" ] || return 1
+  [ "${FM_SUPERVISOR_BINDING:-}" = "$recorded_binding" ] || return 1
+  binding=$(fm_supervisor_target_same_home_binding "$backend" "$target" "$FM_HOME") || return 1
+  [ "$recorded_binding" = "$binding" ]
 }
 
 # afk_enter / afk_exit: write/clear the away-mode flag. Called by the /afk
@@ -1475,6 +1478,14 @@ fm_super_main() {
   if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit 1
+  fi
+  if self_supervise_active "$STATE" && ! afk_active "$STATE" \
+    && ! self_supervise_target_matches "$STATE" "$BACKEND" "$TARGET"; then
+    echo "error: same-home successor target no longer matches its recorded live binding; preserving its lifecycle state" >&2
+    log "startup failed: same-home successor target binding changed (target=$TARGET backend=$BACKEND)"
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1

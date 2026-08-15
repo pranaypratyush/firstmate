@@ -8,11 +8,17 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
 
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+
 secondmate_successor_needed() {
-  local home state meta
+  local home home_real root state meta
   home=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}
-  [ -f "$home/.fm-secondmate-home" ] || return 1
-  state=${FM_STATE_OVERRIDE:-$home/state}
+  home_real=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
+  root=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || return 1
+  [ "$home_real" = "$root" ] || return 1
+  fm_root_is_secondmate_home "$home_real" || return 1
+  state=${FM_STATE_OVERRIDE:-$home_real/state}
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     return 0
@@ -21,10 +27,11 @@ secondmate_successor_needed() {
 }
 
 ensure_secondmate_successor() {
-  local home
+  local home home_real
   home=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}
+  home_real=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
   secondmate_successor_needed || return 0
-  FM_HOME="$home" "$SCRIPT_DIR/fm-afk-launch.sh" ensure-self-supervise
+  FM_HOME="$home_real" "$SCRIPT_DIR/fm-afk-launch.sh" ensure-self-supervise
 }
 
 usage() {

@@ -18,6 +18,7 @@ SECOND_PANE=
 SUBMITTED=
 SECOND_NEXT_PANE=
 NEXT_SUBMITTED=
+RECYCLED_PANE=
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -35,8 +36,14 @@ trap cleanup EXIT INT TERM
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/fm-secondmate-self-supervision.XXXXXX")
 SECOND_HOME="$WORK/secondmate"
+mkdir -p "$SECOND_HOME"
+git -C "$ROOT" ls-files -z | (cd "$ROOT" && tar --null --files-from=- -cf -) \
+  | tar -C "$SECOND_HOME" -xf -
 mkdir -p "$SECOND_HOME/state"
 printf 'fixture-secondmate\n' > "$SECOND_HOME/.fm-secondmate-home"
+CHECKPOINT="$SECOND_HOME/bin/fm-watch-checkpoint.sh"
+LAUNCH="$SECOND_HOME/bin/fm-afk-launch.sh"
+DAEMON="$SECOND_HOME/bin/fm-supervise-daemon.sh"
 SUBMITTED="$WORK/submitted.log"
 : > "$SUBMITTED"
 
@@ -63,7 +70,7 @@ SHIM
 chmod +x "$SHIM/tmux"
 
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s primary -x 180 -y 40
-"$REAL_TMUX" -L "$SOCKET" new-session -d -s secondmate -x 180 -y 40
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s secondmate -c "$SECOND_HOME" -x 180 -y 40
 SECOND_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t secondmate '#{pane_id}')
 "$REAL_TMUX" -L "$SOCKET" new-window -d -n fm-child-c1 -t secondmate
 CHILD_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t secondmate:fm-child-c1 '#{pane_id}')
@@ -110,6 +117,14 @@ exec env FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=99999
 ENTRY
 chmod +x "$ENTRY"
 
+selfsup_target_is() {
+  local expected=$1 backend target binding
+  IFS=$'\t' read -r backend target binding < "$SECOND_HOME/state/.self-supervise-target" || return 1
+  [ "$backend" = tmux ] && [ "$target" = "$expected" ] || return 1
+  case "$binding" in tmux:"$expected":*) return 0 ;; esac
+  return 1
+}
+
 # A quiet Codex checkpoint is the same-home lifecycle path that must replace its
 # bounded foreground owner without another model turn.
 checkpoint_out="$WORK/checkpoint.out"
@@ -124,7 +139,7 @@ grep -F 'checkpoint: no actionable wake within 1s' "$checkpoint_out" >/dev/null 
   || fail "bounded checkpoint did not report its rollover"
 [ -s "$SECOND_HOME/state/.self-supervise-target" ] \
   || fail "quiet Codex checkpoint did not establish a same-home successor"
-grep -Fx $'tmux\t'"$SECOND_PANE" "$SECOND_HOME/state/.self-supervise-target" >/dev/null \
+selfsup_target_is "$SECOND_PANE" \
   || fail "same-home successor did not record the secondmate pane"
 
 wait_for_injections() {
@@ -159,6 +174,29 @@ wait_for_injections "$SUBMITTED" 2 || fail "same-home successor stopped after th
 grep -q $'\342\201\243FIRSTMATE_OP: v1 away-supervisor:' "$SUBMITTED" \
   || fail "successor did not route a marked operational wake to the secondmate pane"
 
+# A present pane from another home is not a replacement incarnation.  Reject it
+# before the current successor is stopped, then prove the retained owner still
+# routes the next child completion to its recorded same-home pane.
+mkdir -p "$WORK/recycled-pane-home"
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s recycled-pane -c "$WORK/recycled-pane-home" -x 180 -y 40
+RECYCLED_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t recycled-pane '#{pane_id}')
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$RECYCLED_PANE" "bash '$LOOP' '$WORK/recycled-submitted.log'" Enter
+sleep 1
+checkpoint_status=0
+env -u TMUX PATH="$SHIM:$PATH" FM_HOME="$SECOND_HOME" FM_BACKEND=tmux TMUX_PANE="$RECYCLED_PANE" \
+  FM_AFK_LAUNCH_ENTRY="$ENTRY" \
+  FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+  "$CHECKPOINT" --seconds 1 >"$checkpoint_out" 2>"$checkpoint_err" || checkpoint_status=$?
+[ "$checkpoint_status" -eq 1 ] \
+  || fail "present recycled replacement target was accepted (status=$checkpoint_status: $(cat "$checkpoint_out" "$checkpoint_err"))"
+selfsup_target_is "$SECOND_PANE" \
+  || fail "recycled replacement target replaced the retained same-home owner"
+[ -e "$SECOND_HOME/state/.self-supervise" ] \
+  || fail "recycled replacement target cleared the retained same-home owner"
+printf 'done: child completion after recycled replacement refusal\n' >> "$SECOND_HOME/state/child-c1.status"
+wait_for_injections "$SUBMITTED" 3 \
+  || fail "retained same-home owner did not route after recycled replacement refusal"
+
 # The old detached owner remains live while the secondmate gets a new pane, so
 # the next checkpoint must atomically transfer ownership before it can inject
 # another child transition into the stale pane.
@@ -167,7 +205,7 @@ grep -q $'\342\201\243FIRSTMATE_OP: v1 away-supervisor:' "$SUBMITTED" \
 printf 'working: child continues after pane rollover\n' > "$SECOND_HOME/state/child-c1.status"
 NEXT_SUBMITTED="$WORK/submitted-next.log"
 : > "$NEXT_SUBMITTED"
-"$REAL_TMUX" -L "$SOCKET" new-session -d -s secondmate-next -x 180 -y 40
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s secondmate-next -c "$SECOND_HOME" -x 180 -y 40
 SECOND_NEXT_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t secondmate-next '#{pane_id}')
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SECOND_NEXT_PANE" "bash '$LOOP' '$NEXT_SUBMITTED'" Enter
 sleep 1
@@ -193,13 +231,13 @@ wait_for_path "$SECOND_HOME/state/.afk-launch.lock" \
 wait "$race_checkpoint_pid" || true
 checkpoint_status=$(cat "$WORK/race-checkpoint-status")
 [ "$checkpoint_status" -eq 124 ] || fail "pane-rollover checkpoint did not roll over cleanly: $(cat "$checkpoint_out" "$checkpoint_err")"
-[ "$(wc -l < "$SUBMITTED" | tr -d ' ')" -eq 3 ] \
+[ "$(wc -l < "$SUBMITTED" | tr -d ' ')" -eq 4 ] \
   || fail "old successor delivery did not finish before pane rollover ownership transferred"
-grep -Fx $'tmux\t'"$SECOND_NEXT_PANE" "$SECOND_HOME/state/.self-supervise-target" >/dev/null \
+selfsup_target_is "$SECOND_NEXT_PANE" \
   || fail "same-home successor did not atomically retarget after pane rollover"
 printf 'done: child completion after pane rollover\n' >> "$SECOND_HOME/state/child-c1.status"
 wait_for_injections "$NEXT_SUBMITTED" 1 || fail "retargeted successor did not route to the current secondmate pane"
-[ "$(wc -l < "$SUBMITTED" | tr -d ' ')" -eq 3 ] \
+[ "$(wc -l < "$SUBMITTED" | tr -d ' ')" -eq 4 ] \
   || fail "stale successor target received a child completion after pane rollover"
 
 rm -f "$SECOND_HOME/state/child-c1.meta"
@@ -237,4 +275,4 @@ env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION \
 [ ! -e "$SECOND_HOME/state/.self-supervise" ] \
   || fail "endpoint-less checkpoint launched a successor without a current pane"
 
-pass "same-home successor serializes pane rollover, exits idle, and rejects endpoint-less reuse"
+pass "same-home successor serializes pane rollover, exits idle, and rejects unbound replacement reuse"
