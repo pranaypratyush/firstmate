@@ -825,6 +825,68 @@ unit_flag_write_failure_aborts() {
   rm -rf "$st"
 }
 
+unit_supervisor_marker_rejects_escaped_inputs() {
+  local st home state outside flag out status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-marker-path.XXXXXX")
+  home="$st/home"
+  state="$home/state"
+  outside="$st/outside"
+  mkdir -p "$state"
+  printf 'unchanged\n' > "$outside"
+
+  for flag in '../outside' '/absolute-marker'; do
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_SUPERVISE_FLAG="$flag" \
+      "$LAUNCH" help 2>&1)
+    status=$?
+    if [ "$status" -ne 0 ] && printf '%s\n' "$out" | grep -F 'invalid supervisor mode marker' >/dev/null; then
+      pass "supervisor marker: launcher rejects $flag before lifecycle work"
+    else
+      fail "supervisor marker: launcher accepted unsafe marker $flag ($out)"
+    fi
+
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_SUPERVISE_FLAG="$flag" \
+      bash -c '. "$1"; FM_AFK_DAEMON=/bin/true; fm_afk_start_main' _ "$START" 2>&1)
+    status=$?
+    if [ "$status" -ne 0 ] && printf '%s\n' "$out" | grep -F 'invalid supervisor mode marker' >/dev/null; then
+      pass "supervisor marker: foreground entry rejects $flag before writing state"
+    else
+      fail "supervisor marker: foreground entry accepted unsafe marker $flag ($out)"
+    fi
+  done
+
+  if [ ! -e "$home/outside" ] && [ ! -e "$state/absolute-marker" ] && [ "$(cat "$outside")" = unchanged ]; then
+    pass "supervisor marker: unsafe values leave owned and outside paths untouched"
+  else
+    fail "supervisor marker: unsafe value wrote outside its owned marker path"
+  fi
+
+  for flag in .afk .self-supervise; do
+    ln -s "$outside" "$state/$flag"
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_SUPERVISE_FLAG="$flag" \
+      "$LAUNCH" help 2>&1)
+    status=$?
+    if [ "$status" -ne 0 ] && printf '%s\n' "$out" | grep -F 'invalid supervisor mode marker' >/dev/null \
+      && [ "$(cat "$outside")" = unchanged ]; then
+      pass "supervisor marker: launcher rejects a $flag symlink"
+    else
+      fail "supervisor marker: launcher followed a $flag symlink ($out)"
+    fi
+
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_SUPERVISE_FLAG="$flag" \
+      bash -c '. "$1"; FM_AFK_DAEMON=/bin/true; fm_afk_start_main' _ "$START" 2>&1)
+    status=$?
+    if [ "$status" -ne 0 ] && printf '%s\n' "$out" | grep -F 'invalid supervisor mode marker' >/dev/null \
+      && [ "$(cat "$outside")" = unchanged ]; then
+      pass "supervisor marker: foreground entry rejects a $flag symlink"
+    else
+      fail "supervisor marker: foreground entry followed a $flag symlink ($out)"
+    fi
+    rm -f "$state/$flag"
+  done
+
+  rm -rf "$st"
+}
+
 # ---------------------------------------------------------------------------
 # E2E herdr: topology invariant.
 # ---------------------------------------------------------------------------
@@ -925,6 +987,7 @@ e2e_tmux() {
 
 unit_clear_stale
 unit_relative_paths_are_absolute_before_daemon_launch
+unit_supervisor_marker_rejects_escaped_inputs
 unit_fresh_vs_refresh
 unit_stop_ordering
 unit_stop_rejects_reused_pid

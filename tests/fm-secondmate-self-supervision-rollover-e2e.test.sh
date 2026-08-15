@@ -163,6 +163,16 @@ wait_for_path() {
   return 1
 }
 
+wait_for_buffer_line() {
+  local line=$1 attempts=0 buffer="$SECOND_HOME/state/.subsuper-escalations"
+  while [ "$attempts" -lt 160 ]; do
+    grep -F "$line" "$buffer" >/dev/null 2>&1 && return 0
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
+
 meta_before=$(cat "$SECOND_HOME/state/child-c1.meta")
 printf 'done: first child completion after rollover\n' >> "$SECOND_HOME/state/child-c1.status"
 wait_for_injections "$SUBMITTED" 1 || fail "first child completion was not routed to the idle secondmate"
@@ -239,6 +249,48 @@ printf 'done: child completion after pane rollover\n' >> "$SECOND_HOME/state/chi
 wait_for_injections "$NEXT_SUBMITTED" 1 || fail "retargeted successor did not route to the current secondmate pane"
 [ "$(wc -l < "$SUBMITTED" | tr -d ' ')" -eq 4 ] \
   || fail "stale successor target received a child completion after pane rollover"
+
+# A tmux respawn preserves the pane identifier while replacing its process.
+# The checkpoint must replace the old bound successor and keep routing child
+# completions instead of only rewriting the target record beneath that daemon.
+# The earlier changed-target owner can leave its own deferred terminal event
+# while the fixture establishes the replacement.  Isolate this slice so the
+# following buffer is known to have been observed by the same-target owner.
+rm -f "$SECOND_HOME/state/.subsuper-escalations" "$SECOND_HOME/state/.subsuper-escalations.since" \
+  "$SECOND_HOME/state/.subsuper-inject-wedged"
+same_target_before_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SECOND_NEXT_PANE" '#{pane_pid}')
+"$REAL_TMUX" -L "$SOCKET" respawn-pane -k -c "$SECOND_HOME" -t "$SECOND_NEXT_PANE" "bash '$LOOP' '$NEXT_SUBMITTED'"
+sleep 1
+same_target_after_pid=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SECOND_NEXT_PANE" '#{pane_pid}')
+[ "$same_target_before_pid" != "$same_target_after_pid" ] \
+  || fail "same-target rollover did not replace the secondmate pane process"
+# The old successor has already observed this terminal child transition, but
+# its binding no longer matches the respawned pane.  Its delivery must remain
+# buffered for the serialized checkpoint handoff instead of being erased by
+# the replacement launch cleanup.
+printf 'done: child completion buffered before same-target handoff\n' >> "$SECOND_HOME/state/child-c1.status"
+wait_for_buffer_line 'child completion buffered before same-target handoff' \
+  || fail "old successor did not buffer the completion before same-target handoff"
+[ "$(wc -l < "$NEXT_SUBMITTED" | tr -d ' ')" -eq 1 ] \
+  || fail "old successor delivered through its stale same-target binding"
+# Earlier bounded checkpoints may leave recovery evidence behind.
+# This slice exercises the successor handoff, not recovery re-surfacing.
+rm -f "$SECOND_HOME/state/.watcher-down" "$SECOND_HOME/state/.wake-queue"
+checkpoint_status=0
+env -u TMUX PATH="$SHIM:$PATH" FM_HOME="$SECOND_HOME" FM_BACKEND=tmux TMUX_PANE="$SECOND_NEXT_PANE" \
+  FM_AFK_LAUNCH_ENTRY="$ENTRY" \
+  FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+  "$CHECKPOINT" --seconds 1 >"$checkpoint_out" 2>"$checkpoint_err" || checkpoint_status=$?
+[ "$checkpoint_status" -eq 124 ] || fail "same-target rollover checkpoint did not complete cleanly: $(cat "$checkpoint_out" "$checkpoint_err")"
+selfsup_target_is "$SECOND_NEXT_PANE" \
+  || fail "same-target rollover did not retain the current secondmate pane"
+wait_for_injections "$NEXT_SUBMITTED" 2 \
+  || fail "same-target process rollover discarded the buffered child completion"
+grep -F 'child completion buffered before same-target handoff' "$NEXT_SUBMITTED" >/dev/null \
+  || fail "new successor did not route the buffered child completion to the new pane incarnation"
+printf 'done: child completion after same-target process rollover\n' >> "$SECOND_HOME/state/child-c1.status"
+wait_for_injections "$NEXT_SUBMITTED" 3 \
+  || fail "same-target process rollover left child completion delivery without a live successor"
 
 rm -f "$SECOND_HOME/state/child-c1.meta"
 attempts=0

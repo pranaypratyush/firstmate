@@ -174,6 +174,7 @@ fm_afk_launch_record_write() {  # <backend> <target> <extra>
 
 fm_afk_launch_flag_write() {
   local pending="$FM_AFK_LAUNCH_STATE/$FM_SUPERVISE_FLAG.pending.$$"
+  fm_afk_validate_supervise_marker || return 1
   date '+%s' > "$pending" || { rm -f "$pending"; return 1; }
   mv "$pending" "$FM_AFK_LAUNCH_STATE/$FM_SUPERVISE_FLAG" || { rm -f "$pending"; return 1; }
 }
@@ -469,8 +470,8 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   fm_afk_launch_log "daemon launched in detached tmux session '$session', supervising $captain_target"
 }
 
-fm_afk_launch_start() {
-  local captain_target captain_backend backup artifact had_afk=0 result
+fm_afk_launch_start() {  # [preserve-self-supervise-delivery]
+  local preserve_delivery=${1:-0} captain_target captain_backend backup artifact had_afk=0 result
   if [ "$FM_SUPERVISE_FLAG" = .afk ] && [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
@@ -506,7 +507,10 @@ fm_afk_launch_start() {
   if ! fm_afk_launch_reconcile; then
     result=1
   else
-    if fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
+    # A serialized same-home replacement owns the delivery lock.  Its old
+    # daemon has already observed any buffered child completion, so retain the
+    # buffer for the new, validated successor instead of treating it as stale.
+    if [ "$preserve_delivery" = 1 ] || fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
       result=0
     else
       fm_afk_launch_log "failed to clear stale away-mode artifacts"
@@ -673,11 +677,12 @@ fm_afk_launch_selfsup_delivery_lock_acquire() {
 }
 
 fm_afk_launch_ensure_self_supervise() {
-  local backend target binding record_backend= record_target= has_record=0 current_target=0 delivery_locked=0 result
+  local backend target binding record_backend= record_target= record_binding= has_record=0 current_target=0 delivery_locked=0 result
   [ "$(fm_afk_launch_in_flight_count)" -gt 0 ] || return 0
   if fm_afk_launch_selfsup_record_read; then
     record_backend=$FM_SELFSUP_BACKEND
     record_target=$FM_SELFSUP_TARGET
+    record_binding=$FM_SELFSUP_BINDING
     has_record=1
   fi
   if [ -n "${TMUX_PANE:-}" ]; then
@@ -699,7 +704,7 @@ fm_afk_launch_ensure_self_supervise() {
   FM_SUPERVISE_FLAG=.self-supervise
   export FM_SUPERVISE_FLAG
   if [ "$current_target" -eq 1 ] && [ "$has_record" -eq 1 ] \
-    && { [ "$backend" != "$record_backend" ] || [ "$target" != "$record_target" ]; } \
+    && { [ "$backend" != "$record_backend" ] || [ "$target" != "$record_target" ] || [ "$binding" != "$record_binding" ]; } \
     && daemon_lock_held_by_live_daemon; then
     fm_afk_launch_selfsup_delivery_lock_acquire || return 1
     delivery_locked=1
@@ -713,10 +718,10 @@ fm_afk_launch_ensure_self_supervise() {
       fm_lock_release "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"
       return 1
     fi
-    if ! rm -f "$FM_AFK_LAUNCH_STATE/.self-supervise"; then
-      fm_lock_release "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"
-      return 1
-    fi
+    # Keep the marker until stop has reaped the old daemon.  The held delivery
+    # lock then makes its cleanup retain, rather than inject, any completion it
+    # already buffered against the old binding.  stop clears the marker once
+    # that owner is gone, before the new validated record is started.
     if ! fm_afk_launch_stop; then
       fm_lock_release "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"
       return 1
@@ -730,7 +735,7 @@ fm_afk_launch_ensure_self_supervise() {
   FM_SUPERVISOR_TARGET=$target
   FM_SUPERVISOR_BINDING=$binding
   export FM_SUPERVISOR_BACKEND FM_SUPERVISOR_TARGET FM_SUPERVISOR_BINDING
-  fm_afk_launch_start
+  fm_afk_launch_start "$delivery_locked"
   result=$?
   [ "$delivery_locked" -eq 0 ] || fm_lock_release "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"
   return "$result"
@@ -756,6 +761,7 @@ fm_afk_launch_main() {
   trap fm_afk_launch_lock_release EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  fm_afk_validate_supervise_marker || return 1
   fm_afk_launch_lock_acquire || return 1
   case "${1:-start}" in
     start) fm_afk_launch_start ;;

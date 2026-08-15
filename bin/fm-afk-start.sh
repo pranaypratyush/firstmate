@@ -43,6 +43,27 @@ FM_SUPERVISE_FLAG="${FM_SUPERVISE_FLAG:-.afk}"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
 
+fm_afk_validate_supervise_marker() {
+  local marker_path
+  case "$FM_SUPERVISE_FLAG" in
+    .afk|.self-supervise) ;;
+    *) echo "error: invalid supervisor mode marker: $FM_SUPERVISE_FLAG" >&2; return 1 ;;
+  esac
+  marker_path="$FM_AFK_STATE/$FM_SUPERVISE_FLAG"
+  if [ -L "$marker_path" ] || { [ -e "$marker_path" ] && [ ! -f "$marker_path" ]; }; then
+    echo "error: invalid supervisor mode marker: $FM_SUPERVISE_FLAG" >&2
+    return 1
+  fi
+}
+
+fm_afk_write_supervise_marker() {
+  local pending
+  fm_afk_validate_supervise_marker || return 1
+  pending=$(mktemp "$FM_AFK_STATE/$FM_SUPERVISE_FLAG.pending.XXXXXX") || return 1
+  date '+%s' > "$pending" || { rm -f "$pending"; return 1; }
+  mv "$pending" "$FM_AFK_STATE/$FM_SUPERVISE_FLAG" || { rm -f "$pending"; return 1; }
+}
+
 fm_afk_start_usage() {
   sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
@@ -118,11 +139,12 @@ fm_afk_start_main() {
     * ) echo "usage: $(basename "${BASH_SOURCE[1]:-fm-afk-start.sh}")" >&2; return 2 ;;
   esac
 
+  fm_afk_validate_supervise_marker || return 1
   mkdir -p "$FM_AFK_STATE"
   if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
     [ -f "$FM_AFK_STATE/$FM_SUPERVISE_FLAG" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
   else
-    date '+%s' > "$FM_AFK_STATE/$FM_SUPERVISE_FLAG"
+    fm_afk_write_supervise_marker || return 1
   fi
 
   local pid

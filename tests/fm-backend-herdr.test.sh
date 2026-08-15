@@ -2824,6 +2824,48 @@ test_list_live_scoped_to_this_homes_workspace_only() {
 
 # --- target parsing, key normalization ---------------------------------------
 
+test_same_home_binding_binds_exact_herdr_pane_and_shell_incarnation() {
+  local dir log resp fb home out initial status
+  dir="$TMP_ROOT/same-home-binding"; mkdir -p "$dir/responses" "$dir/home"
+  log="$dir/log"; resp="$dir/responses"; home="$dir/home"; : > "$log"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","foreground_cwd":"ignored-by-target-exists"}}}' > "$resp/1.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","foreground_cwd":"%s"}}}\n' "$home" > "$resp/2.out"
+  printf '%s\n' '{"result":{"process_info":{"pane_id":"w1:p2","shell_pid":4321}}}' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-supervisor-target-lib.sh"; fm_supervisor_target_same_home_binding herdr fm-lab-binding:w1:p2 "$1"' \
+    "$ROOT" "$home")
+  status=$?
+  [ "$status" -eq 0 ] || fail "same-home Herdr binding should accept the exact pane and home: $out"
+  [ "$out" = 'herdr:w1:p2:4321' ] \
+    || fail "same-home Herdr binding did not persist the pane and shell incarnation: $out"
+  assert_contains "$(cat "$log")" $'pane\x1fprocess-info\x1f--pane\x1fw1:p2\x1f--session\x1ffm-lab-binding' \
+    "same-home Herdr binding did not read process-info from the exact named-session pane"
+
+  initial=$out
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","foreground_cwd":"ignored-by-target-exists"}}}' > "$resp/1.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","foreground_cwd":"%s"}}}\n' "$home" > "$resp/2.out"
+  printf '%s\n' '{"result":{"process_info":{"pane_id":"w1:p2","shell_pid":9876}}}' > "$resp/3.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-supervisor-target-lib.sh"; fm_supervisor_target_same_home_binding herdr fm-lab-binding:w1:p2 "$1"' \
+    "$ROOT" "$home")
+  status=$?
+  [ "$status" -eq 0 ] || fail "same-home Herdr replacement binding should remain readable: $out"
+  [ "$out" = 'herdr:w1:p2:9876' ] && [ "$out" != "$initial" ] \
+    || fail "same-home Herdr binding did not change when the exact pane process changed: $initial -> $out"
+
+  : > "$log"; rm -f "$resp/.count"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","foreground_cwd":"ignored-by-target-exists"}}}' > "$resp/1.out"
+  printf '{"result":{"pane":{"pane_id":"w1:p2","foreground_cwd":"%s"}}}\n' "$dir/not-the-home" > "$resp/2.out"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/fm-supervisor-target-lib.sh"; fm_supervisor_target_same_home_binding herdr fm-lab-binding:w1:p2 "$1"' \
+    "$ROOT" "$home" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "same-home Herdr binding accepted a pane from another home: $out"
+  pass "same-home Herdr binding: persists exact pane and shell incarnation only for the owning home"
+}
+
 test_parse_target() {
   ( . "$ROOT/bin/backends/herdr.sh"
     fm_backend_herdr_parse_target "default:w1:p2" || exit 1
@@ -4417,6 +4459,7 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
+test_same_home_binding_binds_exact_herdr_pane_and_shell_incarnation
 test_parse_target
 test_normalize_key
 test_capture_calls_pane_read
