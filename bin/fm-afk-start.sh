@@ -38,6 +38,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_AFK_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_AFK_LOCK="$FM_AFK_STATE/.supervise-daemon.lock"
 FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
+FM_SUPERVISE_FLAG="${FM_SUPERVISE_FLAG:-.afk}"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
@@ -119,9 +120,9 @@ fm_afk_start_main() {
 
   mkdir -p "$FM_AFK_STATE"
   if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
-    [ -f "$FM_AFK_STATE/.afk" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
+    [ -f "$FM_AFK_STATE/$FM_SUPERVISE_FLAG" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
   else
-    date '+%s' > "$FM_AFK_STATE/.afk"
+    date '+%s' > "$FM_AFK_STATE/$FM_SUPERVISE_FLAG"
   fi
 
   local pid

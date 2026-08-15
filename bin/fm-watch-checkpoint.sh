@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
 # Run one bounded foreground watcher checkpoint for harnesses that should not
 # rely on background-task completion to wake the model.
+# A quiet checkpoint in a secondmate home with active children transfers only
+# that home's watching to its recorded same-home successor.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
+
+ensure_secondmate_successor() {
+  local home state meta
+  home=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}
+  [ -f "$home/.fm-secondmate-home" ] || return 0
+  state=${FM_STATE_OVERRIDE:-$home/state}
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    FM_HOME="$home" "$SCRIPT_DIR/fm-afk-launch.sh" ensure-self-supervise
+    return $?
+  done
+  return 0
+}
 
 usage() {
   cat <<'EOF'
@@ -100,6 +115,10 @@ if grep -E '^watcher: already running' "$OUT" "$ERR" >/dev/null 2>&1; then
 fi
 
 if [ "$RC" -eq 124 ]; then
+  if ! ensure_secondmate_successor; then
+    echo "checkpoint: failed to establish the secondmate same-home successor" >&2
+    exit 1
+  fi
   printf 'checkpoint: no actionable wake within %ss\n' "$SECONDS_ARG"
   exit 124
 fi

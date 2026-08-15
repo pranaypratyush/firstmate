@@ -216,12 +216,14 @@ CRASH_BACKOFF_DEFAULT=60
 CRASH_NORMAL_SLEEP_DEFAULT=5
 LOG_MAX_BYTES_DEFAULT=1048576
 LOG_KEEP_LINES_DEFAULT=2000
+SELF_SUPERVISE_IDLE_EXIT_SECS_DEFAULT=180
 
 # --- presence-gating --------------------------------------------------------
 # bin/fm-operational-input.sh owns the U+2063 FIRSTMATE_OP bytes and typed
 # away-supervisor construction. The away-exit predicate intentionally retains
 # its landed leading-U+2063 compatibility behavior.
 AFK_FLAG_NAME=".afk"
+SELF_SUPERVISE_FLAG_NAME=".self-supervise"
 
 # Resolve the effective state dir. FM_STATE_OVERRIDE wins (testing); otherwise
 # $FM_HOME/state. Kept as a function so the pure
@@ -250,6 +252,18 @@ _hash_text() {
 # afk_active: 0 if the durable away-mode flag exists, 1 otherwise.
 afk_active() {  # <state>
   [ -e "$1/$AFK_FLAG_NAME" ]
+}
+
+self_supervise_active() {  # <state>
+  [ -e "$1/$SELF_SUPERVISE_FLAG_NAME" ]
+}
+
+in_flight_count() {  # <state>
+  local state=$1 meta count=0
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] && count=$((count + 1))
+  done
+  printf '%s' "$count"
 }
 
 # afk_enter / afk_exit: write/clear the away-mode flag. Called by the /afk
@@ -1116,10 +1130,10 @@ window_for_task() {  # <task-key> [state]
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend retries sleep_s verdict composer encoded
   state="${2:-$(_state_root)}"
-  # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
-  # daemon self-handles and stays quiet; firstmate drives the normal always-on
-  # watcher triage. Escalations buffer and survive for the next catch-up flush.
-  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  # (1) Presence-gate: inject only while this home is away or its secondmate
+  # self-supervisor owns continuity. Otherwise preserve the durable buffer.
+  { afk_active "$state" || self_supervise_active "$state"; } \
+    || { log "inject deferred: no supervisor mode is active"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then use the canonical typed envelope so downstream consumers retain
@@ -1556,6 +1570,20 @@ fm_super_main() {
     if [ "$(_file_age "$STATE/.subsuper-last-housekeep")" -ge "${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}" ]; then
       _now > "$STATE/.subsuper-last-housekeep"
       housekeeping "$STATE"
+    fi
+
+    if self_supervise_active "$STATE" && ! afk_active "$STATE" \
+      && [ "$(in_flight_count "$STATE")" -eq 0 ]; then
+      if [ ! -e "$STATE/.self-supervise-idle-since" ]; then
+        _now > "$STATE/.self-supervise-idle-since"
+      elif [ "$(_file_age "$STATE/.self-supervise-idle-since")" \
+        -ge "${FM_SELF_SUPERVISE_IDLE_EXIT_SECS:-$SELF_SUPERVISE_IDLE_EXIT_SECS_DEFAULT}" ]; then
+        log "self-supervise idle exit: no in-flight child work remains"
+        rm -f "$STATE/$SELF_SUPERVISE_FLAG_NAME" "$STATE/.self-supervise-idle-since" 2>/dev/null || true
+        cleanup
+      fi
+    else
+      rm -f "$STATE/.self-supervise-idle-since" 2>/dev/null || true
     fi
   done
 }
