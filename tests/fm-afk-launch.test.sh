@@ -887,6 +887,91 @@ unit_supervisor_marker_rejects_escaped_inputs() {
   rm -rf "$st"
 }
 
+unit_supervisor_marker_publish_ignores_precreated_pending_symlink() {
+  local st home state outside out status pending
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-marker-pending.XXXXXX")
+  home="$st/home"
+  state="$home/state"
+  outside="$st/outside"
+  mkdir -p "$state"
+  printf 'unchanged\n' > "$outside"
+  pending="$state/.self-supervise.pending.$$"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_SUPERVISE_FLAG=.self-supervise \
+    bash -c 'ln -s "$2" "$3/.self-supervise.pending.$$" && exec "$1" start-native' \
+      _ "$LAUNCH" "$outside" "$state" 2>&1)
+  status=$?
+  if [ "$status" -eq 0 ] && [ -f "$state/.self-supervise" ] \
+    && [ ! -L "$state/.self-supervise" ] && [ "$(cat "$outside")" = unchanged ]; then
+    pass "supervisor marker: publication ignores a pre-created predictable pending symlink"
+  else
+    fail "supervisor marker: publication followed or replaced a pre-created pending symlink ($out)"
+  fi
+
+  rm -f "$pending"
+  rm -rf "$st"
+}
+
+unit_self_supervisor_refuses_missing_or_unreadable_target_record() {
+  local st state sleeper lock case_name out status
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-selfsup-record.XXXXXX")
+  state="$st/state"
+  mkdir -p "$state"
+  : > "$state/.self-supervise"
+  printf 'window=child-pane\nkind=ship\n' > "$state/child.meta"
+  sleep 600 &
+  sleeper=$!
+  lock="$state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$sleeper" > "$lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper" > "$lock/pid-identity" 2>/dev/null ) || true
+
+  for case_name in missing unreadable; do
+    case "$case_name" in
+      missing)
+        rm -f "$state/.self-supervise-target"
+        ;;
+      unreadable)
+        printf 'tmux\tfixture-pane\ttmux:fixture-pane:1\n' > "$state/.self-supervise-target"
+        chmod 000 "$state/.self-supervise-target"
+        ;;
+    esac
+
+    out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$state" TMUX_PANE=fixture-pane bash -c '
+      . "$1"
+      fm_supervisor_target_same_home_binding() { printf "tmux:fixture-pane:1\\n"; }
+      fm_afk_launch_ensure_self_supervise
+    ' _ "$LAUNCH" 2>&1)
+    status=$?
+    if [ "$status" -ne 0 ] && [ -e "$state/.self-supervise" ] \
+      && [ -d "$lock" ] \
+      && { [ "$case_name" = missing ] && [ ! -e "$state/.self-supervise-target" ] \
+        || [ "$case_name" = unreadable ] && [ ! -r "$state/.self-supervise-target" ]; }; then
+      pass "self-supervise target record: live owner refuses an $case_name record before replacement"
+    else
+      fail "self-supervise target record: live owner rewrote or abandoned an $case_name record ($out)"
+    fi
+
+    chmod 600 "$state/.self-supervise-target" 2>/dev/null || true
+    printf 'tmux\tfixture-pane\ttmux:fixture-pane:1\n' > "$state/.self-supervise-target"
+    out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$state" TMUX_PANE=fixture-pane bash -c '
+      . "$1"
+      fm_supervisor_target_same_home_binding() { printf "tmux:fixture-pane:1\\n"; }
+      fm_afk_launch_ensure_self_supervise
+    ' _ "$LAUNCH" 2>&1)
+    status=$?
+    if [ "$status" -eq 0 ] && [ -e "$state/.self-supervise" ] && [ -d "$lock" ]; then
+      pass "self-supervise target record: repaired $case_name record resumes the live owner"
+    else
+      fail "self-supervise target record: repaired $case_name record could not resume ownership ($out)"
+    fi
+  done
+
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
+  rm -rf "$st"
+}
+
 # ---------------------------------------------------------------------------
 # E2E herdr: topology invariant.
 # ---------------------------------------------------------------------------
@@ -988,6 +1073,8 @@ e2e_tmux() {
 unit_clear_stale
 unit_relative_paths_are_absolute_before_daemon_launch
 unit_supervisor_marker_rejects_escaped_inputs
+unit_supervisor_marker_publish_ignores_precreated_pending_symlink
+unit_self_supervisor_refuses_missing_or_unreadable_target_record
 unit_fresh_vs_refresh
 unit_stop_ordering
 unit_stop_rejects_reused_pid

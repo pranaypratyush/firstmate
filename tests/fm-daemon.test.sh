@@ -93,6 +93,39 @@ test_daemon_state_root_uses_fm_home() {
   pass "supervise daemon state root is scoped by FM_HOME"
 }
 
+test_self_supervise_idle_exit_yields_to_afk_started_during_handoff() {
+  local dir state status
+  dir=$(make_supercase self-supervise-idle-afk-handoff)
+  state="$dir/state"
+  : > "$state/.self-supervise"
+  echo $(( $(date +%s) - 500 )) > "$state/.self-supervise-idle-since"
+
+  (
+    # The daemon loads this only when it executes, while this focused unit
+    # exercises the same lock-backed handoff helper under a controlled race.
+    FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+    FM_SELF_SUPERVISE_IDLE_EXIT_SECS=0
+    afk_checks=0
+    afk_active() {
+      afk_checks=$((afk_checks + 1))
+      if [ "$afk_checks" -eq 2 ]; then
+        : > "$state/.afk"
+        return 0
+      fi
+      return 1
+    }
+    ! self_supervise_idle_exit_ready "$state"
+  )
+  status=$?
+
+  if [ "$status" -eq 0 ] && [ -e "$state/.afk" ] && [ -e "$state/.self-supervise" ] \
+    && [ ! -e "$state/.self-supervise-idle-since" ] && [ ! -e "$state/.afk-launch.lock" ]; then
+    pass "self-supervise idle exit yields when AFK starts during its lifecycle handoff"
+  else
+    fail "self-supervise idle exit removed watcher ownership after AFK started during handoff"
+  fi
+}
+
 test_classify_routine_signal_self() {
   local dir state out
   dir=$(make_supercase classify-routine)
@@ -1836,6 +1869,7 @@ test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
+test_self_supervise_idle_exit_yields_to_afk_started_during_handoff
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate

@@ -266,6 +266,41 @@ in_flight_count() {  # <state>
   printf '%s' "$count"
 }
 
+# Returns success only after taking the launcher lifecycle lock, rechecking
+# away mode, and retiring self-supervision for an idle home.
+# The caller must keep that lock through its daemon cleanup so an AFK launch
+# cannot publish a mode flag while still treating this daemon as its owner.
+self_supervise_idle_exit_ready() {  # <state>
+  local state=$1 launcher_lock
+  if ! self_supervise_active "$state"; then
+    rm -f "$state/.self-supervise-idle-since" 2>/dev/null || true
+    return 1
+  fi
+  if afk_active "$state" || [ "$(in_flight_count "$state")" -ne 0 ]; then
+    rm -f "$state/.self-supervise-idle-since" 2>/dev/null || true
+    return 1
+  fi
+  if [ ! -e "$state/.self-supervise-idle-since" ]; then
+    _now > "$state/.self-supervise-idle-since"
+    return 1
+  fi
+  [ "$(_file_age "$state/.self-supervise-idle-since")" \
+    -ge "${FM_SELF_SUPERVISE_IDLE_EXIT_SECS:-$SELF_SUPERVISE_IDLE_EXIT_SECS_DEFAULT}" ] || return 1
+
+  launcher_lock="$state/.afk-launch.lock"
+  fm_lock_try_acquire "$launcher_lock" || return 1
+  if afk_active "$state"; then
+    rm -f "$state/.self-supervise-idle-since" 2>/dev/null || true
+    fm_lock_release "$launcher_lock"
+    return 1
+  fi
+
+  log "self-supervise idle exit: no in-flight child work remains"
+  rm -f "$state/$SELF_SUPERVISE_FLAG_NAME" "$state/.self-supervise-idle-since" 2>/dev/null || true
+  SELF_SUPERVISE_IDLE_EXIT_HOLDS_LAUNCH_LOCK=1
+  return 0
+}
+
 self_supervise_delivery_lock() {  # <state>
   printf '%s/.self-supervise-delivery.lock' "$1"
 }
@@ -1497,7 +1532,7 @@ fm_super_main() {
   migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
-  local WATCHER_PID="" CUR_TMP=""
+  local WATCHER_PID="" CUR_TMP="" SELF_SUPERVISE_IDLE_EXIT_HOLDS_LAUNCH_LOCK=0
   cleanup() {
     trap - TERM INT
     wedge_alarm_stop_active_notifier
@@ -1511,6 +1546,9 @@ fm_super_main() {
     fi
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
+    if [ "$SELF_SUPERVISE_IDLE_EXIT_HOLDS_LAUNCH_LOCK" = 1 ]; then
+      fm_lock_release "$STATE/.afk-launch.lock" 2>/dev/null || true
+    fi
     log "daemon shutting down"
     exit 0
   }
@@ -1608,19 +1646,7 @@ fm_super_main() {
       housekeeping "$STATE"
     fi
 
-    if self_supervise_active "$STATE" && ! afk_active "$STATE" \
-      && [ "$(in_flight_count "$STATE")" -eq 0 ]; then
-      if [ ! -e "$STATE/.self-supervise-idle-since" ]; then
-        _now > "$STATE/.self-supervise-idle-since"
-      elif [ "$(_file_age "$STATE/.self-supervise-idle-since")" \
-        -ge "${FM_SELF_SUPERVISE_IDLE_EXIT_SECS:-$SELF_SUPERVISE_IDLE_EXIT_SECS_DEFAULT}" ]; then
-        log "self-supervise idle exit: no in-flight child work remains"
-        rm -f "$STATE/$SELF_SUPERVISE_FLAG_NAME" "$STATE/.self-supervise-idle-since" 2>/dev/null || true
-        cleanup
-      fi
-    else
-      rm -f "$STATE/.self-supervise-idle-since" 2>/dev/null || true
-    fi
+    self_supervise_idle_exit_ready "$STATE" && cleanup
   done
 }
 

@@ -173,8 +173,9 @@ fm_afk_launch_record_write() {  # <backend> <target> <extra>
 }
 
 fm_afk_launch_flag_write() {
-  local pending="$FM_AFK_LAUNCH_STATE/$FM_SUPERVISE_FLAG.pending.$$"
+  local pending
   fm_afk_validate_supervise_marker || return 1
+  pending=$(mktemp "$FM_AFK_LAUNCH_STATE/$FM_SUPERVISE_FLAG.pending.XXXXXX") || return 1
   date '+%s' > "$pending" || { rm -f "$pending"; return 1; }
   mv "$pending" "$FM_AFK_LAUNCH_STATE/$FM_SUPERVISE_FLAG" || { rm -f "$pending"; return 1; }
 }
@@ -677,13 +678,17 @@ fm_afk_launch_selfsup_delivery_lock_acquire() {
 }
 
 fm_afk_launch_ensure_self_supervise() {
-  local backend target binding record_backend= record_target= record_binding= has_record=0 current_target=0 delivery_locked=0 result
+  local backend target binding record_backend= record_target= record_binding= has_record=0 current_target=0 delivery_locked=0 live_daemon=0 result
   [ "$(fm_afk_launch_in_flight_count)" -gt 0 ] || return 0
+  daemon_lock_held_by_live_daemon && live_daemon=1
   if fm_afk_launch_selfsup_record_read; then
     record_backend=$FM_SELFSUP_BACKEND
     record_target=$FM_SELFSUP_TARGET
     record_binding=$FM_SELFSUP_BINDING
     has_record=1
+  elif [ "$live_daemon" -eq 1 ]; then
+    fm_afk_launch_log "ensure-self-supervise: live successor has no readable target record; preserving state for recovery"
+    return 1
   fi
   if [ -n "${TMUX_PANE:-}" ]; then
     backend=tmux
@@ -705,7 +710,7 @@ fm_afk_launch_ensure_self_supervise() {
   export FM_SUPERVISE_FLAG
   if [ "$current_target" -eq 1 ] && [ "$has_record" -eq 1 ] \
     && { [ "$backend" != "$record_backend" ] || [ "$target" != "$record_target" ] || [ "$binding" != "$record_binding" ]; } \
-    && daemon_lock_held_by_live_daemon; then
+    && [ "$live_daemon" -eq 1 ]; then
     fm_afk_launch_selfsup_delivery_lock_acquire || return 1
     delivery_locked=1
     binding=$(fm_supervisor_target_same_home_binding "$backend" "$target" "$FM_HOME") || {
