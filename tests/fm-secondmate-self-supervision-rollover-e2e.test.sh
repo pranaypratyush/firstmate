@@ -23,6 +23,7 @@ fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 cleanup() {
+  [ -z "${WORK:-}" ] || : > "$WORK/race-release" 2>/dev/null || true
   if [ -n "${SECOND_HOME:-}" ]; then
     env -u TMUX -u TMUX_PANE PATH="${SHIM:-/nonexistent}:$PATH" FM_HOME="$SECOND_HOME" \
       "$LAUNCH" stop-self-supervise >/dev/null 2>&1 || true
@@ -42,6 +43,21 @@ SUBMITTED="$WORK/submitted.log"
 SHIM=$(mktemp -d "${TMPDIR:-/tmp}/fm-secondmate-self-supervision-shim.XXXXXX")
 cat > "$SHIM/tmux" <<SHIM
 #!/usr/bin/env bash
+race_root="$WORK"
+race_target=
+previous=
+for argument in "\$@"; do
+  if [ "\$previous" = -t ]; then
+    race_target=\$argument
+    break
+  fi
+  previous=\$argument
+done
+if [ "\${1:-}" = send-keys ] && [ -e "\$race_root/race-arm" ] \
+  && [ "\$race_target" = "\$(cat "\$race_root/race-target")" ]; then
+  : > "\$race_root/race-send-entered"
+  while [ ! -e "\$race_root/race-release" ]; do sleep 0.05; done
+fi
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
 SHIM
 chmod +x "$SHIM/tmux"
@@ -122,6 +138,16 @@ wait_for_injections() {
   return 1
 }
 
+wait_for_path() {
+  local path=$1 attempts=0
+  while [ "$attempts" -lt 160 ]; do
+    [ -e "$path" ] && return 0
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
+
 meta_before=$(cat "$SECOND_HOME/state/child-c1.meta")
 printf 'done: first child completion after rollover\n' >> "$SECOND_HOME/state/child-c1.status"
 wait_for_injections "$SUBMITTED" 1 || fail "first child completion was not routed to the idle secondmate"
@@ -145,17 +171,35 @@ NEXT_SUBMITTED="$WORK/submitted-next.log"
 SECOND_NEXT_PANE=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t secondmate-next '#{pane_id}')
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SECOND_NEXT_PANE" "bash '$LOOP' '$NEXT_SUBMITTED'" Enter
 sleep 1
-checkpoint_status=0
-env -u TMUX PATH="$SHIM:$PATH" FM_HOME="$SECOND_HOME" FM_BACKEND=tmux TMUX_PANE="$SECOND_NEXT_PANE" \
-  FM_AFK_LAUNCH_ENTRY="$ENTRY" \
-  FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-  "$CHECKPOINT" --seconds 1 >"$checkpoint_out" 2>"$checkpoint_err" || checkpoint_status=$?
+: > "$WORK/race-arm"
+printf '%s\n' "$SECOND_PANE" > "$WORK/race-target"
+printf 'done: child completion racing pane rollover\n' >> "$SECOND_HOME/state/child-c1.status"
+wait_for_path "$WORK/race-send-entered" \
+  || fail "old successor did not reach its send transaction before pane rollover"
+(
+  checkpoint_status=0
+  env -u TMUX PATH="$SHIM:$PATH" FM_HOME="$SECOND_HOME" FM_BACKEND=tmux TMUX_PANE="$SECOND_NEXT_PANE" \
+    FM_AFK_LAUNCH_ENTRY="$ENTRY" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$CHECKPOINT" --seconds 1 >"$checkpoint_out" 2>"$checkpoint_err" || checkpoint_status=$?
+  printf '%s\n' "$checkpoint_status" > "$WORK/race-checkpoint-status"
+) &
+race_checkpoint_pid=$!
+wait_for_path "$SECOND_HOME/state/.afk-launch.lock" \
+  || fail "pane-rollover checkpoint did not begin successor handoff"
+[ -e "$SECOND_HOME/state/.self-supervise" ] \
+  || fail "handoff disabled old successor ownership while its send transaction was in flight"
+: > "$WORK/race-release"
+wait "$race_checkpoint_pid" || true
+checkpoint_status=$(cat "$WORK/race-checkpoint-status")
 [ "$checkpoint_status" -eq 124 ] || fail "pane-rollover checkpoint did not roll over cleanly: $(cat "$checkpoint_out" "$checkpoint_err")"
+[ "$(wc -l < "$SUBMITTED" | tr -d ' ')" -eq 3 ] \
+  || fail "old successor delivery did not finish before pane rollover ownership transferred"
 grep -Fx $'tmux\t'"$SECOND_NEXT_PANE" "$SECOND_HOME/state/.self-supervise-target" >/dev/null \
   || fail "same-home successor did not atomically retarget after pane rollover"
 printf 'done: child completion after pane rollover\n' >> "$SECOND_HOME/state/child-c1.status"
 wait_for_injections "$NEXT_SUBMITTED" 1 || fail "retargeted successor did not route to the current secondmate pane"
-[ "$(wc -l < "$SUBMITTED" | tr -d ' ')" -eq 2 ] \
+[ "$(wc -l < "$SUBMITTED" | tr -d ' ')" -eq 3 ] \
   || fail "stale successor target received a child completion after pane rollover"
 
 rm -f "$SECOND_HOME/state/child-c1.meta"
@@ -172,4 +216,25 @@ done
 [ ! -e "$SECOND_HOME/state/.supervise-daemon.lock" ] \
   || fail "same-home successor did not exit after child work ended"
 
-pass "same-home successor survives two completions, retargets on pane rollover, and exits idle"
+# The earlier bounded checkpoints may leave their own durable wake recovery
+# evidence behind.  The endpoint-less fixture needs a quiet checkpoint so it
+# can exercise successor setup rather than correctly re-surface that evidence.
+rm -f "$SECOND_HOME/state/.watcher-down" "$SECOND_HOME/state/.wake-queue"
+printf 'working: child has no current secondmate pane\n' > "$SECOND_HOME/state/child-c2.status"
+cat > "$SECOND_HOME/state/child-c2.meta" <<META
+window=$CHILD_PANE
+kind=ship
+mode=local-only
+META
+checkpoint_status=0
+env -u TMUX -u TMUX_PANE -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION \
+  -u FM_SUPERVISOR_BACKEND -u FM_SUPERVISOR_TARGET \
+  PATH="$SHIM:$PATH" FM_HOME="$SECOND_HOME" FM_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$ENTRY" \
+  FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+  "$CHECKPOINT" --seconds 1 >"$checkpoint_out" 2>"$checkpoint_err" || checkpoint_status=$?
+[ "$checkpoint_status" -eq 1 ] \
+  || fail "endpoint-less checkpoint reused a persisted self-supervise target (status=$checkpoint_status: $(cat "$checkpoint_out" "$checkpoint_err"))"
+[ ! -e "$SECOND_HOME/state/.self-supervise" ] \
+  || fail "endpoint-less checkpoint launched a successor without a current pane"
+
+pass "same-home successor serializes pane rollover, exits idle, and rejects endpoint-less reuse"

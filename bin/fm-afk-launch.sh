@@ -81,6 +81,7 @@ FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal"
 FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
 FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 FM_AFK_LAUNCH_SELFSUP_RECORD="$FM_AFK_LAUNCH_STATE/.self-supervise-target"
+FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK="$FM_AFK_LAUNCH_STATE/.self-supervise-delivery.lock"
 FM_SUPERVISE_FLAG="${FM_SUPERVISE_FLAG:-.afk}"
 
 # shellcheck source=bin/fm-backend.sh
@@ -658,8 +659,20 @@ fm_afk_launch_in_flight_count() {
   printf '%s' "$count"
 }
 
+fm_afk_launch_selfsup_delivery_lock_acquire() {
+  local attempt=0
+  while ! fm_lock_try_acquire "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 100 ]; then
+      fm_afk_launch_log "ensure-self-supervise: delivery handoff remained busy"
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
 fm_afk_launch_ensure_self_supervise() {
-  local backend target record_backend= record_target= has_record=0 current_target=0
+  local backend target record_backend= record_target= has_record=0 current_target=0 delivery_locked=0 result
   [ "$(fm_afk_launch_in_flight_count)" -gt 0 ] || return 0
   if fm_afk_launch_selfsup_record_read; then
     record_backend=$FM_SELFSUP_BACKEND
@@ -674,9 +687,6 @@ fm_afk_launch_ensure_self_supervise() {
     backend=herdr
     target="${HERDR_SESSION:-default}:$HERDR_PANE_ID"
     current_target=1
-  elif [ "$has_record" -eq 1 ]; then
-    backend=$record_backend
-    target=$record_target
   else
     fm_afk_launch_log "ensure-self-supervise: no same-home secondmate pane for $FM_HOME"
     return 1
@@ -686,18 +696,33 @@ fm_afk_launch_ensure_self_supervise() {
   if [ "$current_target" -eq 1 ] && [ "$has_record" -eq 1 ] \
     && { [ "$backend" != "$record_backend" ] || [ "$target" != "$record_target" ]; } \
     && daemon_lock_held_by_live_daemon; then
+    fm_afk_launch_selfsup_delivery_lock_acquire || return 1
+    delivery_locked=1
     if [ -e "$FM_AFK_LAUNCH_STATE/.afk" ]; then
       fm_afk_launch_log "ensure-self-supervise: refusing to replace an away-mode daemon"
+      fm_lock_release "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"
       return 1
     fi
-    rm -f "$FM_AFK_LAUNCH_STATE/.self-supervise" || return 1
-    fm_afk_launch_stop || return 1
+    if ! rm -f "$FM_AFK_LAUNCH_STATE/.self-supervise"; then
+      fm_lock_release "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"
+      return 1
+    fi
+    if ! fm_afk_launch_stop; then
+      fm_lock_release "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"
+      return 1
+    fi
   fi
-  fm_afk_launch_selfsup_record_write "$backend" "$target" || return 1
+  if ! fm_afk_launch_selfsup_record_write "$backend" "$target"; then
+    [ "$delivery_locked" -eq 0 ] || fm_lock_release "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"
+    return 1
+  fi
   FM_SUPERVISOR_BACKEND=$backend
   FM_SUPERVISOR_TARGET=$target
   export FM_SUPERVISOR_BACKEND FM_SUPERVISOR_TARGET
   fm_afk_launch_start
+  result=$?
+  [ "$delivery_locked" -eq 0 ] || fm_lock_release "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"
+  return "$result"
 }
 
 fm_afk_launch_stop_self_supervise() {

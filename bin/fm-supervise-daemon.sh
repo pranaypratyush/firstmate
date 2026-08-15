@@ -266,6 +266,17 @@ in_flight_count() {  # <state>
   printf '%s' "$count"
 }
 
+self_supervise_delivery_lock() {  # <state>
+  printf '%s/.self-supervise-delivery.lock' "$1"
+}
+
+self_supervise_target_matches() {  # <state> <backend> <target>
+  local state=$1 backend=$2 target=$3 recorded_backend recorded_target
+  [ -f "$state/.self-supervise-target" ] || return 1
+  IFS=$'\t' read -r recorded_backend recorded_target < "$state/.self-supervise-target" || return 1
+  [ "$recorded_backend" = "$backend" ] && [ "$recorded_target" = "$target" ]
+}
+
 # afk_enter / afk_exit: write/clear the away-mode flag. Called by the /afk
 # skill (enter) and by firstmate on user return (exit). Durable: a plain file,
 # so recovery (§5) re-enters afk if it is present after a restart.
@@ -1128,7 +1139,7 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local msg=$1 state target backend retries sleep_s verdict composer encoded self_delivery_lock=
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject only while this home is away or its secondmate
   # self-supervisor owns continuity. Otherwise preserve the durable buffer.
@@ -1177,7 +1188,21 @@ inject_msg() {  # <message> [state]
   # re-export of fm_tmux_submit_core - byte-identical to calling it directly.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
+  if self_supervise_active "$state" && ! afk_active "$state"; then
+    self_delivery_lock=$(self_supervise_delivery_lock "$state")
+    if ! fm_lock_try_acquire "$self_delivery_lock"; then
+      log "inject deferred: same-home successor handoff owns delivery"
+      return 1
+    fi
+    if ! self_supervise_active "$state" \
+      || ! self_supervise_target_matches "$state" "$backend" "$target"; then
+      fm_lock_release "$self_delivery_lock"
+      log "inject deferred: same-home successor target changed"
+      return 1
+    fi
+  fi
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
+  [ -z "$self_delivery_lock" ] || fm_lock_release "$self_delivery_lock"
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi
