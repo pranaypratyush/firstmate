@@ -126,6 +126,37 @@ test_self_supervise_idle_exit_yields_to_afk_started_during_handoff() {
   fi
 }
 
+test_self_supervise_idle_exit_retains_owner_when_child_appears_during_handoff() {
+  local dir state status
+  dir=$(make_supercase self-supervise-idle-child-handoff)
+  state="$dir/state"
+  : > "$state/.self-supervise"
+  echo $(( $(date +%s) - 500 )) > "$state/.self-supervise-idle-since"
+
+  (
+    # Publish a child only after the lifecycle lock exists, reproducing a
+    # child dispatch that overlaps this daemon's idle retirement decision.
+    FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+    FM_SELF_SUPERVISE_IDLE_EXIT_SECS=0
+    fm_lock_try_acquire() {
+      fm_lock_try_create "$1" || return 1
+      : > "$state/new-child.meta"
+    }
+    result=0
+    self_supervise_retire_idle_owner "$state" || result=$?
+    [ "$result" -ne 0 ] && [ -e "$state/.self-supervise" ] \
+      && [ ! -e "$state/.self-supervise-idle-since" ] \
+      && [ ! -e "$state/.afk-launch.lock" ]
+  )
+  status=$?
+
+  if [ "$status" -eq 0 ]; then
+    pass "self-supervise idle exit retains ownership when a child appears during lifecycle handoff"
+  else
+    fail "self-supervise idle exit removed watcher ownership after a child appeared during handoff"
+  fi
+}
+
 test_classify_routine_signal_self() {
   local dir state out
   dir=$(make_supercase classify-routine)
@@ -1870,6 +1901,7 @@ test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
 test_self_supervise_idle_exit_yields_to_afk_started_during_handoff
+test_self_supervise_idle_exit_retains_owner_when_child_appears_during_handoff
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate

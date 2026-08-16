@@ -267,7 +267,7 @@ in_flight_count() {  # <state>
 }
 
 # Returns success only after taking the launcher lifecycle lock, rechecking
-# away mode, and retiring self-supervision for an idle home.
+# away mode and child work, and retiring self-supervision for an idle home.
 # The caller must keep that lock through its daemon cleanup so an AFK launch
 # cannot publish a mode flag while still treating this daemon as its owner.
 self_supervise_retire_idle_owner() {  # <state>
@@ -289,7 +289,7 @@ self_supervise_retire_idle_owner() {  # <state>
 
   launcher_lock="$state/.afk-launch.lock"
   fm_lock_try_acquire "$launcher_lock" || return 1
-  if afk_active "$state"; then
+  if afk_active "$state" || [ "$(in_flight_count "$state")" -ne 0 ]; then
     rm -f "$state/.self-supervise-idle-since" 2>/dev/null || true
     fm_lock_release "$launcher_lock"
     return 1
