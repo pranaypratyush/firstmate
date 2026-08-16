@@ -5,8 +5,9 @@
 # This is the deterministic owner of /updatefirstmate's update sequence:
 #   1. preflight the running checkout before any remote mutation;
 #   2. identify origin and any configured upstream without assuming GitHub;
-#   3. when origin is a github.com fork, ask gh to fast-forward the fork from
-#      its API-reported parent (never --force);
+#   3. when origin is a github.com fork, call GitHub's guarded merge-upstream
+#      endpoint through gh after validating its API-reported parent (never
+#      --force);
 #   4. fast-forward the running checkout and every registered secondmate through
 #      the existing guarded origin paths; and
 #   5. run the existing inherited-local-material convergence after tracked code
@@ -192,9 +193,9 @@ preflight_firstmate() {
 
 sync_github_fork_if_needed() {
   local local_default=$1 origin_slug=$2 upstream_url=$3
-  local metadata api_origin is_fork api_default api_parent configured_parent
+  local metadata api_origin is_fork api_default api_parent api_parent_owner configured_parent
   local rest_is_fork rest_parent _rest_source
-  local before_oid after_oid
+  local before_oid after_oid sync_base sync_parent sync_default
 
   command -v gh >/dev/null 2>&1 \
     || refuse "origin is on github.com but gh is unavailable"
@@ -241,6 +242,9 @@ sync_github_fork_if_needed() {
     fi
     api_parent=$rest_parent
   fi
+  github_repo_identity_is_valid "$api_parent" \
+    || refuse "GitHub origin inspection returned invalid parent identity: $api_parent"
+  api_parent_owner=${api_parent%%/*}
   if [ -n "$upstream_url" ]; then
     configured_parent=$(github_slug_from_url "$upstream_url" || true)
     [ -n "$configured_parent" ] \
@@ -257,9 +261,25 @@ sync_github_fork_if_needed() {
   case "$before_oid" in
     ''|*[!0-9a-fA-F]*) refuse "GitHub fork tip inspection returned an invalid commit ID" ;;
   esac
-  if ! metadata=$(gh repo sync "$api_origin" --branch "$api_default" 2>&1); then
-    refuse "GitHub fork sync failed; unresolved downstream divergence requires a reviewed upstream-integration branch/PR before retry: $(first_line "$metadata")"
+  if ! sync_base=$(gh api --method POST "repos/$api_origin/merge-upstream" \
+    -f "branch=$api_default" --jq .base_branch 2>&1); then
+    refuse "GitHub fork sync failed; unresolved downstream divergence requires a reviewed upstream-integration branch/PR before retry: $(first_line "$sync_base")"
   fi
+  case "$sync_base" in
+    *:*)
+      sync_parent=${sync_base%:*}
+      sync_default=${sync_base##*:}
+      ;;
+    *) refuse "GitHub fork sync returned malformed base branch: $sync_base" ;;
+  esac
+  case "$sync_parent" in
+    ''|*[![:alnum:]-]*) refuse "GitHub fork sync returned malformed parent owner: $sync_parent" ;;
+  esac
+  [ "$(printf '%s' "$sync_parent" | tr '[:upper:]' '[:lower:]')" = \
+    "$(printf '%s' "$api_parent_owner" | tr '[:upper:]' '[:lower:]')" ] \
+    || refuse "GitHub fork sync parent owner $sync_parent differs from GitHub parent owner $api_parent_owner"
+  [ "$sync_default" = "$api_default" ] \
+    || refuse "GitHub fork sync returned base branch $sync_default, expected $api_default"
   if ! after_oid=$(gh api "repos/$api_origin/commits/$api_default" --jq .sha 2>&1); then
     refuse "GitHub fork post-sync inspection failed: $(first_line "$after_oid")"
   fi
