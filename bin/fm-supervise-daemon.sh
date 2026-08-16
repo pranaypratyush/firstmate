@@ -270,8 +270,10 @@ in_flight_count() {  # <state>
 # away mode and child work, and retiring self-supervision for an idle home.
 # The caller must keep that lock through its daemon cleanup so an AFK launch
 # cannot publish a mode flag while still treating this daemon as its owner.
+# The terminal lock order is daemon singleton, launcher lifecycle, then task
+# set. A task-set holder must not synchronously acquire the lifecycle lock.
 self_supervise_retire_idle_owner() {  # <state>
-  local state=$1 launcher_lock
+  local state=$1 launcher_lock task_set_lock
   if ! self_supervise_active "$state"; then
     rm -f "$state/.self-supervise-idle-since" 2>/dev/null || true
     return 1
@@ -288,15 +290,22 @@ self_supervise_retire_idle_owner() {  # <state>
     -ge "${FM_SELF_SUPERVISE_IDLE_EXIT_SECS:-$SELF_SUPERVISE_IDLE_EXIT_SECS_DEFAULT}" ] || return 1
 
   launcher_lock="$state/.afk-launch.lock"
+  task_set_lock=$(fm_task_set_lock_path "$state") || return 1
   fm_lock_try_acquire "$launcher_lock" || return 1
+  if ! fm_lock_try_acquire "$task_set_lock"; then
+    fm_lock_release "$launcher_lock"
+    return 1
+  fi
   if afk_active "$state" || [ "$(in_flight_count "$state")" -ne 0 ]; then
     rm -f "$state/.self-supervise-idle-since" 2>/dev/null || true
+    fm_lock_release "$task_set_lock"
     fm_lock_release "$launcher_lock"
     return 1
   fi
 
   log "self-supervise idle exit: no in-flight child work remains"
   rm -f "$state/$SELF_SUPERVISE_FLAG_NAME" "$state/.self-supervise-idle-since" 2>/dev/null || true
+  fm_lock_release "$task_set_lock"
   SELF_SUPERVISE_IDLE_EXIT_HOLDS_LAUNCH_LOCK=1
   return 0
 }
