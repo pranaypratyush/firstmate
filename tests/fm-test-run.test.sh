@@ -58,6 +58,14 @@ test_family_selection() {
   pass "family selection returns a proper subset of the suite"
 }
 
+test_same_home_herdr_binding_guard_is_live_opt_in() {
+  local listed
+  listed=$("$RUNNER" --list --family live-harness-optin)
+  printf '%s\n' "$listed" | grep -Fqx 'tests/fm-herdr-same-home-binding-live-e2e.test.sh' \
+    || fail "same-home Herdr binding guard must be classified as live-harness-optin"
+  pass "same-home Herdr binding guard is opt-in instead of running in portable CI"
+}
+
 test_single_script_selection() {
   local listed
   listed=$("$RUNNER" --list tests/fm-lint.test.sh)
@@ -683,6 +691,7 @@ assert len(doc["scripts"])==3
 
 test_list_all_exact_suite_coverage
 test_family_selection
+test_same_home_herdr_binding_guard_is_live_opt_in
 test_single_script_selection
 test_changed_file_selection_is_conservative
 test_changed_dependency_selection_and_unmapped_failure

@@ -216,12 +216,14 @@ CRASH_BACKOFF_DEFAULT=60
 CRASH_NORMAL_SLEEP_DEFAULT=5
 LOG_MAX_BYTES_DEFAULT=1048576
 LOG_KEEP_LINES_DEFAULT=2000
+SELF_SUPERVISE_IDLE_EXIT_SECS_DEFAULT=180
 
 # --- presence-gating --------------------------------------------------------
 # bin/fm-operational-input.sh owns the U+2063 FIRSTMATE_OP bytes and typed
 # away-supervisor construction. The away-exit predicate intentionally retains
 # its landed leading-U+2063 compatibility behavior.
 AFK_FLAG_NAME=".afk"
+SELF_SUPERVISE_FLAG_NAME=".self-supervise"
 
 # Resolve the effective state dir. FM_STATE_OVERRIDE wins (testing); otherwise
 # $FM_HOME/state. Kept as a function so the pure
@@ -250,6 +252,76 @@ _hash_text() {
 # afk_active: 0 if the durable away-mode flag exists, 1 otherwise.
 afk_active() {  # <state>
   [ -e "$1/$AFK_FLAG_NAME" ]
+}
+
+self_supervise_active() {  # <state>
+  [ -e "$1/$SELF_SUPERVISE_FLAG_NAME" ]
+}
+
+in_flight_count() {  # <state>
+  local state=$1 meta count=0
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] && count=$((count + 1))
+  done
+  printf '%s' "$count"
+}
+
+# Returns success only after taking the launcher lifecycle lock, rechecking
+# away mode and child work, and retiring self-supervision for an idle home.
+# The caller must keep that lock through its daemon cleanup so an AFK launch
+# cannot publish a mode flag while still treating this daemon as its owner.
+# The terminal lock order is daemon singleton, launcher lifecycle, then task
+# set. A task-set holder must not synchronously acquire the lifecycle lock.
+self_supervise_retire_idle_owner() {  # <state>
+  local state=$1 launcher_lock task_set_lock
+  if ! self_supervise_active "$state"; then
+    rm -f "$state/.self-supervise-idle-since" 2>/dev/null || true
+    return 1
+  fi
+  if afk_active "$state" || [ "$(in_flight_count "$state")" -ne 0 ]; then
+    rm -f "$state/.self-supervise-idle-since" 2>/dev/null || true
+    return 1
+  fi
+  if [ ! -e "$state/.self-supervise-idle-since" ]; then
+    _now > "$state/.self-supervise-idle-since"
+    return 1
+  fi
+  [ "$(_file_age "$state/.self-supervise-idle-since")" \
+    -ge "${FM_SELF_SUPERVISE_IDLE_EXIT_SECS:-$SELF_SUPERVISE_IDLE_EXIT_SECS_DEFAULT}" ] || return 1
+
+  launcher_lock="$state/.afk-launch.lock"
+  task_set_lock=$(fm_task_set_lock_path "$state") || return 1
+  fm_lock_try_acquire "$launcher_lock" || return 1
+  if ! fm_lock_try_acquire "$task_set_lock"; then
+    fm_lock_release "$launcher_lock"
+    return 1
+  fi
+  if afk_active "$state" || [ "$(in_flight_count "$state")" -ne 0 ]; then
+    rm -f "$state/.self-supervise-idle-since" 2>/dev/null || true
+    fm_lock_release "$task_set_lock"
+    fm_lock_release "$launcher_lock"
+    return 1
+  fi
+
+  log "self-supervise idle exit: no in-flight child work remains"
+  rm -f "$state/$SELF_SUPERVISE_FLAG_NAME" "$state/.self-supervise-idle-since" 2>/dev/null || true
+  fm_lock_release "$task_set_lock"
+  SELF_SUPERVISE_IDLE_EXIT_HOLDS_LAUNCH_LOCK=1
+  return 0
+}
+
+self_supervise_delivery_lock() {  # <state>
+  printf '%s/.self-supervise-delivery.lock' "$1"
+}
+
+self_supervise_target_matches() {  # <state> <backend> <target>
+  local state=$1 backend=$2 target=$3 recorded_backend recorded_target recorded_binding binding
+  [ -f "$state/.self-supervise-target" ] || return 1
+  IFS=$'\t' read -r recorded_backend recorded_target recorded_binding < "$state/.self-supervise-target" || return 1
+  [ "$recorded_backend" = "$backend" ] && [ "$recorded_target" = "$target" ] && [ -n "$recorded_binding" ] || return 1
+  [ "${FM_SUPERVISOR_BINDING:-}" = "$recorded_binding" ] || return 1
+  binding=$(fm_supervisor_target_same_home_binding "$backend" "$target" "$FM_HOME") || return 1
+  [ "$recorded_binding" = "$binding" ]
 }
 
 # afk_enter / afk_exit: write/clear the away-mode flag. Called by the /afk
@@ -1114,12 +1186,12 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local msg=$1 state target backend retries sleep_s verdict composer encoded self_delivery_lock=
   state="${2:-$(_state_root)}"
-  # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
-  # daemon self-handles and stays quiet; firstmate drives the normal always-on
-  # watcher triage. Escalations buffer and survive for the next catch-up flush.
-  afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
+  # (1) Presence-gate: inject only while this home is away or its secondmate
+  # self-supervisor owns continuity. Otherwise preserve the durable buffer.
+  { afk_active "$state" || self_supervise_active "$state"; } \
+    || { log "inject deferred: no supervisor mode is active"; return 1; }
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then use the canonical typed envelope so downstream consumers retain
@@ -1163,7 +1235,21 @@ inject_msg() {  # <message> [state]
   # re-export of fm_tmux_submit_core - byte-identical to calling it directly.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
+  if self_supervise_active "$state" && ! afk_active "$state"; then
+    self_delivery_lock=$(self_supervise_delivery_lock "$state")
+    if ! fm_lock_try_acquire "$self_delivery_lock"; then
+      log "inject deferred: same-home successor handoff owns delivery"
+      return 1
+    fi
+    if ! self_supervise_active "$state" \
+      || ! self_supervise_target_matches "$state" "$backend" "$target"; then
+      fm_lock_release "$self_delivery_lock"
+      log "inject deferred: same-home successor target changed"
+      return 1
+    fi
+  fi
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
+  [ -z "$self_delivery_lock" ] || fm_lock_release "$self_delivery_lock"
   if [ "$verdict" = empty ]; then
     return 0  # Backend confirmed the submit.
   fi
@@ -1440,6 +1526,14 @@ fm_super_main() {
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1
   fi
+  if self_supervise_active "$STATE" && ! afk_active "$STATE" \
+    && ! self_supervise_target_matches "$STATE" "$BACKEND" "$TARGET"; then
+    echo "error: same-home successor target no longer matches its recorded live binding; preserving its lifecycle state" >&2
+    log "startup failed: same-home successor target binding changed (target=$TARGET backend=$BACKEND)"
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    rm -f "$PIDFILE" 2>/dev/null || true
+    exit 1
+  fi
 
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"
@@ -1447,7 +1541,7 @@ fm_super_main() {
   migrate_watcher_pause_markers "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
-  local WATCHER_PID="" CUR_TMP=""
+  local WATCHER_PID="" CUR_TMP="" SELF_SUPERVISE_IDLE_EXIT_HOLDS_LAUNCH_LOCK=0
   cleanup() {
     trap - TERM INT
     wedge_alarm_stop_active_notifier
@@ -1461,6 +1555,9 @@ fm_super_main() {
     fi
     fm_lock_release "$LOCK" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
+    if [ "$SELF_SUPERVISE_IDLE_EXIT_HOLDS_LAUNCH_LOCK" = 1 ]; then
+      fm_lock_release "$STATE/.afk-launch.lock" 2>/dev/null || true
+    fi
     log "daemon shutting down"
     exit 0
   }
@@ -1557,6 +1654,8 @@ fm_super_main() {
       _now > "$STATE/.subsuper-last-housekeep"
       housekeeping "$STATE"
     fi
+
+    self_supervise_retire_idle_owner "$STATE" && cleanup
   done
 }
 

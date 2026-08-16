@@ -93,6 +93,202 @@ test_daemon_state_root_uses_fm_home() {
   pass "supervise daemon state root is scoped by FM_HOME"
 }
 
+test_self_supervise_idle_exit_yields_to_afk_started_during_handoff() {
+  local dir state status
+  dir=$(make_supercase self-supervise-idle-afk-handoff)
+  state="$dir/state"
+  : > "$state/.self-supervise"
+  echo $(( $(date +%s) - 500 )) > "$state/.self-supervise-idle-since"
+
+  (
+    # The daemon loads this only when it executes, while this focused unit
+    # exercises the same lock-backed handoff helper under a controlled race.
+    FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+    FM_SELF_SUPERVISE_IDLE_EXIT_SECS=0
+    afk_checks=0
+    afk_active() {
+      afk_checks=$((afk_checks + 1))
+      if [ "$afk_checks" -eq 2 ]; then
+        : > "$state/.afk"
+        return 0
+      fi
+      return 1
+    }
+    ! self_supervise_retire_idle_owner "$state"
+  )
+  status=$?
+
+  # shellcheck disable=SC2031 # The isolated helper changes fixture files, not this resolved path.
+  if [ "$status" -eq 0 ] && [ -e "$state/.afk" ] && [ -e "$state/.self-supervise" ] \
+    && [ ! -e "$state/.self-supervise-idle-since" ] && [ ! -e "$state/.afk-launch.lock" ]; then
+    pass "self-supervise idle exit yields when AFK starts during its lifecycle handoff"
+  else
+    fail "self-supervise idle exit removed watcher ownership after AFK started during handoff"
+  fi
+}
+
+test_self_supervise_idle_exit_retains_owner_when_child_appears_during_handoff() {
+  local dir state status
+  dir=$(make_supercase self-supervise-idle-child-handoff)
+  state="$dir/state"
+  : > "$state/.self-supervise"
+  echo $(( $(date +%s) - 500 )) > "$state/.self-supervise-idle-since"
+
+  (
+    # Publish a child only after the lifecycle lock exists, reproducing a
+    # child dispatch that overlaps this daemon's idle retirement decision.
+    FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+    FM_SELF_SUPERVISE_IDLE_EXIT_SECS=0
+    fm_lock_try_acquire() {
+      fm_lock_try_create "$1" || return 1
+      : > "$state/new-child.meta"
+    }
+    result=0
+    self_supervise_retire_idle_owner "$state" || result=$?
+    [ "$result" -ne 0 ] && [ -e "$state/.self-supervise" ] \
+      && [ ! -e "$state/.self-supervise-idle-since" ] \
+      && [ ! -e "$state/.afk-launch.lock" ]
+  )
+  status=$?
+
+  if [ "$status" -eq 0 ]; then
+    pass "self-supervise idle exit retains ownership when a child appears during lifecycle handoff"
+  else
+    fail "self-supervise idle exit removed watcher ownership after a child appeared during handoff"
+  fi
+}
+
+test_self_supervise_idle_exit_blocks_post_recheck_child_publication() {
+  local dir state status
+  dir=$(make_supercase self-supervise-idle-post-recheck-publication)
+  state="$dir/state"
+  : > "$state/.self-supervise"
+  echo $(( $(date +%s) - 500 )) > "$state/.self-supervise-idle-since"
+
+  (
+    local task_set_lock counted_zero publisher_outcome count_calls publisher_pid='' result=0 outcome=''
+    FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+    FM_SELF_SUPERVISE_IDLE_EXIT_SECS=0
+    task_set_lock=$(fm_task_set_lock_path "$state") || exit 1
+    counted_zero="$state/counted-zero"
+    publisher_outcome="$state/publisher-outcome"
+    count_calls="$state/count-calls"
+    mkfifo "$counted_zero" "$publisher_outcome" || exit 1
+    printf '0\n' > "$count_calls"
+    # Invoked indirectly by the EXIT trap below.
+    # shellcheck disable=SC2329
+    cleanup_post_recheck_publication() {
+      [ -z "$publisher_pid" ] || kill "$publisher_pid" 2>/dev/null || true
+      [ -z "$publisher_pid" ] || wait "$publisher_pid" 2>/dev/null || true
+      fm_lock_release "$state/.afk-launch.lock" 2>/dev/null || true
+      rm -f "$counted_zero" "$publisher_outcome"
+    }
+    trap cleanup_post_recheck_publication EXIT
+    (
+      IFS= read -r signal < "$counted_zero"
+      [ "$signal" = counted-zero ] || exit 1
+      if fm_lock_try_acquire "$task_set_lock"; then
+        : > "$state/post-recheck.meta"
+        fm_lock_release "$task_set_lock"
+        printf 'published\n' > "$publisher_outcome"
+      else
+        printf 'deferred\n' > "$publisher_outcome"
+      fi
+    ) &
+    publisher_pid=$!
+    in_flight_count() {
+      local meta count=0 call
+      for meta in "$state"/*.meta; do
+        [ -e "$meta" ] && count=$((count + 1))
+      done
+      call=$(cat "$count_calls")
+      call=$((call + 1))
+      printf '%s\n' "$call" > "$count_calls"
+      if [ "$call" -eq 2 ] && [ "$count" -eq 0 ]; then
+        printf 'counted-zero\n' > "$counted_zero"
+        IFS= read -r outcome < "$publisher_outcome"
+        printf '%s\n' "$outcome" > "$state/publisher-result"
+      fi
+      printf '%s' "$count"
+    }
+    self_supervise_retire_idle_owner "$state" || result=$?
+    wait "$publisher_pid" || exit 1
+    publisher_pid=
+    outcome=$(cat "$state/publisher-result")
+    [ "$outcome" = deferred ] && [ "$result" -eq 0 ] \
+      && [ ! -e "$state/post-recheck.meta" ] \
+      && [ ! -e "$state/.self-supervise" ] \
+      && [ ! -e "$state/.self-supervise-idle-since" ] \
+      && [ -e "$state/.afk-launch.lock" ] \
+      && [ ! -e "$task_set_lock" ]
+  )
+  status=$?
+
+  if [ "$status" -eq 0 ]; then
+    pass "self-supervise idle exit blocks child publication after its final zero count"
+  else
+    fail "self-supervise idle exit allowed child publication after its final zero count"
+  fi
+}
+
+test_self_supervise_idle_exit_defers_to_an_active_task_set_publisher() {
+  local dir state status
+  dir=$(make_supercase self-supervise-idle-task-set-publisher)
+  state="$dir/state"
+  : > "$state/.self-supervise"
+  echo $(( $(date +%s) - 500 )) > "$state/.self-supervise-idle-since"
+
+  (
+    local task_set_lock publisher_ready publisher_release publisher_pid='' result=0 signal=''
+    FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
+    FM_SELF_SUPERVISE_IDLE_EXIT_SECS=0
+    task_set_lock=$(fm_task_set_lock_path "$state") || exit 1
+    publisher_ready="$state/publisher-ready"
+    publisher_release="$state/publisher-release"
+    mkfifo "$publisher_ready" "$publisher_release" || exit 1
+    # Invoked indirectly by the EXIT trap below.
+    # shellcheck disable=SC2329
+    cleanup_task_set_publisher() {
+      [ -z "$publisher_pid" ] || kill "$publisher_pid" 2>/dev/null || true
+      [ -z "$publisher_pid" ] || wait "$publisher_pid" 2>/dev/null || true
+      fm_lock_release "$state/.afk-launch.lock" 2>/dev/null || true
+      rm -f "$publisher_ready" "$publisher_release"
+    }
+    trap cleanup_task_set_publisher EXIT
+    (
+      fm_lock_try_acquire "$task_set_lock" || exit 1
+      printf 'held\n' > "$publisher_ready"
+      IFS= read -r signal < "$publisher_release"
+      [ "$signal" = publish ] || exit 1
+      : > "$state/post-recheck.meta"
+      fm_lock_release "$task_set_lock"
+    ) &
+    publisher_pid=$!
+    IFS= read -r signal < "$publisher_ready"
+    [ "$signal" = held ] || exit 1
+    self_supervise_retire_idle_owner "$state" || result=$?
+    [ "$result" -ne 0 ] && [ -e "$state/.self-supervise" ] \
+      && [ -e "$state/.self-supervise-idle-since" ] \
+      && [ ! -e "$state/.afk-launch.lock" ] && [ -e "$task_set_lock" ] || exit 1
+    printf 'publish\n' > "$publisher_release"
+    wait "$publisher_pid" || exit 1
+    publisher_pid=
+    result=0
+    self_supervise_retire_idle_owner "$state" || result=$?
+    [ "$result" -ne 0 ] && [ -e "$state/post-recheck.meta" ] \
+      && [ -e "$state/.self-supervise" ] \
+      && [ ! -e "$state/.self-supervise-idle-since" ] \
+      && [ ! -e "$state/.afk-launch.lock" ] && [ ! -e "$task_set_lock" ]
+  )
+  status=$?
+
+  if [ "$status" -eq 0 ]; then
+    pass "self-supervise idle exit defers to a task-set publisher and retains ownership"
+  else
+    fail "self-supervise idle exit raced an active task-set publisher"
+  fi
+}
+
 test_classify_routine_signal_self() {
   local dir state out
   dir=$(make_supercase classify-routine)
@@ -1836,6 +2032,10 @@ test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
 test_daemon_state_root_uses_fm_home
+test_self_supervise_idle_exit_yields_to_afk_started_during_handoff
+test_self_supervise_idle_exit_retains_owner_when_child_appears_during_handoff
+test_self_supervise_idle_exit_blocks_post_recheck_child_publication
+test_self_supervise_idle_exit_defers_to_an_active_task_set_publisher
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate

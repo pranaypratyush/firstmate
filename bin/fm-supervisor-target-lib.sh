@@ -76,3 +76,51 @@ discover_supervisor_backend() {
   printf '%s' "$FM_SUPERVISOR_BACKEND_DEFAULT"
   return 1
 }
+
+# fm_supervisor_target_same_home_binding <backend> <target> <home>
+#
+# Prove a same-home successor target is live in the selected secondmate home
+# and return its backend-native incarnation. The caller persists the output
+# beside the target and rechecks it before delivery, so a present recycled pane
+# cannot replace or receive work for an older successor. This library expects
+# bin/fm-backend.sh to have been sourced first.
+fm_supervisor_target_same_home_binding() {
+  local backend=$1 target=$2 home=$3 home_real path path_real pane pane_number pid info session
+  home_real=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
+  fm_backend_target_exists "$backend" "$target" || return 1
+  case "$backend" in
+    tmux)
+      fm_backend_source tmux || return 1
+      path=$(fm_backend_tmux_current_path "$target") || return 1
+      pane=$(tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null) || return 1
+      pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || return 1
+      case "$pane" in %*) ;; *) return 1 ;; esac
+      pane_number=${pane#%}
+      case "$pane_number" in ''|*[!0-9]*) return 1 ;; esac
+      case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+      ;;
+    herdr)
+      fm_backend_source herdr || return 1
+      fm_backend_herdr_parse_target "$target" || return 1
+      session=$FM_BACKEND_HERDR_SESSION
+      pane=$FM_BACKEND_HERDR_PANE
+      info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+      path=$(printf '%s' "$info" | jq -er --arg pane "$pane" '
+        .result.pane as $p
+        | select(($p.pane_id // "") == $pane)
+        | ($p.foreground_cwd // empty)
+      ' 2>/dev/null) || return 1
+      info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+      pid=$(printf '%s' "$info" | jq -er --arg pane "$pane" '
+        .result.process_info as $p
+        | select(($p.pane_id // "") == $pane)
+        | ($p.shell_pid | select(type == "number" and . > 1) | floor)
+      ' 2>/dev/null) || return 1
+      case "$pid" in *[!0-9]*|'') return 1 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+  path_real=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || return 1
+  [ "$path_real" = "$home_real" ] || return 1
+  printf '%s:%s:%s' "$backend" "$pane" "$pid"
+}

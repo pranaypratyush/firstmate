@@ -29,12 +29,19 @@
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
+#   fm-afk-launch.sh ensure-self-supervise
+#                              Persist this secondmate home's current pane and
+#                              backend, then launch its idempotent successor
+#                              while child work is in flight.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
 #                              id, then clear state/.afk last.
+#   fm-afk-launch.sh stop-self-supervise
+#                              Stop only this secondmate home's successor.
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
+# End usage.
 #
 # Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
 # non-visible-launch primitive here yet and refuse loudly.
@@ -74,6 +81,9 @@ FM_AFK_LAUNCH_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal"
 FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
 FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
+FM_AFK_LAUNCH_SELFSUP_RECORD="$FM_AFK_LAUNCH_STATE/.self-supervise-target"
+FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK="$FM_AFK_LAUNCH_STATE/.self-supervise-delivery.lock"
+FM_SUPERVISE_FLAG="${FM_SUPERVISE_FLAG:-.afk}"
 
 # shellcheck source=bin/fm-backend.sh
 . "$FM_AFK_LAUNCH_DIR/fm-backend.sh"
@@ -146,7 +156,11 @@ fm_afk_launch_lock_release() {
 }
 
 fm_afk_launch_usage() {
-  sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk '
+    /^# Usage:/ { show=1 }
+    /^# End usage\./ { exit }
+    show { sub(/^# ?/, ""); print }
+  ' "${BASH_SOURCE[0]}"
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -164,9 +178,7 @@ fm_afk_launch_record_write() {  # <backend> <target> <extra>
 }
 
 fm_afk_launch_flag_write() {
-  local pending="$FM_AFK_LAUNCH_STATE/.afk.pending.$$"
-  date '+%s' > "$pending" || { rm -f "$pending"; return 1; }
-  mv "$pending" "$FM_AFK_LAUNCH_STATE/.afk" || { rm -f "$pending"; return 1; }
+  fm_afk_publish_supervise_marker "$FM_AFK_LAUNCH_STATE"
 }
 
 # Read the recorded terminal into FM_AFK_REC_BACKEND/FM_AFK_REC_TARGET. The third
@@ -357,14 +369,14 @@ fm_afk_launch_reconcile() {
   fi
 }
 
-fm_afk_launch_restore_backup() {  # <backup> <had-afk>
+fm_afk_launch_restore_backup() {  # <backup> <had-flag>
   local backup=$1 had_afk=$2 artifact result=0
-  rm -f "$FM_AFK_LAUNCH_STATE/.afk" \
+  rm -f "$FM_AFK_LAUNCH_STATE/$FM_SUPERVISE_FLAG" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" || result=1
   if [ "$had_afk" -eq 1 ]; then
-    cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
+    cp "$backup/$FM_SUPERVISE_FLAG" "$FM_AFK_LAUNCH_STATE/$FM_SUPERVISE_FLAG" || result=1
   fi
   for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
     if [ -e "$backup/$artifact" ]; then
@@ -416,8 +428,8 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
     IFS=$'\t' read -r wsid pane <<< "$recovered"
   fi
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_SUPERVISOR_BINDING=%q FM_SUPERVISE_FLAG=%q %q' \
+    "$FM_HOME" "$captain_target" "$captain_backend" "${FM_SUPERVISOR_BINDING:-}" "$FM_SUPERVISE_FLAG" "$entry")
   if ! fm_afk_launch_record_write herdr "$session:$pane" "$wsid"; then
     fm_afk_launch_log "failed to persist herdr daemon terminal record; closing $session:$pane"
     fm_afk_launch_close_terminal herdr "$session:$pane"
@@ -443,8 +455,8 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   nonce="$$-${RANDOM:-0}-$(date '+%s')"
   session="fm-afk-daemon-$hash-$nonce"
   entry=$(fm_afk_launch_entry_cmd)
-  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q %q' \
-    "$FM_HOME" "$captain_target" "$captain_backend" "$entry")
+  cmd=$(printf 'exec env FM_HOME=%q FM_SUPERVISOR_TARGET=%q FM_SUPERVISOR_BACKEND=%q FM_SUPERVISOR_BINDING=%q FM_SUPERVISE_FLAG=%q %q' \
+    "$FM_HOME" "$captain_target" "$captain_backend" "${FM_SUPERVISOR_BINDING:-}" "$FM_SUPERVISE_FLAG" "$entry")
   if ! fm_afk_launch_record_write tmux "$session" ""; then
     fm_afk_launch_log "failed to persist planned tmux daemon session '$session'"
     return 1
@@ -460,9 +472,9 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   fm_afk_launch_log "daemon launched in detached tmux session '$session', supervising $captain_target"
 }
 
-fm_afk_launch_start() {
-  local captain_target captain_backend backup artifact had_afk=0 result
-  if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
+fm_afk_launch_start() {  # [preserve-self-supervise-delivery]
+  local preserve_delivery=${1:-0} captain_target captain_backend backup artifact had_afk=0 result
+  if [ "$FM_SUPERVISE_FLAG" = .afk ] && [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
   fi
@@ -485,9 +497,9 @@ fm_afk_launch_start() {
   fi
 
   backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
-  if [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+  if [ -f "$FM_AFK_LAUNCH_STATE/$FM_SUPERVISE_FLAG" ]; then
     had_afk=1
-    cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
+    cp "$FM_AFK_LAUNCH_STATE/$FM_SUPERVISE_FLAG" "$backup/$FM_SUPERVISE_FLAG" || { rm -rf "$backup"; return 1; }
   fi
   for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
@@ -497,7 +509,10 @@ fm_afk_launch_start() {
   if ! fm_afk_launch_reconcile; then
     result=1
   else
-    if fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
+    # A serialized same-home replacement owns the delivery lock.  Its old
+    # daemon has already observed any buffered child completion, so retain the
+    # buffer for the new, validated successor instead of treating it as stale.
+    if [ "$preserve_delivery" = 1 ] || fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
       result=0
     else
       fm_afk_launch_log "failed to clear stale away-mode artifacts"
@@ -614,8 +629,8 @@ fm_afk_launch_stop() {
     fm_afk_launch_close_recorded || result=1
   fi
   # (3) Clear the away-mode flag LAST.
-  if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
-    fm_afk_launch_log "failed to clear away-mode flag"
+  if ! rm -f "$FM_AFK_LAUNCH_STATE/$FM_SUPERVISE_FLAG"; then
+    fm_afk_launch_log "failed to clear supervisor mode flag $FM_SUPERVISE_FLAG"
     result=1
   fi
   if [ "$result" -eq 0 ]; then
@@ -624,6 +639,122 @@ fm_afk_launch_stop() {
     fm_afk_launch_log "away mode stopped; terminal teardown remains recorded for retry"
   fi
   return "$result"
+}
+
+fm_afk_launch_selfsup_record_write() {  # <backend> <target> <binding>
+  local pending
+  [ -n "${1:-}" ] && [ -n "${2:-}" ] && [ -n "${3:-}" ] || return 1
+  pending=$(mktemp "$FM_AFK_LAUNCH_STATE/.self-supervise-target.pending.XXXXXX") || return 1
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" > "$pending" || { rm -f "$pending"; return 1; }
+  mv "$pending" "$FM_AFK_LAUNCH_SELFSUP_RECORD" || { rm -f "$pending"; return 1; }
+}
+
+fm_afk_launch_selfsup_record_read() {
+  FM_SELFSUP_BACKEND=
+  FM_SELFSUP_TARGET=
+  FM_SELFSUP_BINDING=
+  [ -f "$FM_AFK_LAUNCH_SELFSUP_RECORD" ] || return 1
+  IFS=$'\t' read -r FM_SELFSUP_BACKEND FM_SELFSUP_TARGET FM_SELFSUP_BINDING < "$FM_AFK_LAUNCH_SELFSUP_RECORD" || return 1
+  [ -n "$FM_SELFSUP_BACKEND" ] && [ -n "$FM_SELFSUP_TARGET" ] && [ -n "$FM_SELFSUP_BINDING" ]
+}
+
+fm_afk_launch_in_flight_count() {
+  local meta count=0
+  for meta in "$FM_AFK_LAUNCH_STATE"/*.meta; do
+    [ -e "$meta" ] && count=$((count + 1))
+  done
+  printf '%s' "$count"
+}
+
+fm_afk_launch_selfsup_delivery_lock_acquire() {
+  local attempt=0
+  while ! fm_lock_try_acquire "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 100 ]; then
+      fm_afk_launch_log "ensure-self-supervise: delivery handoff remained busy"
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
+fm_afk_launch_ensure_self_supervise() {
+  local backend target binding record_backend='' record_target='' record_binding='' has_record=0 current_target=0 delivery_locked=0 live_daemon=0 result
+  [ "$(fm_afk_launch_in_flight_count)" -gt 0 ] || return 0
+  daemon_lock_held_by_live_daemon && live_daemon=1
+  if fm_afk_launch_selfsup_record_read; then
+    record_backend=$FM_SELFSUP_BACKEND
+    record_target=$FM_SELFSUP_TARGET
+    record_binding=$FM_SELFSUP_BINDING
+    has_record=1
+  elif [ "$live_daemon" -eq 1 ]; then
+    fm_afk_launch_log "ensure-self-supervise: live successor has no readable target record; preserving state for recovery"
+    return 1
+  fi
+  if [ -n "${TMUX_PANE:-}" ]; then
+    backend=tmux
+    target=$TMUX_PANE
+    current_target=1
+  elif [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ]; then
+    backend=herdr
+    target="${HERDR_SESSION:-default}:$HERDR_PANE_ID"
+    current_target=1
+  else
+    fm_afk_launch_log "ensure-self-supervise: no same-home secondmate pane for $FM_HOME"
+    return 1
+  fi
+  binding=$(fm_supervisor_target_same_home_binding "$backend" "$target" "$FM_HOME") || {
+    fm_afk_launch_log "ensure-self-supervise: refusing an unbound same-home secondmate pane for $FM_HOME"
+    return 1
+  }
+  FM_SUPERVISE_FLAG=.self-supervise
+  export FM_SUPERVISE_FLAG
+  if [ "$current_target" -eq 1 ] && [ "$has_record" -eq 1 ] \
+    && { [ "$backend" != "$record_backend" ] || [ "$target" != "$record_target" ] || [ "$binding" != "$record_binding" ]; } \
+    && [ "$live_daemon" -eq 1 ]; then
+    fm_afk_launch_selfsup_delivery_lock_acquire || return 1
+    delivery_locked=1
+    binding=$(fm_supervisor_target_same_home_binding "$backend" "$target" "$FM_HOME") || {
+      fm_afk_launch_log "ensure-self-supervise: replacement pane lost its same-home binding before handoff"
+      fm_lock_release "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"
+      return 1
+    }
+    if [ -e "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+      fm_afk_launch_log "ensure-self-supervise: refusing to replace an away-mode daemon"
+      fm_lock_release "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"
+      return 1
+    fi
+    # Keep the marker until stop has reaped the old daemon.  The held delivery
+    # lock then makes its cleanup retain, rather than inject, any completion it
+    # already buffered against the old binding.  stop clears the marker once
+    # that owner is gone, before the new validated record is started.
+    if ! fm_afk_launch_stop; then
+      fm_lock_release "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"
+      return 1
+    fi
+  fi
+  if ! fm_afk_launch_selfsup_record_write "$backend" "$target" "$binding"; then
+    [ "$delivery_locked" -eq 0 ] || fm_lock_release "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"
+    return 1
+  fi
+  FM_SUPERVISOR_BACKEND=$backend
+  FM_SUPERVISOR_TARGET=$target
+  FM_SUPERVISOR_BINDING=$binding
+  export FM_SUPERVISOR_BACKEND FM_SUPERVISOR_TARGET FM_SUPERVISOR_BINDING
+  fm_afk_launch_start "$delivery_locked"
+  result=$?
+  [ "$delivery_locked" -eq 0 ] || fm_lock_release "$FM_AFK_LAUNCH_SELFSUP_DELIVERY_LOCK"
+  return "$result"
+}
+
+fm_afk_launch_stop_self_supervise() {
+  if [ -e "$FM_AFK_LAUNCH_STATE/.afk" ]; then
+    rm -f "$FM_AFK_LAUNCH_STATE/.self-supervise"
+    return 0
+  fi
+  FM_SUPERVISE_FLAG=.self-supervise
+  export FM_SUPERVISE_FLAG
+  fm_afk_launch_stop
 }
 
 fm_afk_launch_main() {
@@ -636,11 +767,14 @@ fm_afk_launch_main() {
   trap fm_afk_launch_lock_release EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  fm_afk_validate_supervise_marker || return 1
   fm_afk_launch_lock_acquire || return 1
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;
+    ensure-self-supervise) fm_afk_launch_ensure_self_supervise ;;
     stop) fm_afk_launch_stop ;;
+    stop-self-supervise) fm_afk_launch_stop_self_supervise ;;
     reconcile) fm_afk_launch_reconcile ;;
     -h|--help|help) fm_afk_launch_usage ;;
     *) fm_afk_launch_usage >&2; return 2 ;;

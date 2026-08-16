@@ -303,6 +303,28 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### Same-home successor binding
+
+The same-home successor binding was read-only verified on 2026-08-15 against Herdr 0.8.0 with client and server protocol 19.
+The binding combined the exact pane id and its current shell process id only after `pane get` reported the owning home as `foreground_cwd`.
+The portable parser and rejection regression is `tests/fm-backend-herdr.test.sh`.
+The non-sensitive observed guard output was:
+
+```text
+ok - same-home Herdr binding reads one exact existing pane and its shell incarnation
+evidence: herdr=Herdr 0.8.0 client_protocol=19 server_protocol=19 binding=accepted read_only=true
+```
+
+The guard intentionally redacts the pane and shell-incarnation values from its evidence line.
+Refresh the vendor-owned pane and process-info contract after every Herdr upgrade with an existing pane only:
+
+```sh
+FM_HERDR_SAME_HOME_BINDING_LIVE=1 FM_HERDR_SAME_HOME_BINDING_TARGET='<session>:<pane>' FM_HERDR_SAME_HOME_BINDING_HOME='<absolute-home>' bin/fm-test-run.sh tests/fm-herdr-same-home-binding-live-e2e.test.sh
+```
+
+The guard performs only `--version`, `status --json`, `pane get`, and `pane process-info` reads.
+It does not create, restore, send input to, or stop a Herdr session or pane.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:
