@@ -990,6 +990,7 @@ unit_self_supervisor_refuses_missing_or_unreadable_target_record() {
   printf '%s' "$sleeper" > "$lock/pid"
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper" > "$lock/pid-identity" 2>/dev/null ) || true
 
+  # shellcheck disable=SC2031 # Helper subprocesses use immutable fixture paths only.
   for case_name in missing unreadable; do
     case "$case_name" in
       missing)

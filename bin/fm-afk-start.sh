@@ -78,6 +78,7 @@ fm_afk_publish_supervise_marker() {  # [<state>]
     cd "$state" || exit 1
     pending=$(mktemp "$FM_SUPERVISE_FLAG.pending.XXXXXX") || exit 1
     date '+%s' > "$pending" || { rm -f "$pending"; exit 1; }
+    # shellcheck disable=SC2016 # Perl owns the literal $ARGV expressions.
     "$perl_bin" -e 'rename $ARGV[0], $ARGV[1] or exit 1' "$pending" "$FM_SUPERVISE_FLAG" \
       || { rm -f "$pending"; exit 1; }
     fm_afk_supervise_marker_is_owned_regular "$FM_SUPERVISE_FLAG" \

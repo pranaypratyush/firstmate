@@ -679,7 +679,7 @@ fm_afk_launch_selfsup_delivery_lock_acquire() {
 }
 
 fm_afk_launch_ensure_self_supervise() {
-  local backend target binding record_backend= record_target= record_binding= has_record=0 current_target=0 delivery_locked=0 live_daemon=0 result
+  local backend target binding record_backend='' record_target='' record_binding='' has_record=0 current_target=0 delivery_locked=0 live_daemon=0 result
   [ "$(fm_afk_launch_in_flight_count)" -gt 0 ] || return 0
   daemon_lock_held_by_live_daemon && live_daemon=1
   if fm_afk_launch_selfsup_record_read; then

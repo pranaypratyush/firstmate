@@ -105,6 +105,8 @@ test_linked_child_with_parent_secondmate_home_is_inert() {
     local_err="$TMP_ROOT/linked-child.err"
     local_git_dir=
     local_common_dir=
+    # Invoked indirectly by the EXIT and signal traps below.
+    # shellcheck disable=SC2329
     cleanup_linked_child() {
       tmux -L "$local_socket" kill-server >/dev/null 2>&1 || true
     }

@@ -118,6 +118,7 @@ test_self_supervise_idle_exit_yields_to_afk_started_during_handoff() {
   )
   status=$?
 
+  # shellcheck disable=SC2031 # The isolated helper changes fixture files, not this resolved path.
   if [ "$status" -eq 0 ] && [ -e "$state/.afk" ] && [ -e "$state/.self-supervise" ] \
     && [ ! -e "$state/.self-supervise-idle-since" ] && [ ! -e "$state/.afk-launch.lock" ]; then
     pass "self-supervise idle exit yields when AFK starts during its lifecycle handoff"
@@ -165,7 +166,7 @@ test_self_supervise_idle_exit_blocks_post_recheck_child_publication() {
   echo $(( $(date +%s) - 500 )) > "$state/.self-supervise-idle-since"
 
   (
-    local task_set_lock counted_zero publisher_outcome count_calls publisher_pid= result=0 outcome=
+    local task_set_lock counted_zero publisher_outcome count_calls publisher_pid='' result=0 outcome=''
     FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
     FM_SELF_SUPERVISE_IDLE_EXIT_SECS=0
     task_set_lock=$(fm_task_set_lock_path "$state") || exit 1
@@ -174,6 +175,8 @@ test_self_supervise_idle_exit_blocks_post_recheck_child_publication() {
     count_calls="$state/count-calls"
     mkfifo "$counted_zero" "$publisher_outcome" || exit 1
     printf '0\n' > "$count_calls"
+    # Invoked indirectly by the EXIT trap below.
+    # shellcheck disable=SC2329
     cleanup_post_recheck_publication() {
       [ -z "$publisher_pid" ] || kill "$publisher_pid" 2>/dev/null || true
       [ -z "$publisher_pid" ] || wait "$publisher_pid" 2>/dev/null || true
@@ -236,13 +239,15 @@ test_self_supervise_idle_exit_defers_to_an_active_task_set_publisher() {
   echo $(( $(date +%s) - 500 )) > "$state/.self-supervise-idle-since"
 
   (
-    local task_set_lock publisher_ready publisher_release publisher_pid= result=0 signal=
+    local task_set_lock publisher_ready publisher_release publisher_pid='' result=0 signal=''
     FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
     FM_SELF_SUPERVISE_IDLE_EXIT_SECS=0
     task_set_lock=$(fm_task_set_lock_path "$state") || exit 1
     publisher_ready="$state/publisher-ready"
     publisher_release="$state/publisher-release"
     mkfifo "$publisher_ready" "$publisher_release" || exit 1
+    # Invoked indirectly by the EXIT trap below.
+    # shellcheck disable=SC2329
     cleanup_task_set_publisher() {
       [ -z "$publisher_pid" ] || kill "$publisher_pid" 2>/dev/null || true
       [ -z "$publisher_pid" ] || wait "$publisher_pid" 2>/dev/null || true
