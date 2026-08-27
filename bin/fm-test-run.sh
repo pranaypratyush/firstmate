@@ -169,7 +169,7 @@ family_for_basename() {
       ;;
     fm-backlog-handoff.test.sh|fm-omp-secondmate.test.sh|fm-on.test.sh|fm-remote-backlog-handoff.test.sh|\
     fm-remote-doctor.test.sh|fm-remote-job.test.sh|fm-pending-reply-sleep-reconcile.test.sh|\
-    fm-remote-reply.test.sh|fm-remote-secondmate-lifecycle-e2e.test.sh|\
+    fm-remote-reply.test.sh|fm-remote-secondmate-lifecycle-e2e.test.sh|fm-send-remote-delivery.test.sh|\
     fm-remote-secondmate-trace-context.test.sh|\
     fm-runpod-lifecycle.test.sh|fm-runpod-routing.test.sh|fm-runpod-pod-boot.test.sh|fm-runpod-omp-auth.test.sh|\
     fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
@@ -185,7 +185,7 @@ family_for_basename() {
       ;;
     fm-afk-pi-herdr-return-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
-    fm-hermes-live-e2e.test.sh|\
+    fm-hermes-live-e2e.test.sh|fm-send-inbox-doorbell-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-omp-herdr-exit-live-e2e.test.sh|fm-omp-herdr-live-e2e.test.sh|\
     fm-omp-max-time-live-e2e.test.sh|\
     fm-omp-secondmate-live-e2e.test.sh|fm-omp-worker-tmux-live-e2e.test.sh|\

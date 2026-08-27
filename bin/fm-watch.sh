@@ -305,12 +305,26 @@ inbox_steer_check() {  # <window> <task>
       socket=
       if [ "$(window_harness "$w")" = omp ]; then
         socket="/tmp/fm-$task/omp-doorbell.sock"
+        binding="/tmp/fm-$task/omp-doorbell.binding"
+        nonce=$(fm_meta_get "$meta" omp_doorbell_nonce)
+        binding_pid=$(sed -n 's/^pid=//p' "$binding" 2>/dev/null)
+        binding_identity=$(sed -n 's/^tasktmp_identity=//p' "$binding" 2>/dev/null)
+        binding_nonce=$(sed -n 's/^nonce=//p' "$binding" 2>/dev/null)
         if [ -n "$meta" ] \
           && [ "$(fm_meta_get "$meta" tasktmp)" = "/tmp/fm-$task" ] \
           && [ "$(fm_meta_get "$meta" omp_doorbell_socket)" = "$socket" ] \
-          && [ ! -L "/tmp/fm-$task" ] \
+          && [ "$(fm_meta_get "$meta" omp_doorbell_binding)" = "$binding" ] \
+          && [ -f "$binding" ] && [ ! -L "$binding" ] \
+          && [ "$binding_identity" = "$(fm_omp_process_file_identity "/tmp/fm-$task")" ] \
+          && [ "$binding_identity" = "$(fm_meta_get "$meta" omp_doorbell_tasktmp_identity)" ] \
+          && [ "$binding_nonce" = "$nonce" ] \
+          && [[ "$binding_pid" =~ ^[1-9][0-9]*$ ]] \
+          && fm_backend_agent_record_identity "$(window_backend "$w")" "$w" "$meta" \
+          && [ "$(fm_backend_agent_state "$(window_backend "$w")" "$w" "$meta" 2>/dev/null)" = alive ] \
+          && FM_OMP_PROCESS_EXPECTED_BUN="$FM_BACKEND_AGENT_OMP_BUN" FM_OMP_PROCESS_EXPECTED_BIN="$FM_BACKEND_AGENT_OMP_BIN" \
+            fm_omp_process_matches "$(ps -p "$binding_pid" -o comm= 2>/dev/null)" "$(ps -p "$binding_pid" -o args= 2>/dev/null)" "$binding_pid" \
           && [ -S "$socket" ]; then
-          fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" "$socket" || ring_rc=$?
+          fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" "$socket" "$nonce" || ring_rc=$?
         else
           ring_rc=2
         fi

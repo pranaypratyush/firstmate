@@ -80,6 +80,7 @@ SH
 #!/usr/bin/env bash
 case "$*" in
   *tpgid=*) printf '4242\n' ;;
+  *comm=*) printf 'bun\n' ;;
   *args=*) printf '%s %s --auto-approve\n' "$FM_TEST_BUN" "$FM_TEST_OMP" ;;
 esac
 SH
@@ -259,19 +260,24 @@ test_inbox_refusal_does_not_close_answered_decision() {
 }
 
 test_omp_task_send_uses_native_constant_doorbell() {
-  local home fb bun omp log entered rc socket received pid i=0 body
+  local home fb bun omp log entered rc socket binding nonce identity received pid i=0 body
   IFS=$'\t' read -r home fb bun omp log entered < <(setup_case native-inbox omp)
   socket=/tmp/fm-turn-test/omp-doorbell.sock
+  binding=/tmp/fm-turn-test/omp-doorbell.binding
+  nonce=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   received="$TMP_ROOT/native-inbox-doorbell"
   mkdir -p /tmp/fm-turn-test
+  identity=$(stat -Lc '%d:%i' /tmp/fm-turn-test)
   perl -pi -e 's{^tasktmp=.*}{tasktmp=/tmp/fm-turn-test}' "$home/state/turn-test.meta"
-  printf 'omp_doorbell_socket=%s\n' "$socket" >> "$home/state/turn-test.meta"
-  SOCKET="$socket" RECEIVED="$received" node -e '
+  printf 'omp_doorbell_socket=%s\nomp_doorbell_binding=%s\nomp_doorbell_nonce=%s\nomp_doorbell_tasktmp_identity=%s\n' \
+    "$socket" "$binding" "$nonce" "$identity" >> "$home/state/turn-test.meta"
+  printf 'schema=fm-omp-doorbell.v1\npid=4242\ntasktmp_identity=%s\nnonce=%s\n' "$identity" "$nonce" > "$binding"
+  SOCKET="$socket" RECEIVED="$received" NONCE="$nonce" node -e '
     const net = require("node:net");
     const server = net.createServer((client) => {
       let body = "";
       client.on("data", (chunk) => { body += chunk; });
-      client.on("end", () => { require("node:fs").writeFileSync(process.env.RECEIVED, body); client.end("ok\n"); server.close(); });
+      client.on("end", () => { require("node:fs").writeFileSync(process.env.RECEIVED, body); client.end(`ok ${process.env.NONCE}\n`); server.close(); });
     });
     server.listen(process.env.SOCKET);
   ' &
@@ -282,12 +288,12 @@ test_omp_task_send_uses_native_constant_doorbell() {
     run_case wedge "$home" "$fb" "$bun" "$omp" "$log" "$entered" 'payload stays durable'
   rc=$?
   wait "$pid"
-  rm -f "$socket"; rmdir /tmp/fm-turn-test 2>/dev/null || true
+  rm -f "$socket" "$binding"; rmdir /tmp/fm-turn-test 2>/dev/null || true
   expect_code 0 "$rc" "a task-bound OMP inbox send should enqueue and ring natively"
   body=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$home/state/turn-test.inbox/001.msg")
   [ "$body" = 'payload stays durable' ] || fail "OMP inbox changed the payload: $body"
-  [ "$(cat "$received")" = 'Firstmate inbox wake' ] \
-    || fail "OMP task send did not ring only the canonical doorbell: $(cat "$received")"
+  [ "$(cat "$received")" = "$(printf 'Firstmate inbox wake\n%s' "$nonce")" ] \
+    || fail "OMP task send did not authenticate the canonical doorbell: $(cat "$received")"
   [ ! -s "$log" ] || fail "OMP task send mutated the terminal: $(cat "$log")"
   pass "fm-send: task-bound OMP delivery keeps the payload durable and rings only the native doorbell"
 }

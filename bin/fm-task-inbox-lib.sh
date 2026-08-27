@@ -280,17 +280,19 @@ fm_task_inbox_omp_doorbell_line() {
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
-fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [omp-socket]
-  local backend=$1 target=$2 rec=$3 label=${4:-} native_socket=${5:-}
+fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [omp-socket] [omp-nonce]
+  local backend=$1 target=$2 rec=$3 label=${4:-} native_socket=${5:-} native_nonce=${6:-}
   local line cstate verdict
   if [ -n "$native_socket" ]; then
     [ "$backend" = tmux ] || [ "$backend" = herdr ] || return 2
+    [ -n "$native_nonce" ] || return 2
     [ -S "$native_socket" ] || return 2
     command -v node >/dev/null 2>&1 || return 2
-    node - "$native_socket" "$(fm_task_inbox_omp_doorbell_line)" <<'NODE'
+    node - "$native_socket" "$(fm_task_inbox_omp_doorbell_line)" "$native_nonce" <<'NODE'
 const net = require("node:net");
 const socketPath = process.argv[2];
 const doorbell = process.argv[3];
+const nonce = process.argv[4];
 let accepted = false;
 let settled = false;
 const socket = net.createConnection(socketPath);
@@ -302,9 +304,9 @@ const finish = (code) => {
   process.exit(code);
 };
 const timer = setTimeout(() => finish(1), 3000);
-socket.on("connect", () => socket.end(`${doorbell}\n`));
+socket.on("connect", () => socket.end(`${doorbell}\n${nonce}\n`));
 socket.on("data", (chunk) => {
-  if (chunk.toString().split(/\r?\n/).includes("ok")) {
+  if (chunk.toString().split(/\r?\n/).includes(`ok ${nonce}`)) {
     accepted = true;
     finish(0);
   }

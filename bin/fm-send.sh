@@ -819,28 +819,44 @@ else
     if [ "$TARGET_HARNESS" = omp ]; then
       INBOX_TASK_TMP=$(fm_meta_get "$TARGET_META" tasktmp)
       TARGET_OMP_DOORBELL_SOCKET="/tmp/fm-$TARGET_TASK_ID/omp-doorbell.sock"
+      TARGET_OMP_DOORBELL_BINDING="/tmp/fm-$TARGET_TASK_ID/omp-doorbell.binding"
+      TARGET_OMP_DOORBELL_NONCE=$(fm_meta_get "$TARGET_META" omp_doorbell_nonce)
       if [ "$INBOX_TASK_TMP" != "/tmp/fm-$TARGET_TASK_ID" ] \
         || [ ! -d "$INBOX_TASK_TMP" ] \
         || [ -L "$INBOX_TASK_TMP" ] \
-        || [ "$(fm_meta_get "$TARGET_META" omp_doorbell_socket)" != "$TARGET_OMP_DOORBELL_SOCKET" ]; then
+        || [ "$(fm_meta_get "$TARGET_META" omp_doorbell_socket)" != "$TARGET_OMP_DOORBELL_SOCKET" ] \
+        || [ "$(fm_meta_get "$TARGET_META" omp_doorbell_binding)" != "$TARGET_OMP_DOORBELL_BINDING" ] \
+        || ! [[ "$TARGET_OMP_DOORBELL_NONCE" =~ ^[0-9a-f]{64}$ ]]; then
         fm_lock_release "$INBOX_META_LOCK"
-        [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
-          && fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
         echo "error: OMP target '$RAW_TARGET' lacks this task's native inbox doorbell binding; nothing was recorded" >&2
         exit 1
       fi
       if ! fm_backend_agent_record_identity "$TARGET_BACKEND" "$T" "$TARGET_META" \
         || [ "$(fm_backend_agent_state "$TARGET_BACKEND" "$T" "$TARGET_META" 2>/dev/null)" != alive ]; then
         fm_lock_release "$INBOX_META_LOCK"
-        [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
-          && fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
         echo "error: OMP target '$RAW_TARGET' does not match a live task-bound Bun/OMP process; nothing was recorded" >&2
+        exit 1
+      fi
+      BINDING_PID=$(sed -n 's/^pid=//p' "$TARGET_OMP_DOORBELL_BINDING" 2>/dev/null)
+      BINDING_IDENTITY=$(sed -n 's/^tasktmp_identity=//p' "$TARGET_OMP_DOORBELL_BINDING" 2>/dev/null)
+      BINDING_NONCE=$(sed -n 's/^nonce=//p' "$TARGET_OMP_DOORBELL_BINDING" 2>/dev/null)
+      if [ ! -f "$TARGET_OMP_DOORBELL_BINDING" ] || [ -L "$TARGET_OMP_DOORBELL_BINDING" ] \
+        || [ "$(grep -c '^schema=fm-omp-doorbell.v1$' "$TARGET_OMP_DOORBELL_BINDING")" != 1 ] \
+        || [ "$(grep -c '^pid=' "$TARGET_OMP_DOORBELL_BINDING")" != 1 ] \
+        || [ "$BINDING_IDENTITY" != "$(fm_omp_process_file_identity "$INBOX_TASK_TMP")" ] \
+        || [ "$BINDING_IDENTITY" != "$(fm_meta_get "$TARGET_META" omp_doorbell_tasktmp_identity)" ] \
+        || [ "$BINDING_NONCE" != "$TARGET_OMP_DOORBELL_NONCE" ] \
+        || ! [[ "$BINDING_PID" =~ ^[1-9][0-9]*$ ]] \
+        || ! FM_OMP_PROCESS_EXPECTED_BUN="$FM_BACKEND_AGENT_OMP_BUN" \
+          FM_OMP_PROCESS_EXPECTED_BIN="$FM_BACKEND_AGENT_OMP_BIN" \
+          fm_omp_process_matches "$(ps -p "$BINDING_PID" -o comm= 2>/dev/null)" \
+            "$(ps -p "$BINDING_PID" -o args= 2>/dev/null)" "$BINDING_PID"; then
+        fm_lock_release "$INBOX_META_LOCK"
+        echo "error: OMP target '$RAW_TARGET' has no verified task-owned inbox doorbell binding; nothing was recorded" >&2
         exit 1
       fi
       [ -S "$TARGET_OMP_DOORBELL_SOCKET" ] || {
         fm_lock_release "$INBOX_META_LOCK"
-        [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
-          && fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
         echo "error: OMP target '$RAW_TARGET' has no live native inbox doorbell binding; nothing was recorded" >&2
         exit 1
       }
@@ -861,7 +877,7 @@ else
     ring_rc=0
     if [ "$TARGET_HARNESS" = omp ]; then
       fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" \
-        "$TARGET_OMP_DOORBELL_SOCKET" || ring_rc=$?
+        "$TARGET_OMP_DOORBELL_SOCKET" "$TARGET_OMP_DOORBELL_NONCE" || ring_rc=$?
       if [ "$ring_rc" -ne 0 ]; then
         echo "error: OMP native inbox doorbell was refused after recording $INBOX_RECORD; do not resend - the watcher will re-ring it" >&2
         exit 1

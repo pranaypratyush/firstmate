@@ -480,27 +480,28 @@ test_watcher_escalates_once_after_budget() {
 }
 
 test_omp_ring_sends_only_canonical_doorbell() {
-  local state rec socket received pid i=0
+  local state rec socket received nonce pid i=0
   state="$TMP_ROOT/omp-ring/state"; mkdir -p "$state"
   socket="$TMP_ROOT/omp-ring/doorbell.sock"
+  nonce=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   received="$TMP_ROOT/omp-ring/received"
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "payload must stay in the inbox")
-  SOCKET="$socket" RECEIVED="$received" node -e '
+  SOCKET="$socket" RECEIVED="$received" NONCE="$nonce" node -e '
     const net = require("node:net");
     const server = net.createServer((client) => {
       let body = "";
       client.on("data", (chunk) => { body += chunk; });
-      client.on("end", () => { require("node:fs").writeFileSync(process.env.RECEIVED, body); client.end("ok\n"); server.close(); });
+      client.on("end", () => { require("node:fs").writeFileSync(process.env.RECEIVED, body); client.end(`ok ${process.env.NONCE}\n`); server.close(); });
     });
     server.listen(process.env.SOCKET);
   ' &
   pid=$!
   while [ ! -S "$socket" ] && [ "$i" -lt 100 ]; do sleep 0.02; i=$((i + 1)); done
   [ -S "$socket" ] || { kill "$pid" 2>/dev/null; fail "OMP doorbell fixture did not listen"; }
-  inbox_lib "$state" fm_task_inbox_ring tmux test "$rec" "" "$socket" \
+  inbox_lib "$state" fm_task_inbox_ring tmux test "$rec" "" "$socket" "$nonce" \
     || fail "OMP native doorbell was not accepted"
   wait "$pid"
-  [ "$(cat "$received")" = "Firstmate inbox wake" ] \
+  [ "$(cat "$received")" = "$(printf 'Firstmate inbox wake\n%s' "$nonce")" ] \
     || fail "OMP native ring sent payload or a noncanonical doorbell: $(cat "$received")"
   [ "$(inbox_lib "$state" fm_task_inbox_body "$rec")" = "payload must stay in the inbox" ] \
     || fail "OMP native ring changed the durable payload"

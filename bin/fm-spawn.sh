@@ -3196,6 +3196,14 @@ if [ -L "$TASK_TMP" ]; then
   exit 1
 fi
 mkdir -p "$TASK_TMP/gotmp"
+chmod 700 "$TASK_TMP" || { echo "error: task temp root must be owner-only: $TASK_TMP" >&2; exit 1; }
+if [ "$HARNESS" = omp ]; then
+  OMP_DOORBELL_BINDING="$TASK_TMP/omp-doorbell.binding"
+  OMP_DOORBELL_NONCE=$(od -An -N32 -tx1 /dev/urandom | tr -d '[:space:]') || exit 1
+  [ "${#OMP_DOORBELL_NONCE}" = 64 ] || { echo "error: cannot create OMP doorbell binding nonce" >&2; exit 1; }
+  OMP_DOORBELL_TASKTMP_IDENTITY=$(fm_omp_process_file_identity "$TASK_TMP") \
+    || { echo "error: cannot identify OMP task temp root: $TASK_TMP" >&2; exit 1; }
+fi
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
   OMP_SESSION_DIR="$TASK_TMP/omp-sessions"
   mkdir -p "$OMP_SESSION_DIR"
@@ -3375,42 +3383,73 @@ EOF
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate OMP lifecycle signal and inbox doorbell; written by fm-spawn.
 import { execFile } from "node:child_process";
-import { lstatSync, unlinkSync } from "node:fs";
+import { linkSync, lstatSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 const doorbellPath = "$OMP_DOORBELL";
+const bindingPath = "$OMP_DOORBELL_BINDING";
 const doorbellText = "$FM_TASK_INBOX_OMP_DOORBELL";
-let ompApi: any;
+const bindingNonce = "$OMP_DOORBELL_NONCE";
+const tasktmpIdentity = "$OMP_DOORBELL_TASKTMP_IDENTITY";
+type OmpLifecycle = {
+  sendUserMessage(content: string): unknown;
+  on(event: "session_start" | "turn_start" | "turn_end" | "session_shutdown", listener: () => void): void;
+};
+const errorHasCode = (error: unknown, code: string): boolean =>
+  typeof error === "object" && error !== null
+    && Reflect.get(error, "code") === code;
+let ompApi: OmpLifecycle | undefined;
 let listening = false;
-const removeStaleDoorbell = (): boolean => {
+const publishBinding = (): boolean => {
+  let temporary = "";
   try {
-    if (!lstatSync(doorbellPath).isSocket()) return false;
-    unlinkSync(doorbellPath);
-  } catch (error: any) {
-    if (error?.code !== "ENOENT") return false;
+    const tasktmp = statSync(doorbellPath.slice(0, doorbellPath.lastIndexOf("/")));
+    if (`\${tasktmp.dev}:\${tasktmp.ino}` !== tasktmpIdentity) return false;
+    temporary = `\${bindingPath}.\${process.pid}.\${Date.now()}`;
+    writeFileSync(temporary, `schema=fm-omp-doorbell.v1\npid=\${process.pid}\ntasktmp_identity=\${tasktmpIdentity}\nnonce=\${bindingNonce}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    linkSync(temporary, bindingPath);
+    unlinkSync(temporary);
+    return true;
+  } catch {
+    if (temporary) {
+      try { unlinkSync(temporary); } catch {}
+    }
+    return false;
   }
-  return true;
 };
 const doorbell = createServer((client) => {
   let input = "";
   client.on("data", (chunk) => { input += chunk.toString(); });
   client.on("end", async () => {
-    if (input.trim() !== doorbellText || typeof ompApi?.sendUserMessage !== "function") {
+    const [text, nonce, extra] = input.trimEnd().split("\n");
+    if (text !== doorbellText || nonce !== bindingNonce || extra !== undefined
+      || typeof ompApi?.sendUserMessage !== "function") {
       client.end("refused\\n");
       return;
     }
     try {
       await Promise.resolve(ompApi.sendUserMessage(doorbellText));
-      client.end("ok\\n");
+      client.end(`ok \${bindingNonce}\\n`);
     } catch {
       client.end("refused\\n");
     }
   });
 });
 doorbell.on("error", () => { listening = false; });
-export default function (omp: any) {
+export default function (omp: OmpLifecycle) {
   ompApi = omp;
-  if (!listening && removeStaleDoorbell()) {
-    doorbell.listen(doorbellPath, () => { listening = true; });
+  if (!listening) {
+    try {
+      if (lstatSync(doorbellPath).isSocket()) return;
+    } catch (error: unknown) {
+      if (!errorHasCode(error, "ENOENT")) return;
+    }
+    doorbell.listen(doorbellPath, () => {
+      if (!publishBinding()) {
+        doorbell.close(() => { try { unlinkSync(doorbellPath); } catch {} });
+        return;
+      }
+      listening = true;
+    });
   }
   omp.on("session_start", () => execFile("touch", ["$OMP_READY"]));
   omp.on("turn_start", () => execFile("touch", ["$OMP_STARTED"]));
@@ -3622,6 +3661,9 @@ META_WINDOW=$T
     echo "omp_bin=$OMP_BIN_CANON"
     echo "omp_bun=$OMP_BUN_CANON"
     echo "omp_doorbell_socket=$OMP_DOORBELL"
+    echo "omp_doorbell_binding=$OMP_DOORBELL_BINDING"
+    echo "omp_doorbell_nonce=$OMP_DOORBELL_NONCE"
+    echo "omp_doorbell_tasktmp_identity=$OMP_DOORBELL_TASKTMP_IDENTITY"
   fi
   if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
     echo "hermes_bin=$HERMES_BIN"
