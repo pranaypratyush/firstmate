@@ -738,6 +738,20 @@ if [ "${1:-}" = "--key" ]; then
   fi
   fm_send_record_interrupt "$2" || exit 1
 else
+  if [ "$TARGET_BACKEND" = remote ]; then
+    REMOTE_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
+    fm_task_inbox_lock_acquire "$REMOTE_META_LOCK" || {
+      echo "error: text not sent to remote secondmate $TARGET_REMOTE_ID: parent route could not be locked for final validation" >&2
+      exit 1
+    }
+    if [ ! -f "$TARGET_META" ] \
+      || [ "$(fm_meta_get "$TARGET_META" remote_host)" = "" ] \
+      || [ "$(fm_send_id_from_meta "$TARGET_META")" != "$TARGET_REMOTE_ID" ]; then
+      fm_lock_release "$REMOTE_META_LOCK"
+      echo "error: text not sent to remote secondmate $TARGET_REMOTE_ID: parent route retired or changed during target resolution" >&2
+      exit 1
+    fi
+  fi
   MESSAGE=$*
   RESOLVE_ANSWER_TEXT=$MESSAGE
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
@@ -814,7 +828,7 @@ else
     [ "$send_rc" -eq 255 ] || {
       [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
         && fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
-      echo "error: text not sent to remote secondmate $TARGET_REMOTE_ID; remote inbox delivery failed" >&2
+      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID; remote inbox delivery failed" >&2
       exit 1
     }
     [ -z "$PENDING_REPLY_CORR" ] || fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
@@ -989,6 +1003,8 @@ else
         *) verdict=send-failed ;;
       esac
     fi
+  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$TARGET_OMP_BIN" "$turnstart_setup"); then
+    :
   else
     send_rc=$?
   fi
@@ -1055,6 +1071,10 @@ else
     queued-unconfirmed)
       # The backend transported Enter to busy OMP without a native proof event.
       # Continue through the common delivery-confirmation path.
+      ;;
+    pending)
+      echo "notice: text submission is unconfirmed for $T; the terminal composer is still pending" >&2
+      exit 3
       ;;
     delivered-no-turn)
       # Submission is durable, so pending-reply bookkeeping below still records
