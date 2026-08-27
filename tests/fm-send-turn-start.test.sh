@@ -272,6 +272,7 @@ test_omp_task_send_uses_native_constant_doorbell() {
   printf 'omp_doorbell_socket=%s\nomp_doorbell_binding=%s\nomp_doorbell_nonce=%s\nomp_doorbell_tasktmp_identity=%s\n' \
     "$socket" "$binding" "$nonce" "$identity" >> "$home/state/turn-test.meta"
   printf 'schema=fm-omp-doorbell.v1\npid=4242\ntasktmp_identity=%s\nnonce=%s\n' "$identity" "$nonce" > "$binding"
+  # shellcheck disable=SC2016 # Node template literal must reach node unexpanded.
   SOCKET="$socket" RECEIVED="$received" NONCE="$nonce" node -e '
     const net = require("node:net");
     const server = net.createServer((client) => {

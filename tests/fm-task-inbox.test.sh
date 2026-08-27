@@ -486,6 +486,7 @@ test_omp_ring_sends_only_canonical_doorbell() {
   nonce=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   received="$TMP_ROOT/omp-ring/received"
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "payload must stay in the inbox")
+  # shellcheck disable=SC2016 # Node template literal must reach node unexpanded.
   SOCKET="$socket" RECEIVED="$received" NONCE="$nonce" node -e '
     const net = require("node:net");
     const server = net.createServer((client) => {
