@@ -1721,6 +1721,10 @@ const send = (body) => new Promise((resolve, reject) => {
   client.on("end", () => resolve(response));
   client.end(body);
 });
+if (await send("Firstmate inbox wake\n" + process.env.NONCE + "\n") !== "refused\n") throw new Error("OMP listener accepted before runtime initialization");
+await handlers.get("session_start")?.();
+await handlers.get("turn_start")?.();
+await handlers.get("turn_end")?.();
 if (await send("Firstmate inbox wake\nwrong\n") !== "refused\n") throw new Error("OMP listener accepted a wrong nonce");
 if (await send("Firstmate inbox wake\n" + process.env.NONCE + "\n") !== "ok " + process.env.NONCE + "\n") throw new Error("OMP listener rejected its current nonce");
 if (received.length !== 1 || received[0] !== "Firstmate inbox wake") throw new Error("OMP listener delivered an unexpected message");
@@ -1735,9 +1739,7 @@ liveExtension.default({
 await new Promise((resolve) => setTimeout(resolve, 20));
 if (readFileSync(process.env.BINDING, "utf8") !== liveBinding) throw new Error("OMP live owned listener binding changed");
 if (liveAttempt.length !== 0) throw new Error("OMP live owned listener was replaced");
-await handlers.get("session_start")?.();
-await handlers.get("turn_start")?.();
-await handlers.get("turn_end")?.();
+
 for (let i = 0; i < 50 && (!existsSync(process.env.READY) || !existsSync(process.env.STARTED) || !existsSync(process.env.TURNENDED)); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -1800,6 +1802,7 @@ for (let i = 0; i < 50 && (!existsSync(process.env.SOCKET) || readFileSync(proce
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 if (readFileSync(process.env.BINDING, "utf8") === staleBinding) throw new Error("OMP stale owned socket was not reclaimed");
+await relaunchHandlers.get("session_start")?.();
 if (await send("Firstmate inbox wake\n" + process.env.NONCE + "\n") !== "ok " + process.env.NONCE + "\n") throw new Error("OMP stale owned binding did not relaunch");
 if (relaunched.length !== 1) throw new Error("OMP relaunch did not own the replacement listener");
 await relaunchHandlers.get("session_shutdown")?.();
@@ -1813,21 +1816,24 @@ JS
     command -v omp >/dev/null 2>&1 || fail "FM_OMP_GENERATED_LISTENER_LIVE=1 requires omp"
     live_socket="fm-omp-listener-live-$$-${RANDOM:-0}"
     live_session="omplive"
-    live_profile="$CASE_DIR/real-omp-profile"
     live_sessions="$CASE_DIR/real-omp-sessions"
-    printf -v live_command 'exec %q --no-extensions --no-skills --no-rules --no-tools --no-session --auto-approve --profile %q --session-dir %q -e %q' \
-      "$(command -v omp)" "$live_profile" "$live_sessions" "$HOME_DIR/state/$id.omp-ext.ts"
+    live_log="$CASE_DIR/real-omp.log"
+    rm -f "$HOME_DIR/state/$id.omp-ready"
+    printf -v live_command 'exec %q --no-extensions --no-skills --no-rules --no-tools --auto-approve --session-dir %q -e %q %q >%q 2>&1' \
+      "$(command -v omp)" "$live_sessions" "$HOME_DIR/state/$id.omp-ext.ts" \
+      "Reply only with ready, then wait for further user messages." "$live_log"
     tmux -L "$live_socket" new-session -d -s "$live_session" -c "$WT_DIR" -- bash -lc "$live_command" \
       || fail "real OMP generated listener guard could not launch OMP"
     LIVE_SOCKET="$(sed -n 's/^omp_doorbell_socket=//p' "$HOME_DIR/state/$id.meta")" \
+      LIVE_READY="$HOME_DIR/state/$id.omp-ready" \
       LIVE_NONCE="$(sed -n 's/^omp_doorbell_nonce=//p' "$HOME_DIR/state/$id.meta")" \
       node --input-type=module <<'JS'
 import { connect } from "node:net";
 import { existsSync } from "node:fs";
-for (let i = 0; i < 100 && !existsSync(process.env.LIVE_SOCKET); i += 1) {
+for (let i = 0; i < 100 && (!existsSync(process.env.LIVE_SOCKET) || !existsSync(process.env.LIVE_READY)); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 100));
 }
-if (!existsSync(process.env.LIVE_SOCKET)) throw new Error("real OMP did not publish its generated listener");
+if (!existsSync(process.env.LIVE_SOCKET) || !existsSync(process.env.LIVE_READY)) throw new Error("real OMP did not initialize its generated listener");
 const response = await new Promise((resolve, reject) => {
   const client = connect(process.env.LIVE_SOCKET);
   let body = "";
@@ -1836,11 +1842,16 @@ const response = await new Promise((resolve, reject) => {
   client.on("end", () => resolve(body));
   client.end("Firstmate inbox wake\n" + process.env.LIVE_NONCE + "\n");
 });
-if (response !== "ok " + process.env.LIVE_NONCE + "\n") throw new Error("real OMP rejected the generated listener nonce");
+if (response !== "ok " + process.env.LIVE_NONCE + "\n") throw new Error("real OMP rejected the generated listener nonce: " + JSON.stringify(response));
 JS
     live_rc=$?
+    if [ "$live_rc" -ne 0 ]; then
+      tmux -L "$live_socket" capture-pane -p -t "$live_session" 2>/dev/null | tail -20 >&2 || true
+      [ ! -f "$live_log" ] || tail -20 "$live_log" >&2
+      tmux -L "$live_socket" kill-server 2>/dev/null || true
+      fail "real OMP generated listener guard failed"
+    fi
     tmux -L "$live_socket" kill-server 2>/dev/null || true
-    [ "$live_rc" -eq 0 ] || fail "real OMP generated listener guard failed"
     pass "real OMP loads and serves the generated listener extension"
   fi
   if [ -f "$FM_TEST_OMP_HOLD_PID" ]; then kill "$(cat "$FM_TEST_OMP_HOLD_PID")" 2>/dev/null || true; fi

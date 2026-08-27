@@ -3484,13 +3484,14 @@ const publishBinding = (): boolean => {
     return false;
   }
 };
+let runtimeReady = false;
 const doorbell = createServer({ allowHalfOpen: true }, (client) => {
   let input = "";
   client.on("data", (chunk) => { input += chunk.toString(); });
   client.on("end", async () => {
     const [text, nonce, extra] = input.trimEnd().split("\n");
     if (text !== doorbellText || nonce !== bindingNonce || extra !== undefined
-      || typeof ompApi?.sendUserMessage !== "function") {
+      || !runtimeReady || typeof ompApi?.sendUserMessage !== "function") {
       client.end("refused\\n");
       return;
     }
@@ -3498,6 +3499,7 @@ const doorbell = createServer({ allowHalfOpen: true }, (client) => {
       await Promise.resolve(ompApi.sendUserMessage(doorbellText));
       client.end("ok " + bindingNonce + "\\n");
     } catch {
+      console.error("Firstmate OMP doorbell delivery failed");
       client.end("refused\\n");
     }
   });
@@ -3511,10 +3513,14 @@ doorbell.on("error", (error: unknown) => {
 export default function (omp: OmpLifecycle) {
   ompApi = omp;
   if (!listening) void initializeDoorbell();
-  omp.on("session_start", () => execFile("touch", ["$OMP_READY"]));
+  omp.on("session_start", () => {
+    runtimeReady = true;
+    execFile("touch", ["$OMP_READY"]);
+  });
   omp.on("turn_start", () => execFile("touch", ["$OMP_STARTED"]));
   omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
   omp.on("session_shutdown", () => {
+    runtimeReady = false;
     listening = false;
     doorbell.close();
   });
