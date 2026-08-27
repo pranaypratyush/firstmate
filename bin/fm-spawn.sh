@@ -3403,9 +3403,9 @@ const publishBinding = (): boolean => {
   let temporary = "";
   try {
     const tasktmp = statSync(doorbellPath.slice(0, doorbellPath.lastIndexOf("/")));
-    if (`\${tasktmp.dev}:\${tasktmp.ino}` !== tasktmpIdentity) return false;
-    temporary = `\${bindingPath}.\${process.pid}.\${Date.now()}`;
-    writeFileSync(temporary, `schema=fm-omp-doorbell.v1\npid=\${process.pid}\ntasktmp_identity=\${tasktmpIdentity}\nnonce=\${bindingNonce}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    if (String(tasktmp.dev) + ":" + String(tasktmp.ino) !== tasktmpIdentity) return false;
+    temporary = bindingPath + "." + String(process.pid) + "." + String(Date.now());
+    writeFileSync(temporary, "schema=fm-omp-doorbell.v1\npid=" + String(process.pid) + "\ntasktmp_identity=" + tasktmpIdentity + "\nnonce=" + bindingNonce + "\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
     linkSync(temporary, bindingPath);
     unlinkSync(temporary);
     return true;
@@ -3428,7 +3428,7 @@ const doorbell = createServer((client) => {
     }
     try {
       await Promise.resolve(ompApi.sendUserMessage(doorbellText));
-      client.end(`ok \${bindingNonce}\\n`);
+      client.end("ok " + bindingNonce + "\\n");
     } catch {
       client.end("refused\\n");
     }
