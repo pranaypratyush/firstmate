@@ -135,6 +135,14 @@ test_write_is_durable_and_exact() {
   printf '%s' "$text" > "$expected"
   inbox_lib "$state" fm_task_inbox_body "$rec" > "$actual" \
     || fail "record body could not be read"
+  header=$(sed -n '1,3p' "$rec")
+  case "$header" in
+    schema=fm-task-inbox.v1$'\n'at=*$'\n--') : ;;
+    *) fail "record did not preserve the schema and timestamp delimiter" ;;
+  esac
+  sed '1,3d' "$rec" > "$state/raw.body"
+  cmp -s "$expected" "$state/raw.body" \
+    || fail "record did not preserve the serialized body bytes"
   cmp -s "$expected" "$actual" \
     || fail "record body did not preserve trailing and blank-line bytes"
   rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "no trailing newline") \
