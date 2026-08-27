@@ -87,6 +87,10 @@ EOF
               printf 'window=unrelated:retry\n' > "$FM_FAKE_OMP_META_TAMPER"
             fi
           fi
+            if [ "${FM_FAKE_OMP_HOLD:-0}" = 1 ]; then
+              grep -F 'FM_OMP_HARNESS=omp' "$FM_FAKE_LAUNCH_LOG" | tail -1 | bash >/dev/null 2>&1 &
+              printf '%s\n' "$!" > "$FM_FAKE_OMP_HOLD_PID"
+            fi
           ;;
       esac
     fi
@@ -294,7 +298,7 @@ case "${1:-}" in
       printf '%s\n' '{"models":[{"provider":"openai-codex","id":"gpt-5.6-terra","selector":"openai-codex/gpt-5.6-terra","thinking":["low","medium","high","xhigh","max"]},{"provider":"openai-codex","id":"gpt-5.6-luna","selector":"openai-codex/gpt-5.6-luna","thinking":["low","medium","high","xhigh","max"]}]}'
     fi
     ;;
-  *) exit 0 ;;
+  *) [ "${FM_FAKE_OMP_HOLD:-0}" != 1 ] || exec sleep 60; exit 0 ;;
 esac
 SH
   chmod +x "$fakebin/omp"
@@ -406,6 +410,7 @@ run_spawn() {
     HOME="${FM_TEST_HOME_OVERRIDE:-$HOME}" IS_SANDBOX="${FM_TEST_IS_SANDBOX:-}" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_OMP_AUTH_BROKER_URL="${FM_TEST_OMP_AUTH_BROKER_URL:-}" \
+    FM_FAKE_OMP_HOLD="${FM_TEST_OMP_HOLD:-0}" FM_FAKE_OMP_HOLD_PID="${FM_TEST_OMP_HOLD_PID:-}" \
     FM_OMP_AUTH_BROKER_TOKEN_FILE="${FM_TEST_OMP_AUTH_BROKER_TOKEN_FILE:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_ENDPOINT_LOG="$endpointlog" \
     FM_FAKE_TREEHOUSE_LOG="$treehouselog" FM_FAKE_OMP_ACK="${FM_TEST_OMP_ACK:-}" \
@@ -429,7 +434,7 @@ run_spawn() {
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
   rc=$?
-  if [ "$rc" -eq 0 ]; then
+  if [ "$rc" -eq 0 ] && [ "${FM_TEST_PRESERVE_TASKTMP:-0}" != 1 ]; then
     for meta in "$home/state"/*.meta; do
       [ -f "$meta" ] || continue
       tasktmp=$(sed -n 's/^tasktmp=//p' "$meta")
@@ -1664,11 +1669,12 @@ test_omp_refuses_unverified_backends_before_endpoint_creation() {
 }
 
 test_omp_scout_uses_external_turn_extension() {
-  local rec id out status
   id=$(profile_id profile-omp-scout-z8p)
   rec=$(make_spawn_case profile-omp-scout omp "$id")
   read_case_record "$rec"
   export FM_TEST_OMP_ACK="$HOME_DIR/state/$id.omp-started"
+  export FM_TEST_OMP_HOLD=1 FM_TEST_OMP_HOLD_PID="$CASE_DIR/$id.hold.pid"
+  export FM_TEST_PRESERVE_TASKTMP=1
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
   status=$?
@@ -1679,12 +1685,42 @@ test_omp_scout_uses_external_turn_extension() {
   rm -f "$HOME_DIR/state/$id.omp-ready" "$HOME_DIR/state/$id.omp-started" "$HOME_DIR/state/$id.turn-ended"
   PLUGIN="$HOME_DIR/state/$id.omp-ext.ts" READY="$HOME_DIR/state/$id.omp-ready" \
     STARTED="$HOME_DIR/state/$id.omp-started" TURNENDED="$HOME_DIR/state/$id.turn-ended" \
+    SOCKET="$(sed -n 's/^omp_doorbell_socket=//p' "$HOME_DIR/state/$id.meta")" \
+    BINDING="$(sed -n 's/^omp_doorbell_binding=//p' "$HOME_DIR/state/$id.meta")" \
+    NONCE="$(sed -n 's/^omp_doorbell_nonce=//p' "$HOME_DIR/state/$id.meta")" \
     node --input-type=module <<'JS'
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { connect } from "node:net";
 import { pathToFileURL } from "node:url";
 const handlers = new Map();
+const received = [];
 const extension = await import(pathToFileURL(process.env.PLUGIN).href);
-extension.default({ on(name, handler) { handlers.set(name, handler); } });
+extension.default({
+  on(name, handler) { handlers.set(name, handler); },
+  sendUserMessage(content) { received.push(content); },
+});
+for (let i = 0; i < 50 && (!existsSync(process.env.SOCKET) || !existsSync(process.env.BINDING)); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!process.env.SOCKET || !process.env.BINDING || !process.env.NONCE) {
+  throw new Error("OMP metadata omitted listener contract: socket=" + process.env.SOCKET + " binding=" + process.env.BINDING + " nonce=" + process.env.NONCE);
+}
+if (!existsSync(process.env.SOCKET) || !existsSync(process.env.BINDING)) {
+  const tasktmp = process.env.SOCKET.slice(0, process.env.SOCKET.lastIndexOf("/"));
+  const metadata = statSync(tasktmp);
+  throw new Error("OMP listener did not publish metadata socket=" + process.env.SOCKET + " binding=" + process.env.BINDING + " tasktmp=" + metadata.dev + ":" + metadata.ino + " mode=" + metadata.mode.toString(8));
+}
+const send = (body) => new Promise((resolve, reject) => {
+  const client = connect(process.env.SOCKET);
+  let response = "";
+  client.on("data", (chunk) => { response += chunk; });
+  client.on("error", reject);
+  client.on("end", () => resolve(response));
+  client.end(body);
+});
+if (await send("Firstmate inbox wake\nwrong\n") !== "refused\n") throw new Error("OMP listener accepted a wrong nonce");
+if (await send("Firstmate inbox wake\n" + process.env.NONCE + "\n") !== "ok " + process.env.NONCE + "\n") throw new Error("OMP listener rejected its current nonce");
+if (received.length !== 1 || received[0] !== "Firstmate inbox wake") throw new Error("OMP listener delivered an unexpected message");
 await handlers.get("session_start")?.();
 await handlers.get("turn_start")?.();
 await handlers.get("turn_end")?.();
@@ -1694,7 +1730,13 @@ for (let i = 0; i < 50 && (!existsSync(process.env.READY) || !existsSync(process
 if (!existsSync(process.env.READY)) throw new Error("OMP session_start did not report readiness");
 if (!existsSync(process.env.STARTED)) throw new Error("OMP turn_start did not acknowledge launch");
 if (!existsSync(process.env.TURNENDED)) throw new Error("OMP turn_end did not publish completion");
+await handlers.get("session_shutdown")?.();
 JS
+  [ "$?" -eq 0 ] || fail "OMP generated listener lifecycle failed"
+  if [ -f "$FM_TEST_OMP_HOLD_PID" ]; then kill "$(cat "$FM_TEST_OMP_HOLD_PID")" 2>/dev/null || true; fi
+  unset FM_TEST_OMP_HOLD FM_TEST_OMP_HOLD_PID
+  rm -rf "/tmp/fm-$id"
+  unset FM_TEST_PRESERVE_TASKTMP
   unset FM_TEST_OMP_ACK
   pass "OMP scouts retain scout semantics and external per-turn notification"
 }

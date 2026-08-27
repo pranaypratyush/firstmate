@@ -3484,7 +3484,7 @@ const publishBinding = (): boolean => {
     return false;
   }
 };
-const doorbell = createServer((client) => {
+const doorbell = createServer({ allowHalfOpen: true }, (client) => {
   let input = "";
   client.on("data", (chunk) => { input += chunk.toString(); });
   client.on("end", async () => {
@@ -3502,7 +3502,12 @@ const doorbell = createServer((client) => {
     }
   });
 });
-doorbell.on("error", () => { listening = false; });
+doorbell.on("error", (error: unknown) => {
+  listening = false;
+  const code = errorHasCode(error, "EADDRINUSE") ? "EADDRINUSE"
+    : errorHasCode(error, "EACCES") ? "EACCES" : "unknown";
+  console.error("Firstmate OMP doorbell listener error: " + code);
+});
 export default function (omp: OmpLifecycle) {
   ompApi = omp;
   if (!listening) void initializeDoorbell();
