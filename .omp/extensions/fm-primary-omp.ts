@@ -202,6 +202,13 @@ export default function (omp: ExtensionAPI) {
     return offer.accepted;
   };
 
+  let watcherNotificationOutstanding = false;
+  let watcherNotificationTurnIndex: number | undefined;
+  let currentTurnIndex = -1;
+  const clearWatcherNotification = (): void => {
+    watcherNotificationOutstanding = false;
+    watcherNotificationTurnIndex = undefined;
+  };
   const watch = createPrimaryWatchCore({
     runtime: "omp",
     runtimeLabel: "OMP",
@@ -215,17 +222,28 @@ export default function (omp: ExtensionAPI) {
     repairToolName: "fm_watch_arm_omp",
     encodeOperationalInput,
     sendFollowUp: async (content) => {
-      // Deliver a custom steer so OMP wakes idle sessions without touching the editable draft.
-      omp.sendMessage(
-        {
-          customType: "firstmate-watcher-wake",
-          content,
-          display: false,
-          attribution: "agent",
-          details: { kind: "watcher", runtime: "omp" },
-        },
-        { deliverAs: "steer", triggerTurn: true },
-      );
+      // One durable wake batch gets one hidden next-turn notification. The
+      // notification remains outstanding until the exact turn that consumes it
+      // starts, so an unrelated/current turn cannot clear coalescing early.
+      if (watcherNotificationOutstanding) return;
+      watcherNotificationOutstanding = true;
+      watcherNotificationTurnIndex = currentTurnIndex + 1;
+      try {
+        omp.sendMessage(
+          {
+            customType: "firstmate-watcher-wake",
+            content,
+            display: false,
+            attribution: "agent",
+            details: { kind: "watcher", runtime: "omp" },
+          },
+          { deliverAs: "nextTurn", triggerTurn: true },
+        );
+      } catch (error) {
+        watcherNotificationOutstanding = false;
+        watcherNotificationTurnIndex = undefined;
+        throw error;
+      }
     },
     offerWakeToBranch,
   });
@@ -236,12 +254,25 @@ export default function (omp: ExtensionAPI) {
   };
 
   omp.on("session_start", (_event, ctx) => {
+    clearWatcherNotification();
+    currentTurnIndex = -1;
     watch.sessionStart();
     publishSecondmateSession(ctx);
     deliverSessionstartNudge();
   });
 
+  omp.on("turn_start", (event) => {
+    const turnIndex = Number((event as { turnIndex?: unknown }).turnIndex);
+    if (!Number.isInteger(turnIndex)) return;
+    currentTurnIndex = turnIndex;
+    if (watcherNotificationOutstanding && watcherNotificationTurnIndex === turnIndex) {
+      clearWatcherNotification();
+    }
+  });
+
   omp.on("session_switch", (event, ctx) => {
+    clearWatcherNotification();
+    currentTurnIndex = -1;
     watch.sessionShutdown();
     watch.sessionStart();
     publishSecondmateSession(ctx);
@@ -298,6 +329,7 @@ export default function (omp: ExtensionAPI) {
   });
 
   omp.on("session_shutdown", () => {
+    clearWatcherNotification();
     watch.sessionShutdown();
   });
 

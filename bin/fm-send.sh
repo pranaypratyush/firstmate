@@ -133,6 +133,8 @@ fi
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 RUNPOD_DELIVERY_LOCK=
 HERMES_DELIVERY_LOCK=
@@ -523,22 +525,7 @@ fi
 
 TARGET_OMP_BUN=
 TARGET_OMP_BIN=
-if [ "$TARGET_HARNESS" = omp ]; then
-  if [ "$TARGET_BACKEND" != remote ]; then
-    if [ -z "$TARGET_META" ] \
-       || ! fm_backend_agent_record_identity "$TARGET_BACKEND" "$T" "$TARGET_META"; then
-      echo "error: OMP target '$RAW_TARGET' lacks a valid task-bound Bun/OMP identity; refusing composer inspection and delivery" >&2
-      exit 1
-    fi
-    TARGET_OMP_STATE=$(fm_backend_agent_state "$TARGET_BACKEND" "$T" "$TARGET_META" 2>/dev/null)
-    if [ "$TARGET_OMP_STATE" != alive ]; then
-      echo "error: OMP target '$RAW_TARGET' does not match a live task-bound Bun/OMP process (state=${TARGET_OMP_STATE:-unreadable}); refusing delivery" >&2
-      exit 1
-    fi
-    TARGET_OMP_BUN=$FM_BACKEND_AGENT_OMP_BUN
-    TARGET_OMP_BIN=$FM_BACKEND_AGENT_OMP_BIN
-  fi
-fi
+TARGET_OMP_DOORBELL_SOCKET=
 
 # Classify a from-firstmate -> secondmate request. Only a task selector resolved
 # through this home's meta whose authoritative kind is secondmate is marked: the
@@ -777,6 +764,116 @@ else
       echo "error: failed to durably prepare pending-reply delivery for $TARGET_TASK_ID" >&2
       exit 1
     fi
+  fi
+  # Task-selector ordinary text uses the canonical durable inbox.  The payload
+  # is never sent through a terminal composer.  Remote records are written by
+  # their host-local owner; local OMP records use only the native constant
+  # doorbell after the record is committed.
+  INBOX_PLANE=0
+  if [ -n "$TARGET_SELECTOR" ] && [ "$TARGET_BACKEND" != remote ]; then
+    case "$RESOLVE_ANSWER_TEXT" in
+      /*) ;;
+      \$*) [ "$TARGET_HARNESS" = codex ] || INBOX_PLANE=1 ;;
+      *) INBOX_PLANE=1 ;;
+    esac
+  fi
+  if [ "$TARGET_BACKEND" = remote ]; then
+    if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh \
+      send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null >/dev/null; then
+      if [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR" || {
+          echo "warning: reply-tracking-degraded (steer delivered, do not resend): inspect $STATE" >&2
+        }
+      fi
+      [ -z "$RESOLVE_KEYS" ] || fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+      exit 0
+    fi
+    send_rc=$?
+    [ "$send_rc" -eq 255 ] || {
+      [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
+        && fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      echo "error: text not sent to remote secondmate $TARGET_REMOTE_ID; remote inbox delivery failed" >&2
+      exit 1
+    }
+    [ -z "$PENDING_REPLY_CORR" ] || fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
+    echo "error: text delivery to remote secondmate $TARGET_REMOTE_ID is unknown; do not resend - same-host reconciliation is required" >&2
+    exit 1
+  fi
+  if [ "$INBOX_PLANE" = 1 ]; then
+    INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
+    fm_task_inbox_lock_acquire "$INBOX_META_LOCK" || {
+      [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
+        && fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      echo "error: steer not sent to $TARGET_TASK_ID: task metadata could not be locked for final inbox validation" >&2
+      exit 1
+    }
+    CURRENT_INBOX_TARGET=$(fm_backend_target_of_meta "$TARGET_META")
+    CURRENT_INBOX_BACKEND=$(fm_backend_of_meta "$TARGET_META")
+    if [ "$CURRENT_INBOX_TARGET" != "$T" ] || [ "$CURRENT_INBOX_BACKEND" != "$TARGET_BACKEND" ]; then
+      fm_lock_release "$INBOX_META_LOCK"
+      [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
+        && fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      echo "error: steer not sent to $TARGET_TASK_ID: the task retired or changed endpoint during target resolution" >&2
+      exit 1
+    fi
+    if [ "$TARGET_HARNESS" = omp ]; then
+      INBOX_TASK_TMP=$(fm_meta_get "$TARGET_META" tasktmp)
+      TARGET_OMP_DOORBELL_SOCKET="/tmp/fm-$TARGET_TASK_ID/omp-doorbell.sock"
+      if [ "$INBOX_TASK_TMP" != "/tmp/fm-$TARGET_TASK_ID" ] \
+        || [ ! -d "$INBOX_TASK_TMP" ] \
+        || [ -L "$INBOX_TASK_TMP" ] \
+        || [ "$(fm_meta_get "$TARGET_META" omp_doorbell_socket)" != "$TARGET_OMP_DOORBELL_SOCKET" ]; then
+        fm_lock_release "$INBOX_META_LOCK"
+        [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
+          && fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+        echo "error: OMP target '$RAW_TARGET' lacks this task's native inbox doorbell binding; nothing was recorded" >&2
+        exit 1
+      fi
+      if ! fm_backend_agent_record_identity "$TARGET_BACKEND" "$T" "$TARGET_META" \
+        || [ "$(fm_backend_agent_state "$TARGET_BACKEND" "$T" "$TARGET_META" 2>/dev/null)" != alive ]; then
+        fm_lock_release "$INBOX_META_LOCK"
+        [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
+          && fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+        echo "error: OMP target '$RAW_TARGET' does not match a live task-bound Bun/OMP process; nothing was recorded" >&2
+        exit 1
+      fi
+      [ -S "$TARGET_OMP_DOORBELL_SOCKET" ] || {
+        fm_lock_release "$INBOX_META_LOCK"
+        [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
+          && fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+        echo "error: OMP target '$RAW_TARGET' has no live native inbox doorbell binding; nothing was recorded" >&2
+        exit 1
+      }
+    fi
+    INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$TARGET_TASK_ID" "$MESSAGE") || {
+      fm_lock_release "$INBOX_META_LOCK"
+      [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
+        && fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      echo "error: steer not sent to $TARGET_TASK_ID: its inbox record could not be written" >&2
+      exit 1
+    }
+    fm_lock_release "$INBOX_META_LOCK"
+    if [ -n "$PENDING_REPLY_CORR" ]; then
+      fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR" ||
+        echo "warning: reply-tracking-degraded (steer delivered, do not resend): durably recorded at $INBOX_RECORD; inspect $STATE" >&2
+    fi
+    [ -z "$RESOLVE_KEYS" ] || fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
+    ring_rc=0
+    if [ "$TARGET_HARNESS" = omp ]; then
+      fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" \
+        "$TARGET_OMP_DOORBELL_SOCKET" || ring_rc=$?
+      if [ "$ring_rc" -ne 0 ]; then
+        echo "error: OMP native inbox doorbell was refused after recording $INBOX_RECORD; do not resend - the watcher will re-ring it" >&2
+        exit 1
+      fi
+    else
+      fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+      case "$ring_rc" in
+        1) echo "notice: doorbell skipped; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+        2) echo "notice: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+      esac
+    fi
+    exit 0
   fi
   if [ "$TARGET_HARNESS" = hermes ]; then
     if [ "$TARGET_BACKEND" = remote ] || [ -z "$TARGET_TASK_ID" ]; then

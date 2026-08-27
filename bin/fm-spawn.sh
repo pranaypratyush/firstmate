@@ -266,6 +266,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -3368,14 +3370,55 @@ EOF
     omp)
       OMP_READY="$STATE_REAL/$ID.omp-ready"
       OMP_STARTED="$STATE_REAL/$ID.omp-started"
+      OMP_DOORBELL="$TASK_TMP/omp-doorbell.sock"
       rm -f "$OMP_READY" "$OMP_STARTED"
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
-// Firstmate OMP launch acknowledgement and turn-end signal; written by fm-spawn.
+// Firstmate OMP lifecycle signal and inbox doorbell; written by fm-spawn.
 import { execFile } from "node:child_process";
+import { lstatSync, unlinkSync } from "node:fs";
+import { createServer } from "node:net";
+const doorbellPath = "$OMP_DOORBELL";
+const doorbellText = "$FM_TASK_INBOX_OMP_DOORBELL";
+let ompApi: any;
+let listening = false;
+const removeStaleDoorbell = (): boolean => {
+  try {
+    if (!lstatSync(doorbellPath).isSocket()) return false;
+    unlinkSync(doorbellPath);
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") return false;
+  }
+  return true;
+};
+const doorbell = createServer((client) => {
+  let input = "";
+  client.on("data", (chunk) => { input += chunk.toString(); });
+  client.on("end", async () => {
+    if (input.trim() !== doorbellText || typeof ompApi?.sendUserMessage !== "function") {
+      client.end("refused\\n");
+      return;
+    }
+    try {
+      await Promise.resolve(ompApi.sendUserMessage(doorbellText));
+      client.end("ok\\n");
+    } catch {
+      client.end("refused\\n");
+    }
+  });
+});
+doorbell.on("error", () => { listening = false; });
 export default function (omp: any) {
+  ompApi = omp;
+  if (!listening && removeStaleDoorbell()) {
+    doorbell.listen(doorbellPath, () => { listening = true; });
+  }
   omp.on("session_start", () => execFile("touch", ["$OMP_READY"]));
   omp.on("turn_start", () => execFile("touch", ["$OMP_STARTED"]));
   omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  omp.on("session_shutdown", () => {
+    listening = false;
+    doorbell.close();
+  });
 }
 EOF
       ;;
@@ -3578,6 +3621,7 @@ META_WINDOW=$T
   if [ "$HARNESS" = omp ]; then
     echo "omp_bin=$OMP_BIN_CANON"
     echo "omp_bun=$OMP_BUN_CANON"
+    echo "omp_doorbell_socket=$OMP_DOORBELL"
   fi
   if [ "$HERMES_LAUNCH_TEMPLATE" -eq 1 ]; then
     echo "hermes_bin=$HERMES_BIN"

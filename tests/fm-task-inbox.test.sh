@@ -444,10 +444,10 @@ test_watcher_surfaces_unwritable_ladder() {
     || { kill "$pid" 2>/dev/null; fail "the watcher silently retried with unwritable ladder bookkeeping"; }
   rings=$(grep -cF 'Firstmate instruction waiting' "$log" || true)
   [ "$rings" = 1 ] || fail "expected one doorbell before the bookkeeping wake, got $rings:"$'\n'"$(cat "$log")"
-  wakes=$(grep -cF 'steering-inbox ladder bookkeeping unwritable' "$state/.wake-queue" || true)
+  wakes=$(grep -cF 'steering-inbox ladder bookkeeping is unwritable' "$state/.wake-queue" || true)
   [ "$wakes" = 1 ] \
     || fail "expected exactly one bookkeeping-unwritable stale wake, got $wakes:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
-  grep -qF "$state/t1.inbox/.ring-state cannot be written" "$state/.wake-queue" \
+  grep -qF "while $rec stays unhandled" "$state/.wake-queue" \
     || fail "the stale wake did not identify the unwritable ladder:"$'\n'"$(cat "$state/.wake-queue")"
   [ -f "$rec" ] || fail "the unhandled record disappeared during bookkeeping failure"
   grep -qF 'stale:' "$out" \
@@ -479,6 +479,48 @@ test_watcher_escalates_once_after_budget() {
   pass "watcher: a spent ring budget emits exactly one ordinary stale wake for recovery"
 }
 
+test_omp_ring_sends_only_canonical_doorbell() {
+  local state rec socket received pid i=0
+  state="$TMP_ROOT/omp-ring/state"; mkdir -p "$state"
+  socket="$TMP_ROOT/omp-ring/doorbell.sock"
+  received="$TMP_ROOT/omp-ring/received"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "payload must stay in the inbox")
+  SOCKET="$socket" RECEIVED="$received" node -e '
+    const net = require("node:net");
+    const server = net.createServer((client) => {
+      let body = "";
+      client.on("data", (chunk) => { body += chunk; });
+      client.on("end", () => { require("node:fs").writeFileSync(process.env.RECEIVED, body); client.end("ok\n"); server.close(); });
+    });
+    server.listen(process.env.SOCKET);
+  ' &
+  pid=$!
+  while [ ! -S "$socket" ] && [ "$i" -lt 100 ]; do sleep 0.02; i=$((i + 1)); done
+  [ -S "$socket" ] || { kill "$pid" 2>/dev/null; fail "OMP doorbell fixture did not listen"; }
+  inbox_lib "$state" fm_task_inbox_ring tmux test "$rec" "" "$socket" \
+    || fail "OMP native doorbell was not accepted"
+  wait "$pid"
+  [ "$(cat "$received")" = "Firstmate inbox wake" ] \
+    || fail "OMP native ring sent payload or a noncanonical doorbell: $(cat "$received")"
+  [ "$(inbox_lib "$state" fm_task_inbox_body "$rec")" = "payload must stay in the inbox" ] \
+    || fail "OMP native ring changed the durable payload"
+  pass "task inbox: OMP receives only the canonical doorbell while the payload stays durable"
+}
+
+test_meta_lock_path_is_task_specific() {
+  local state got
+  state="$TMP_ROOT/meta-lock/state"; mkdir -p "$state"
+  got=$(inbox_lib "$state" fm_meta_lock_path "$state/t1.meta") \
+    || fail "metadata lock path was not derived"
+  [ "$got" = "$state/.meta-t1.lock" ] \
+    || fail "metadata lock path escaped its task state directory: $got"
+  inbox_lib "$state" fm_meta_lock_path "relative.meta" >/dev/null 2>&1 \
+    && fail "a non-absolute-style metadata path should not receive a lock"
+  [ "$(inbox_lib "$state" fm_task_inbox_omp_doorbell_line)" = "Firstmate inbox wake" ] \
+    || fail "OMP doorbell did not come from the canonical inbox owner"
+  pass "task inbox: the metadata lock and OMP doorbell are task-scoped canonical values"
+}
+
 test_write_is_durable_and_exact
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
@@ -486,6 +528,8 @@ test_handled_mv_dedups_by_sequence
 test_concurrent_writers_never_clobber
 test_ladder_writes_ignore_vanished_inbox
 test_ring_ladder_policy
+test_meta_lock_path_is_task_specific
+test_omp_ring_sends_only_canonical_doorbell
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox

@@ -102,6 +102,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-runpod-lib.sh
 . "$SCRIPT_DIR/fm-runpod-lib.sh"
 
@@ -279,6 +281,58 @@ window_label() {
   local w=$1 task
   task=$(window_to_task "$w" "$STATE")
   [ -n "$task" ] && printf 'fm-%s' "$task"
+}
+
+# Re-ring an unacknowledged inbox record without using terminal state as proof
+# of acknowledgement. OMP records use the task extension's native constant
+# doorbell; all other local backends use the canonical terminal doorbell.
+inbox_steer_check() {  # <window> <task>
+  local w=$1 task=$2 action verb rec count tail40 reason ring_rc meta socket
+  action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
+  verb=${action%% *}
+  [ "$verb" != quiet ] || return 0
+  rec=${action#* }
+  count=
+  case "$verb" in
+    escalate) count=${rec##* }; rec=${rec% *} ;;
+  esac
+  tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
+  window_is_busy "$w" "$tail40" && return 0
+  case "$verb" in
+    ring)
+      ring_rc=0
+      meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+      socket=
+      if [ "$(window_harness "$w")" = omp ]; then
+        socket="/tmp/fm-$task/omp-doorbell.sock"
+        if [ -n "$meta" ] \
+          && [ "$(fm_meta_get "$meta" tasktmp)" = "/tmp/fm-$task" ] \
+          && [ "$(fm_meta_get "$meta" omp_doorbell_socket)" = "$socket" ] \
+          && [ ! -L "/tmp/fm-$task" ] \
+          && [ -S "$socket" ]; then
+          fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" "$socket" || ring_rc=$?
+        else
+          ring_rc=2
+        fi
+      else
+        fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      fi
+      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
+        [ ! -f "$rec" ] && { fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true; return 0; }
+        reason="stale: $w (steering-inbox ladder bookkeeping is unwritable while $rec stays unhandled; inspect the inbox directory)"
+        fm_wake_append stale "$w" "$reason" || exit 1
+        wake "$reason"
+      fi
+      triage_log "steer-inbox delivery attempt: $task ${rec##*/} result=$ring_rc"
+      ;;
+    escalate)
+      reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
+      [ -d "${rec%/*}" ] && [ -f "$rec" ] || { fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true; return 0; }
+      fm_wake_append stale "$w" "$reason" || exit 1
+      fm_task_inbox_record_escalated "$STATE" "$task" "$rec" || exit 1
+      wake "$reason"
+      ;;
+  esac
 }
 
 recorded_windows() {
@@ -1118,6 +1172,7 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}

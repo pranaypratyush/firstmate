@@ -419,6 +419,12 @@ if [ ! -e "$state/watch-trigger-consumed" ]; then
   printf 'signal: omp-actionable\n'
   exit 0
 fi
+if [ "$count" -eq 2 ]; then
+  while [ ! -e "$state/watch-second-trigger" ]; do sleep 0.02; done
+  mv "$state/watch-second-trigger" "$state/watch-second-trigger-consumed"
+  printf 'signal: omp-actionable-second\n'
+  exit 0
+fi
 while :; do sleep 1; done
 SH
   cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
@@ -511,6 +517,7 @@ if (resumeStartup?.message?.customType !== "firstmate-sessionstart-nudge" || res
 if (await handlers.get("before_agent_start")({ type: "before_agent_start" }, {}) !== undefined) {
   throw new Error("in-process OMP /resume repeated its startup instruction");
 }
+await handlers.get("turn_start")({ type: "turn_start", turnIndex: 10, timestamp: Date.now() });
 
 const signal = new AbortController().signal;
 const stop = await handlers.get("session_stop")({
@@ -568,14 +575,26 @@ if (watcherMessages.length !== 1 || !watcherMessages[0].message.content.includes
 }
 if (
   watcherMessages[0].message.customType !== "firstmate-watcher-wake" ||
-  watcherMessages[0].options?.deliverAs !== "steer" ||
+  watcherMessages[0].options?.deliverAs !== "nextTurn" ||
   watcherMessages[0].options?.triggerTurn !== true
 ) {
-  throw new Error(`OMP watcher notification did not preserve the editable draft delivery mode: ${JSON.stringify(watcherMessages[0])}`);
+  throw new Error(`OMP watcher notification did not use hidden next-turn delivery: ${JSON.stringify(watcherMessages[0])}`);
 }
 if (!existsSync(`${process.env.FM_STATE_OVERRIDE}/watch-successor-ready`)) {
   throw new Error("OMP actionable notification arrived before successor readiness");
 }
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/watch-second-trigger`, "go\n");
+for (let i = 0; i < 100 && !existsSync(`${process.env.FM_STATE_OVERRIDE}/watch-second-trigger-consumed`); i += 1) {
+  await new Promise(resolve => setTimeout(resolve, 20));
+}
+if (!existsSync(`${process.env.FM_STATE_OVERRIDE}/watch-second-trigger-consumed`)) {
+  throw new Error("OMP second actionable close was not observed");
+}
+await handlers.get("turn_start")({ type: "turn_start", turnIndex: 10, timestamp: Date.now() });
+if (watcherMessages.length !== 1) {
+  throw new Error(`an unrelated current turn cleared next-turn coalescing: ${JSON.stringify(watcherMessages)}`);
+}
+await handlers.get("turn_start")({ type: "turn_start", turnIndex: 11, timestamp: Date.now() });
 await handlers.get("session_shutdown")({ type: "session_shutdown" }, {});
 await new Promise(resolve => setTimeout(resolve, 80));
 console.log(JSON.stringify({ startupMessages: 3, guarded: true, tools: tools.size, watcherMessages: watcherMessages.length, customMessages: customMessages.length }));
@@ -789,8 +808,8 @@ const rows = armRows();
 const arms = rows.filter((row) => row.startsWith("arm="));
 if (arms.length !== 2) throw new Error(`expected one successor arm, got ${arms.length}: ${rows.join(" | ")}`);
 if (steers !== 1) throw new Error(`expected exactly one wake steer, got ${steers}`);
-if (deliveryOptions?.deliverAs !== "steer" || deliveryOptions?.triggerTurn !== true) {
-  throw new Error(`wake was not delivered as a turn-triggering steer: ${JSON.stringify(deliveryOptions)}`);
+if (deliveryOptions?.deliverAs !== "nextTurn" || deliveryOptions?.triggerTurn !== true) {
+  throw new Error(`wake was not delivered as a hidden turn-triggering next-turn message: ${JSON.stringify(deliveryOptions)}`);
 }
 if (rowsAtDelivery !== 2) throw new Error(`wake delivery began before successor establishment (${rowsAtDelivery} arm rows)`);
 const confirmations = rows.filter((row) => row.startsWith("confirmed "));

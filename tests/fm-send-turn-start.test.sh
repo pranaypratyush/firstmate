@@ -127,7 +127,7 @@ run_case() {  # <mode> <home> <fakebin> <bun> <omp> <log> <entered> [fm-send arg
   local -a command
   shift 7
   [ $# -gt 0 ] || set -- 'steer now'
-  command=("$SEND" turn-test "$@")
+  command=("$SEND" "${FM_TEST_TARGET:-test:fm-turn-test}" "$@")
   if [ -n "${FM_TEST_COMMAND_TIMEOUT:-}" ]; then
     # shellcheck disable=SC2016 # Single quotes are deliberate: Perl expands its own variables.
     command=(perl -e '$SIG{ALRM}=sub{exit 124}; alarm shift; exec @ARGV' \
@@ -241,19 +241,55 @@ test_turn_start_keeps_normal_success() {
   pass "fm-send: a real OMP turn start preserves normal success"
 }
 
-test_no_turn_does_not_close_answered_decision() {
+test_inbox_refusal_does_not_close_answered_decision() {
   local home fb bun omp log entered rc status
-  IFS=$'\t' read -r home fb bun omp log entered < <(setup_case answer-wedge omp)
+  IFS=$'\t' read -r home fb bun omp log entered < <(setup_case answer-refusal omp)
   printf 'blocked [key=turn-answer]: waiting for a steer\n' > "$home/state/turn-test.status"
-  run_case wedge "$home" "$fb" "$bun" "$omp" "$log" "$entered" \
-    --resolve-key turn-answer 'use this answer' >/dev/null 2>&1; rc=$?
-  expect_code 4 "$rc" "a delivered answer with no receiving turn should retain the no-turn verdict"
+  FM_TEST_TARGET=turn-test \
+    run_case wedge "$home" "$fb" "$bun" "$omp" "$log" "$entered" \
+      --resolve-key turn-answer 'use this answer' >/dev/null 2>&1
+  rc=$?
+  expect_code 1 "$rc" "an OMP inbox binding refusal should retain the answer"
   status=$(cat "$home/state/turn-test.status")
   assert_not_contains "$status" 'resolved [key=turn-answer]:' \
-    "a submitted answer closed its decision before OMP started a turn"
-  assert_contains "$status" 'failed: delivered-no-turn:' \
-    "an answered decision with no receiving turn lost its recovery marker"
-  pass "fm-send: delivered-no-turn never closes an answered decision"
+    "an undelivered inbox answer closed its decision"
+  assert_not_contains "$status" 'failed: delivered-no-turn:' \
+    "an inbox binding refusal claimed terminal delivery"
+  pass "fm-send: an OMP inbox refusal never closes an unanswered decision"
+}
+
+test_omp_task_send_uses_native_constant_doorbell() {
+  local home fb bun omp log entered rc socket received pid i=0 body
+  IFS=$'\t' read -r home fb bun omp log entered < <(setup_case native-inbox omp)
+  socket=/tmp/fm-turn-test/omp-doorbell.sock
+  received="$TMP_ROOT/native-inbox-doorbell"
+  mkdir -p /tmp/fm-turn-test
+  perl -pi -e 's{^tasktmp=.*}{tasktmp=/tmp/fm-turn-test}' "$home/state/turn-test.meta"
+  printf 'omp_doorbell_socket=%s\n' "$socket" >> "$home/state/turn-test.meta"
+  SOCKET="$socket" RECEIVED="$received" node -e '
+    const net = require("node:net");
+    const server = net.createServer((client) => {
+      let body = "";
+      client.on("data", (chunk) => { body += chunk; });
+      client.on("end", () => { require("node:fs").writeFileSync(process.env.RECEIVED, body); client.end("ok\n"); server.close(); });
+    });
+    server.listen(process.env.SOCKET);
+  ' &
+  pid=$!
+  while [ ! -S "$socket" ] && [ "$i" -lt 100 ]; do sleep 0.02; i=$((i + 1)); done
+  [ -S "$socket" ] || { kill "$pid" 2>/dev/null; fail "OMP task doorbell fixture did not listen"; }
+  FM_TEST_TARGET=turn-test \
+    run_case wedge "$home" "$fb" "$bun" "$omp" "$log" "$entered" 'payload stays durable'
+  rc=$?
+  wait "$pid"
+  rm -f "$socket"; rmdir /tmp/fm-turn-test 2>/dev/null || true
+  expect_code 0 "$rc" "a task-bound OMP inbox send should enqueue and ring natively"
+  body=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$home/state/turn-test.inbox/001.msg")
+  [ "$body" = 'payload stays durable' ] || fail "OMP inbox changed the payload: $body"
+  [ "$(cat "$received")" = 'Firstmate inbox wake' ] \
+    || fail "OMP task send did not ring only the canonical doorbell: $(cat "$received")"
+  [ ! -s "$log" ] || fail "OMP task send mutated the terminal: $(cat "$log")"
+  pass "fm-send: task-bound OMP delivery keeps the payload durable and rings only the native doorbell"
 }
 
 test_turn_activity_advance_keeps_fast_success() {
@@ -356,9 +392,12 @@ fm_backend_meta_exact_value() {
 fm_meta_get() {
   sed -n "s/^$2=//p" "$1" | tail -1
 }
+fm_backend_composer_state() { printf 'empty'; }
+fm_backend_send_text_submit() { printf 'empty'; }
 SH
   : > "$root/bin/fm-pending-reply-lib.sh"
   : > "$root/bin/fm-quota-axi-lib.sh"
+  cp "$ROOT/bin/fm-task-inbox-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$root/bin/"
   cat > "$root/bin/fm-send.sh" <<'SH'
 #!/usr/bin/env bash
 case "$2" in
@@ -388,7 +427,7 @@ SH
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     "$root/bin/fm-remote-secondmate-control.sh" send remote-turn 'remote steer' >/dev/null 2>&1
   rc=$?
-  expect_code 4 "$rc" "remote control should preserve the host-local OMP no-turn verdict"
+  expect_code 0 "$rc" "remote control should enqueue through its host-local inbox"
   perl -pi -e 's/^harness=omp$/harness=codex/' "$home/state/parent-route/remote-turn.meta"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     "$root/bin/fm-remote-secondmate-control.sh" send remote-turn 'non-OMP steer' >/dev/null 2>&1
@@ -462,7 +501,7 @@ SH
     FM_TEST_HERDR_ENTERED="$entered" FM_TEST_HERDR_WORKING_READ="$reads" \
     FM_TEST_HERDR_SESSION="$session" FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 \
     FM_SEND_SETTLE=0 FM_SEND_TURNSTART_TIMEOUT=0.1 FM_SEND_TURNSTART_POLL=0.02 \
-    "$SEND" herdr-turn 'remote coarse check' >/dev/null 2>&1
+    "$SEND" fm-remote:w1:p1 'remote coarse check' >/dev/null 2>&1
   rc=$?
   expect_code 4 "$rc" "a confirmed Herdr submit without post-submit turn proof should be delivered-no-turn"
   pass "fm-send: Herdr empty still requires post-submit OMP turn proof"
@@ -478,7 +517,7 @@ SH
     FM_TEST_HERDR_EVENT=message FM_TEST_HERDR_TEXT='busy steer' \
     FM_SEND_RETRIES=1 FM_SEND_SLEEP=0 FM_SEND_SETTLE=0 \
     FM_SEND_TURNSTART_TIMEOUT=invalid FM_SEND_TURNSTART_POLL=0.02 \
-    "$SEND" herdr-turn 'busy steer' >/dev/null 2>&1
+    "$SEND" fm-remote:w1:p1 'busy steer' >/dev/null 2>&1
   rc=$?
   expect_code 0 "$rc" "a confirmed already-busy Herdr steer should skip idle turn-start verification"
 
@@ -496,19 +535,20 @@ SH
     FM_SEND_TURNSTART_TIMEOUT=invalid FM_SEND_TURNSTART_POLL=0.02 \
     "$SEND" herdr-turn --resolve-key herdr-answer 'blocked answer' >/dev/null 2>&1
   rc=$?
-  expect_code 0 "$rc" "a confirmed blocked Herdr answer should skip idle turn-start verification"
-  assert_contains "$(cat "$home/state/herdr-turn.status")" \
+  expect_code 1 "$rc" "a missing OMP inbox binding should refuse a blocked answer"
+  assert_not_contains "$(cat "$home/state/herdr-turn.status")" \
     'resolved [key=herdr-answer]: answered: blocked answer' \
-    "the confirmed blocked Herdr answer did not close its decision"
-  pass "fm-send: busy and blocked Herdr ignore idle-only setup"
+    "an undelivered blocked answer closed its decision"
+  pass "fm-send: blocked Herdr inbox refusal leaves its decision open"
 }
 
 test_confirmed_submit_without_turn_is_distinct_and_wakes_recovery
 test_recovery_marker_failure_is_distinct_and_no_resend
 test_recovery_wake_failure_is_distinct_and_no_resend
 test_recovery_wake_lock_failure_is_bounded
+test_omp_task_send_uses_native_constant_doorbell
 test_turn_start_keeps_normal_success
-test_no_turn_does_not_close_answered_decision
+test_inbox_refusal_does_not_close_answered_decision
 test_turn_activity_advance_keeps_fast_success
 test_pre_submit_activity_does_not_prove_new_turn
 test_busy_queued_enter_remains_success

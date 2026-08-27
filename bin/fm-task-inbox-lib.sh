@@ -92,6 +92,19 @@ fm_task_inbox_dir() {  # <state-dir> <task-id>
   printf '%s/%s.inbox' "$1" "$2"
 }
 
+# Serialize a final endpoint check against the task metadata writer. The lock
+# lives beside the metadata, with a task-specific hidden name shared by local
+# and remote inbox senders.
+fm_meta_lock_path() {  # <meta-file>
+  local meta=$1 dir base
+  case "$meta" in
+    */*.meta) dir=${meta%/*}; base=${meta##*/}; base=${base%.meta} ;;
+    *) return 1 ;;
+  esac
+  [ -n "$dir" ] && [ -n "$base" ] || return 1
+  printf '%s/.meta-%s.lock' "$dir" "$base"
+}
+
 fm_task_inbox_handled_dir() {  # <state-dir> <task-id>
   printf '%s/%s.inbox/handled' "$1" "$2"
 }
@@ -248,6 +261,14 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$abs" "$abs"
 }
 
+# OMP receives this fixed text through its native user-message API.  The
+# payload remains exclusively in the task inbox; this value is only a wake.
+FM_TASK_INBOX_OMP_DOORBELL='Firstmate inbox wake'
+
+fm_task_inbox_omp_doorbell_line() {
+  printf '%s' "$FM_TASK_INBOX_OMP_DOORBELL"
+}
+
 # Ring the doorbell, best-effort: one advisory composer pre-check, then the
 # backend's submit machinery with a minimal retry budget, verdict discarded.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
@@ -259,8 +280,40 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
-fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [omp-socket]
+  local backend=$1 target=$2 rec=$3 label=${4:-} native_socket=${5:-}
+  local line cstate verdict
+  if [ -n "$native_socket" ]; then
+    [ "$backend" = tmux ] || [ "$backend" = herdr ] || return 2
+    [ -S "$native_socket" ] || return 2
+    command -v node >/dev/null 2>&1 || return 2
+    node - "$native_socket" "$(fm_task_inbox_omp_doorbell_line)" <<'NODE'
+const net = require("node:net");
+const socketPath = process.argv[2];
+const doorbell = process.argv[3];
+let accepted = false;
+let settled = false;
+const socket = net.createConnection(socketPath);
+const finish = (code) => {
+  if (settled) return;
+  settled = true;
+  clearTimeout(timer);
+  socket.destroy();
+  process.exit(code);
+};
+const timer = setTimeout(() => finish(1), 3000);
+socket.on("connect", () => socket.end(`${doorbell}\n`));
+socket.on("data", (chunk) => {
+  if (chunk.toString().split(/\r?\n/).includes("ok")) {
+    accepted = true;
+    finish(0);
+  }
+});
+socket.on("error", () => finish(1));
+socket.on("close", () => finish(accepted ? 0 : 1));
+NODE
+    return $?
+  fi
   line=$(fm_task_inbox_doorbell_line "$rec")
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
