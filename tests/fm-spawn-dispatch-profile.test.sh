@@ -1689,7 +1689,7 @@ test_omp_scout_uses_external_turn_extension() {
     BINDING="$(sed -n 's/^omp_doorbell_binding=//p' "$HOME_DIR/state/$id.meta")" \
     NONCE="$(sed -n 's/^omp_doorbell_nonce=//p' "$HOME_DIR/state/$id.meta")" \
     node --input-type=module <<'JS'
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { pathToFileURL } from "node:url";
 const handlers = new Map();
@@ -1731,6 +1731,26 @@ if (!existsSync(process.env.READY)) throw new Error("OMP session_start did not r
 if (!existsSync(process.env.STARTED)) throw new Error("OMP turn_start did not acknowledge launch");
 if (!existsSync(process.env.TURNENDED)) throw new Error("OMP turn_end did not publish completion");
 await handlers.get("session_shutdown")?.();
+for (let i = 0; i < 50 && existsSync(process.env.SOCKET); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (existsSync(process.env.SOCKET)) throw new Error("OMP shutdown left a live socket");
+const tasktmp = process.env.SOCKET.slice(0, process.env.SOCKET.lastIndexOf("/"));
+const identity = statSync(tasktmp);
+writeFileSync(process.env.BINDING, "schema=fm-omp-doorbell.v1\npid=999999\ntasktmp_identity=" + identity.dev + ":" + identity.ino + "\nnonce=dead\n");
+const relaunchHandlers = new Map();
+const relaunched = [];
+const relaunchedExtension = await import(pathToFileURL(process.env.PLUGIN).href + "?relaunch");
+relaunchedExtension.default({
+  on(name, handler) { relaunchHandlers.set(name, handler); },
+  sendUserMessage(content) { relaunched.push(content); },
+});
+for (let i = 0; i < 50 && (!existsSync(process.env.SOCKET) || !existsSync(process.env.BINDING)); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (await send("Firstmate inbox wake\n" + process.env.NONCE + "\n") !== "ok " + process.env.NONCE + "\n") throw new Error("OMP stale owned binding did not relaunch");
+if (relaunched.length !== 1) throw new Error("OMP relaunch did not own the replacement listener");
+await relaunchHandlers.get("session_shutdown")?.();
 JS
   [ "$?" -eq 0 ] || fail "OMP generated listener lifecycle failed"
   if [ -f "$FM_TEST_OMP_HOLD_PID" ]; then kill "$(cat "$FM_TEST_OMP_HOLD_PID")" 2>/dev/null || true; fi
