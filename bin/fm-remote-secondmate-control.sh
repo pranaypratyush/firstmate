@@ -4,11 +4,15 @@
 # Usage:
 #   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
 #   fm-remote-secondmate-control.sh state <id>
+#   fm-remote-secondmate-control.sh beacon-age <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message>
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
+#   fm-remote-secondmate-control.sh children <id>
+#   fm-remote-secondmate-control.sh sleep-reconcile <id>
+#   fm-remote-secondmate-control.sh runpod-crews <id>
 #   fm-remote-secondmate-control.sh sync <id>
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
@@ -44,6 +48,8 @@ REMOTE_HERDR_SESSION=fm-remote
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh
+. "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
@@ -109,17 +115,41 @@ state_value() { # <id>; prints recovery-grade state
   fi
   fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n'
 }
+beacon_age() {
+  local id=$1 beat mtime now
+  validate_id "$id"
+  validate_home "$id"
+  beat="$TARGET_HOME/state/.last-watcher-beat"
+  [ -f "$beat" ] && [ ! -L "$beat" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    mtime=$(stat -f %m "$beat" 2>/dev/null) || return 1
+  else
+    mtime=$(stat -c %Y "$beat" 2>/dev/null) || return 1
+  fi
+  now=$(date +%s)
+  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$mtime" -le "$now" ] || return 1
+  printf '%s\n' "$((now - mtime))"
+}
 
-print_route() { # <id>
-  local id=$1 harness traceparent
+print_route() {
+  local id=$1 harness model effort model_source fallback_reason traceparent
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
+  model=$(fm_meta_get "$REMOTE_ENDPOINT_META" model)
+  model_source=$(fm_meta_get "$REMOTE_ENDPOINT_META" secondmate_model_source)
+  fallback_reason=$(fm_meta_get "$REMOTE_ENDPOINT_META" secondmate_fallback_reason)
+  effort=$(fm_meta_get "$REMOTE_ENDPOINT_META" effort)
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
   printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
+  printf 'model=%s\n' "$model"
+  printf 'effort=%s\n' "$effort"
+  [ -z "$model_source" ] || printf 'secondmate_model_source=%s\n' "$model_source"
+  [ -z "$fallback_reason" ] || printf 'secondmate_fallback_reason=%s\n' "$fallback_reason"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
 
@@ -133,21 +163,26 @@ cmd_route() {
   fi
   print_route "$id"
 }
-
 cmd_launch() {
-  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
-  local current meta out herdr_session
-
+  local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=
+  local fallback_harness=- fallback_model=- fallback_effort=- current meta out herdr_session model_source reason tmp
+  if [ "$#" -ge 8 ]; then
+    fallback_harness=$6
+    fallback_model=$7
+    fallback_effort=$8
+    traceparent=${9:-}
+  else
+    traceparent=${6:-}
+  fi
   validate_id "$id"
   validate_home "$id"
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    omp|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
     *) die "unverified remote secondmate harness: $harness" ;;
   esac
   case "$effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate effort: $effort" ;; esac
-  # Herdr is required on this host, not merely preferred: its server belongs to
-  # the GUI login session, so the endpoint survives every SSH disconnection that
-  # a remote route depends on. bin/fm-remote-doctor.sh is the readiness owner.
+  case "$fallback_harness" in -|omp|claude|codex|opencode|pi|pi-signed|grok|kimi) ;; *) die "unverified remote secondmate fallback harness: $fallback_harness" ;; esac
+  case "$fallback_effort" in -|low|medium|high|xhigh|max) ;; *) die "invalid remote secondmate fallback effort: $fallback_effort" ;; esac
   case "$selected_backend" in herdr) ;; *) die "a remote secondmate runs only on the herdr backend, not '$selected_backend'" ;; esac
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
   meta=$(meta_path "$id")
@@ -155,16 +190,25 @@ cmd_launch() {
     remote_endpoint_require "$id"
     current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
     case "$current" in
-      alive)
-        print_route "$id"
-        return 0
-        ;;
-      dead)
-        fm_backend_kill "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
-          || die "could not remove the confirmed agent-less endpoint"
-        ;;
+      alive) print_route "$id"; return 0 ;;
+      dead) fm_backend_kill "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || die "could not remove the confirmed agent-less endpoint" ;;
       missing) ;;
       *) die "remote endpoint state is $current; refusing duplicate launch" ;;
+    esac
+  fi
+  model_source=
+  reason=
+  if [ "$fallback_harness" != - ]; then
+    model_source=primary
+    reason=$(fm_quota_secondmate_fallback_reason "$harness" "${model#-}" || true)
+    case "$reason" in
+      provider_unavailable|quota_exhausted)
+        harness=$fallback_harness
+        model=$fallback_model
+        effort=$fallback_effort
+        model_source=fallback
+        ;;
+      *) reason= ;;
     esac
   fi
   ARGS=("$id" "$TARGET_HOME" --secondmate --harness "$harness" --backend "$selected_backend")
@@ -180,25 +224,42 @@ cmd_launch() {
   fi
   [ -f "$meta" ] || die "remote launch returned without endpoint metadata"
   herdr_session=$(fm_meta_get "$meta" herdr_session)
-  [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] \
-    || die "remote launch recorded Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'"
+  [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] || die "remote launch recorded Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'"
+  if [ -n "$model_source" ]; then
+    tmp="$meta.tmp.$$"
+    awk '$0 !~ /^secondmate_model_source=/ && $0 !~ /^secondmate_fallback_reason=/' "$meta" > "$tmp"
+    printf 'secondmate_model_source=%s\n' "$model_source" >> "$tmp"
+    [ "$model_source" != fallback ] || printf 'secondmate_fallback_reason=%s\n' "$reason" >> "$tmp"
+    mv -f -- "$tmp" "$meta"
+  fi
   print_route "$id"
 }
 
 cmd_send() {
-  local id=$1 message=$2 rec ring_rc=0 meta meta_lock
+  local id=$1 message=$2 rec ring_rc=0 meta meta_lock harness socket nonce tasktmp
   validate_id "$id"
   validate_home "$id"
   meta=$(meta_path "$id")
   meta_lock=$(fm_meta_lock_path "$meta") || die "remote secondmate metadata lock path is invalid"
-  fm_task_inbox_lock_acquire "$meta_lock" \
-    || die "remote secondmate endpoint metadata could not be locked for final delivery validation"
+  fm_task_inbox_lock_acquire "$meta_lock" || die "remote secondmate endpoint metadata could not be locked for final delivery validation"
   if ! remote_endpoint_load "$id"; then
     fm_lock_release "$meta_lock"
     die "$REMOTE_ENDPOINT_ERROR"
   fi
   # A remote steer is delivered by durable record, never by typing its payload
   # into the pane: write it into this secondmate's host-local steering inbox,
+  harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
+  if [ "$harness" = omp ]; then
+    tasktmp=$(fm_meta_get "$REMOTE_ENDPOINT_META" tasktmp)
+    socket=$(fm_meta_get "$REMOTE_ENDPOINT_META" omp_doorbell_socket)
+    nonce=$(fm_meta_get "$REMOTE_ENDPOINT_META" omp_doorbell_nonce)
+    if [ "$tasktmp" != "/tmp/fm-$id" ] || [ "$socket" != "$tasktmp/omp-doorbell.sock" ] \
+      || [ "$(fm_meta_get "$REMOTE_ENDPOINT_META" omp_doorbell_binding)" != "$tasktmp/omp-doorbell.binding" ] \
+      || ! [[ "$nonce" =~ ^[0-9a-f]{64}$ ]]; then
+      fm_lock_release "$meta_lock"
+      die "remote OMP secondmate has no verified task-owned inbox doorbell binding; nothing was recorded"
+    fi
+  fi
   # then ring the constant self-describing doorbell into the recorded pane,
   # best-effort (bin/fm-task-inbox-lib.sh owns the record and doorbell). The
   # write is idempotent - re-running the same request after an ambiguous
@@ -213,13 +274,15 @@ cmd_send() {
   fm_lock_release "$meta_lock"
   case "$rec" in
     */handled/*)
-      # The dedup landed on a record the worker already acknowledged: the
-      # steer was delivered and acted on, so there is nothing to announce.
       printf 'notice: this steer was already delivered and acknowledged at %s; nothing re-rung\n' "$rec" >&2
       return 0
       ;;
   esac
-  fm_task_inbox_ring "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" || ring_rc=$?
+  if [ "$harness" = omp ]; then
+    fm_task_inbox_ring "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" "$socket" "$nonce" || ring_rc=$?
+  else
+    fm_task_inbox_ring "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" || ring_rc=$?
+  fi
   case "$ring_rc" in
     1) printf 'notice: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at %s\n' "$rec" >&2 ;;
     2) printf 'notice: doorbell did not reach %s; the steer is durably recorded at %s\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
@@ -253,6 +316,74 @@ cmd_observe() {
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   fm_pending_reply_backend_observation "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness"
   printf '\n'
+}
+cmd_children() {
+  local id=$1 meta count=0
+  validate_id "$id"
+  validate_home "$id"
+  for meta in "$TARGET_HOME/state"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    count=$((count + 1))
+  done
+  printf 'children=%s\n' "$count"
+}
+
+cmd_sleep_reconcile() {
+  local id=$1 meta child mode kind state reconciled=0
+  validate_id "$id"
+  validate_home "$id"
+  for meta in "$TARGET_HOME/state"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    child=${meta##*/}
+    child=${child%.meta}
+    mode=$(fm_meta_get "$meta" mode)
+    kind=$(fm_meta_get "$meta" kind)
+    [ "$mode" = direct-PR ] && [ "$kind" = ship ] || continue
+    state=$(FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      FM_STATE_OVERRIDE="$TARGET_HOME/state" FM_DATA_OVERRIDE="$TARGET_HOME/data" \
+      FM_CONFIG_OVERRIDE="$TARGET_HOME/config" \
+      "$SCRIPT_DIR/fm-crew-state.sh" "$child" 2>/dev/null || true)
+    case "$state" in 'state: done'|'state: done '*) ;; *) continue ;; esac
+    FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+      FM_STATE_OVERRIDE="$TARGET_HOME/state" FM_DATA_OVERRIDE="$TARGET_HOME/data" \
+      FM_CONFIG_OVERRIDE="$TARGET_HOME/config" \
+      "$SCRIPT_DIR/fm-teardown.sh" "$child" >/dev/null \
+      || die "finished direct-PR child $child could not be torn down safely"
+    reconciled=$((reconciled + 1))
+  done
+  printf 'reconciled=%s\n' "$reconciled"
+}
+
+cmd_runpod_crews() {
+  local id=$1 config harness_tmp fallback_tmp path
+  validate_id "$id"
+  validate_home "$id"
+  config="$TARGET_HOME/config"
+  if [ -e "$config" ] || [ -L "$config" ]; then
+    [ -d "$config" ] && [ ! -L "$config" ] || die "remote config directory is unavailable or unsafe"
+  else
+    mkdir -p "$config" || die "remote config directory could not be created"
+  fi
+  for path in "$config/crew-harness" "$config/crew-harness-fallback" "$config/crew-dispatch.json"; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      [ -f "$path" ] && [ ! -L "$path" ] || die "refusing unsafe RunPod crew-routing path: $path"
+    fi
+  done
+  harness_tmp=$(mktemp "$config/.crew-harness.runpod.XXXXXX") || die "RunPod crew harness could not be staged"
+  fallback_tmp=$(mktemp "$config/.crew-harness-fallback.runpod.XXXXXX") || {
+    rm -f -- "$harness_tmp"
+    die "RunPod crew dispatch could not be staged"
+  }
+  printf 'codex\n' > "$harness_tmp" && printf 'claude\n' > "$fallback_tmp" \
+    || { rm -f -- "$harness_tmp" "$fallback_tmp"; die "RunPod crew routing could not be written"; }
+  chmod 600 "$harness_tmp" "$fallback_tmp" \
+    || { rm -f -- "$harness_tmp" "$fallback_tmp"; die "RunPod crew routing could not be secured"; }
+  mv -f -- "$harness_tmp" "$config/crew-harness" \
+    || { rm -f -- "$harness_tmp" "$fallback_tmp"; die "RunPod crew harness could not be published"; }
+  mv -f -- "$fallback_tmp" "$config/crew-harness-fallback" \
+    || { rm -f -- "$fallback_tmp"; die "RunPod crew fallback could not be published"; }
+  rm -f -- "$config/crew-dispatch.json" || die "RunPod crew dispatch override could not be retired"
+  printf 'runpod-crews: codex default with claude fallback\n'
 }
 
 cmd_sync() {
@@ -324,13 +455,17 @@ cmd_retire() {
 }
 
 case "${1:-}" in
-  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
+  launch) shift; { [ "$#" -ge 5 ] && [ "$#" -le 6 ]; } || { [ "$#" -ge 8 ] && [ "$#" -le 9 ]; } || usage; cmd_launch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
+  beacon-age) shift; [ "$#" -eq 1 ] || usage; beacon_age "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -eq 2 ] || usage; cmd_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
+  children) shift; [ "$#" -eq 1 ] || usage; cmd_children "$@" ;;
+  sleep-reconcile) shift; [ "$#" -eq 1 ] || usage; cmd_sleep_reconcile "$@" ;;
+  runpod-crews) shift; [ "$#" -eq 1 ] || usage; cmd_runpod_crews "$@" ;;
   sync) shift; [ "$#" -eq 1 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;

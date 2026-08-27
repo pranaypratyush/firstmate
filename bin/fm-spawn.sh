@@ -3223,7 +3223,7 @@ exclude_path() {
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
 }
-if [ "$KIND" != secondmate ]; then
+if [ "$KIND" != secondmate ] || [ "$HARNESS" = omp ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
@@ -3458,10 +3458,17 @@ const initializeDoorbell = async (): Promise<void> => {
     startDoorbell();
     return;
   }
-  if (!bindingProvesStaleTaskOwner() || !await socketRefusesConnections()) return;
+  let bindingExists = true;
+  try {
+    lstatSync(bindingPath);
+  } catch (error: unknown) {
+    if (!errorHasCode(error, "ENOENT")) return;
+    bindingExists = false;
+  }
+  if ((bindingExists && !bindingProvesStaleTaskOwner()) || !await socketRefusesConnections()) return;
   try {
     unlinkSync(doorbellPath);
-    unlinkSync(bindingPath);
+    if (bindingExists) unlinkSync(bindingPath);
   } catch {
     return;
   }
