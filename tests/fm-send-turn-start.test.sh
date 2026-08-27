@@ -429,6 +429,10 @@ SH
   fm_write_meta "$home/state/parent-route/remote-turn.meta" \
     'window=fm-remote:w1:p1' 'endpoint_task_id=remote-turn' 'backend=herdr' \
     'worktree=/remote/worktree' 'project=/remote/project' 'harness=omp' \
+    'tasktmp=/tmp/fm-remote-turn' \
+    'omp_doorbell_socket=/tmp/fm-remote-turn/omp-doorbell.sock' \
+    'omp_doorbell_binding=/tmp/fm-remote-turn/omp-doorbell.binding' \
+    'omp_doorbell_nonce=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
     'herdr_session=fm-remote' 'herdr_workspace_id=w1' 'herdr_tab_id=w1:t1' \
     'herdr_pane_id=w1:p1'
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
