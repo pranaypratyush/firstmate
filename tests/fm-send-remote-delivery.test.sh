@@ -448,6 +448,43 @@ test_remote_resolve_key_closes_at_enqueue() {
   pass "fm-send remote: a --resolve-key answer closes its decision at enqueue"
 }
 
+test_remote_ambiguous_resolve_key_resend_preserves_request() {
+  local dir fb ssh_log home rhome rc err pend corr resend_cmd expected_cmd quoted arg
+  dir="$TMP_ROOT/remote-key-ambiguous"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-key-ambiguous)
+  home=$(setup_remote_parent_home remote-key-ambiguous "$rhome")
+  printf 'needs-decision [key=upgrade-window]: tonight or the weekend\n' > "$home/state/rsm.status"
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_FAKE_SSH_AMBIGUOUS=1 \
+    "$SEND" rsm --resolve-key upgrade-window "the weekend, freeze Friday" >"$dir/out" 2>"$dir/err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "an ambiguously delivered remote answer must not claim resolution"
+  if grep -F 'resolved [key=upgrade-window]' "$home/state/rsm.status" >/dev/null; then
+    fail "an ambiguously delivered remote answer closed its decision"
+  fi
+  pend=$(pending_record "$home")
+  corr=$(fm_pending_reply_get "$pend" corr_id)
+  printf -v quoted '%q' "$home"
+  expected_cmd="FM_HOME=$quoted FM_PENDING_REPLY_EXISTING_CORR=$corr"
+  for arg in "$SEND" rsm --resolve-key upgrade-window "the weekend, freeze Friday"; do
+    printf -v quoted '%q' "$arg"
+    expected_cmd="$expected_cmd $quoted"
+  done
+  err=$(cat "$dir/err")
+  assert_contains "$err" "$expected_cmd" \
+    "an ambiguous remote answer must preserve its original selector, decision key, and answer"
+  resend_cmd=$(tail -1 "$dir/err")
+  rc=0
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_SEND_SETTLE=0 \
+    FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" \
+    FM_SSH_COUNT="$ssh_log.count" FM_REMOTE_CODE_ROOT="$ROOT" \
+    bash -c "$resend_cmd" >"$dir/resend.out" 2>"$dir/resend.err" || rc=$?
+  expect_code 0 "$rc" "the printed remote-answer resend must succeed"
+  grep -F 'resolved [key=upgrade-window]: answered: the weekend, freeze Friday' "$home/state/rsm.status" >/dev/null \
+    || fail "the successful resend did not resolve its original decision"
+  pass "fm-send remote: an ambiguous decision answer prints a faithful correlation-reusing resend"
+}
+
 test_remote_slash_rides_inbox() {
   local dir fb ssh_log home rhome rc recs
   dir="$TMP_ROOT/remote-slash"; mkdir -p "$dir"
@@ -623,6 +660,7 @@ test_remote_retry_failure_preserves_ambiguous_expectation
 test_remote_send_revalidates_after_retirement_lock
 test_remote_send_revalidates_parent_route_after_retirement_lock
 test_remote_resolve_key_closes_at_enqueue
+test_remote_ambiguous_resolve_key_resend_preserves_request
 test_remote_slash_rides_inbox
 test_remote_real_failure_still_fails
 test_remote_exit3_no_longer_delivered

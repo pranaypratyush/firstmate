@@ -748,6 +748,9 @@ else
     if [ -n "$existing_corr" ] \
       && fm_pending_reply_corr_reusable "$STATE" "$existing_corr" "$TARGET_TASK_ID"; then
       PENDING_REPLY_CORR=$existing_corr
+    elif [ -n "${FM_PENDING_REPLY_EXISTING_CORR:-}" ]; then
+      echo "error: refusing to mint a replacement correlation for non-reusable explicit correlation $existing_corr" >&2
+      exit 1
     else
       if [ -z "$TARGET_TASK_ID" ]; then
         echo "error: cannot create pending-reply expectation without a resolvable secondmate task id" >&2
@@ -778,8 +781,23 @@ else
     esac
   fi
   if [ "$TARGET_BACKEND" = remote ]; then
-    if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh \
-      send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null >/dev/null; then
+    send_rc=1
+    remote_first_unknown=0
+    for remote_attempt in 1 2; do
+      if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh \
+        send "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null >/dev/null; then
+        send_rc=0
+        break
+      else
+        send_rc=$?
+      fi
+      if [ "$send_rc" -eq 255 ] && [ "$remote_attempt" -eq 1 ]; then
+        remote_first_unknown=1
+        continue
+      fi
+      break
+    done
+    if [ "$send_rc" -eq 0 ]; then
       if [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR" || {
           echo "warning: reply-tracking-degraded (steer delivered, do not resend): inspect $STATE" >&2
@@ -788,7 +806,11 @@ else
       [ -z "$RESOLVE_KEYS" ] || fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       exit 0
     fi
-    send_rc=$?
+    if [ "$remote_first_unknown" = 1 ] && [ "$send_rc" -ne 0 ] && [ "$send_rc" -ne 255 ]; then
+      [ -z "$PENDING_REPLY_CORR" ] || fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
+      echo "error: text not sent to remote secondmate $TARGET_REMOTE_ID; first transport attempt had unknown completion and the idempotent retry failed" >&2
+      exit 1
+    fi
     [ "$send_rc" -eq 255 ] || {
       [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ] \
         && fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
@@ -796,7 +818,12 @@ else
       exit 1
     }
     [ -z "$PENDING_REPLY_CORR" ] || fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
-    echo "error: text delivery to remote secondmate $TARGET_REMOTE_ID is unknown; do not resend - same-host reconciliation is required" >&2
+    echo "error: text delivery to remote secondmate $TARGET_REMOTE_ID is unknown. Only the correlation-reusing resend below is idempotent:" >&2
+    printf 'FM_HOME=%q FM_PENDING_REPLY_EXISTING_CORR=%q' "$(cd "$FM_HOME" && pwd -P)" "$PENDING_REPLY_CORR" >&2
+    printf ' %q %q' "$0" "$RAW_TARGET" >&2
+    for resend_key in $RESOLVE_KEYS; do printf ' --resolve-key %q' "$resend_key" >&2; done
+    printf ' %q' "$RESOLVE_ANSWER_TEXT" >&2
+    printf '\n' >&2
     exit 1
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
@@ -962,8 +989,6 @@ else
         *) verdict=send-failed ;;
       esac
     fi
-  elif verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL" "$TARGET_HARNESS" "$TARGET_OMP_BUN" "$TARGET_OMP_BIN" "$turnstart_setup"); then
-    :
   else
     send_rc=$?
   fi
