@@ -3446,6 +3446,15 @@ const initializeDoorbell = async (): Promise<void> => {
     if (!lstatSync(doorbellPath).isSocket()) return;
   } catch (error: unknown) {
     if (!errorHasCode(error, "ENOENT")) return;
+    try {
+      lstatSync(bindingPath);
+    } catch (bindingError: unknown) {
+      if (!errorHasCode(bindingError, "ENOENT")) return;
+      startDoorbell();
+      return;
+    }
+    if (!bindingProvesStaleTaskOwner()) return;
+    try { unlinkSync(bindingPath); } catch { return; }
     startDoorbell();
     return;
   }
