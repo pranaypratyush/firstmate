@@ -3405,7 +3405,13 @@ const bindingProvesStaleTaskOwner = (): boolean => {
     const values = new Map<string, string>();
     for (const line of readFileSync(bindingPath, "utf8").split("\n")) {
       const separator = line.indexOf("=");
-      if (separator > 0) values.set(line.slice(0, separator), line.slice(separator + 1));
+      if (separator <= 0) {
+        if (line) return false;
+        continue;
+      }
+      const key = line.slice(0, separator);
+      if (values.has(key)) return false;
+      values.set(key, line.slice(separator + 1));
     }
     const pid = values.get("pid") ?? "";
     if (values.size !== 4 || values.get("schema") !== "fm-omp-doorbell.v1"
