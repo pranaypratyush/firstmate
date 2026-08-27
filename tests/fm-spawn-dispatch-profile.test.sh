@@ -1683,7 +1683,7 @@ test_omp_scout_uses_external_turn_extension() {
   assert_grep 'kind=scout' "$HOME_DIR/state/$id.meta" "OMP scout metadata lost delivery semantics"
   assert_present "$HOME_DIR/state/$id.omp-ext.ts" "OMP scout did not receive the external turn extension"
   rm -f "$HOME_DIR/state/$id.omp-ready" "$HOME_DIR/state/$id.omp-started" "$HOME_DIR/state/$id.turn-ended"
-  PLUGIN="$HOME_DIR/state/$id.omp-ext.ts" READY="$HOME_DIR/state/$id.omp-ready" \
+  if ! PLUGIN="$HOME_DIR/state/$id.omp-ext.ts" READY="$HOME_DIR/state/$id.omp-ready" \
     STARTED="$HOME_DIR/state/$id.omp-started" TURNENDED="$HOME_DIR/state/$id.turn-ended" \
     SOCKET="$(sed -n 's/^omp_doorbell_socket=//p' "$HOME_DIR/state/$id.meta")" \
     BINDING="$(sed -n 's/^omp_doorbell_binding=//p' "$HOME_DIR/state/$id.meta")" \
@@ -1807,7 +1807,9 @@ if (await send("Firstmate inbox wake\n" + process.env.NONCE + "\n") !== "ok " + 
 if (relaunched.length !== 1) throw new Error("OMP relaunch did not own the replacement listener");
 await relaunchHandlers.get("session_shutdown")?.();
 JS
-  [ "$?" -eq 0 ] || fail "OMP generated listener lifecycle failed"
+  then
+    fail "OMP generated listener lifecycle failed"
+  fi
   # Opt-in integration guard: load the exact extension emitted above in a real
   # OMP session, then verify its listener accepts the generated nonce.  This
   # requires an installed, authenticated OMP runtime and may send one message.
