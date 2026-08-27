@@ -3383,8 +3383,8 @@ EOF
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate OMP lifecycle signal and inbox doorbell; written by fm-spawn.
 import { execFile } from "node:child_process";
-import { linkSync, lstatSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { linkSync, lstatSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { connect, createServer } from "node:net";
 const doorbellPath = "$OMP_DOORBELL";
 const bindingPath = "$OMP_DOORBELL_BINDING";
 const doorbellText = "$FM_TASK_INBOX_OMP_DOORBELL";
@@ -3399,6 +3399,59 @@ const errorHasCode = (error: unknown, code: string): boolean =>
     && Reflect.get(error, "code") === code;
 let ompApi: OmpLifecycle | undefined;
 let listening = false;
+const bindingProvesStaleTaskOwner = (): boolean => {
+  try {
+    if (lstatSync(bindingPath).isSymbolicLink()) return false;
+    const values = new Map<string, string>();
+    for (const line of readFileSync(bindingPath, "utf8").split("\n")) {
+      const separator = line.indexOf("=");
+      if (separator > 0) values.set(line.slice(0, separator), line.slice(separator + 1));
+    }
+    const pid = values.get("pid") ?? "";
+    if (values.size !== 4 || values.get("schema") !== "fm-omp-doorbell.v1"
+      || values.get("tasktmp_identity") !== tasktmpIdentity
+      || !/^[1-9][0-9]*$/.test(pid) || !(values.get("nonce") ?? "")) return false;
+    try {
+      process.kill(Number(pid), 0);
+      return false;
+    } catch (error: unknown) {
+      return errorHasCode(error, "ESRCH");
+    }
+  } catch {
+    return false;
+  }
+};
+const socketRefusesConnections = (): Promise<boolean> => new Promise((resolve) => {
+  const client = connect(doorbellPath);
+  client.once("connect", () => { client.destroy(); resolve(false); });
+  client.once("error", (error: unknown) => resolve(errorHasCode(error, "ECONNREFUSED")));
+});
+const startDoorbell = (): void => {
+  doorbell.listen(doorbellPath, () => {
+    if (!publishBinding()) {
+      doorbell.close(() => { try { unlinkSync(doorbellPath); } catch {} });
+      return;
+    }
+    listening = true;
+  });
+};
+const initializeDoorbell = async (): Promise<void> => {
+  try {
+    if (!lstatSync(doorbellPath).isSocket()) return;
+  } catch (error: unknown) {
+    if (!errorHasCode(error, "ENOENT")) return;
+    startDoorbell();
+    return;
+  }
+  if (!bindingProvesStaleTaskOwner() || !await socketRefusesConnections()) return;
+  try {
+    unlinkSync(doorbellPath);
+    unlinkSync(bindingPath);
+  } catch {
+    return;
+  }
+  startDoorbell();
+};
 const publishBinding = (): boolean => {
   let temporary = "";
   try {
@@ -3437,20 +3490,7 @@ const doorbell = createServer((client) => {
 doorbell.on("error", () => { listening = false; });
 export default function (omp: OmpLifecycle) {
   ompApi = omp;
-  if (!listening) {
-    try {
-      if (lstatSync(doorbellPath).isSocket()) return;
-    } catch (error: unknown) {
-      if (!errorHasCode(error, "ENOENT")) return;
-    }
-    doorbell.listen(doorbellPath, () => {
-      if (!publishBinding()) {
-        doorbell.close(() => { try { unlinkSync(doorbellPath); } catch {} });
-        return;
-      }
-      listening = true;
-    });
-  }
+  if (!listening) void initializeDoorbell();
   omp.on("session_start", () => execFile("touch", ["$OMP_READY"]));
   omp.on("turn_start", () => execFile("touch", ["$OMP_STARTED"]));
   omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
