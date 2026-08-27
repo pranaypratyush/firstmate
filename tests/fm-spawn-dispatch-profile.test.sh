@@ -1689,12 +1689,15 @@ test_omp_scout_uses_external_turn_extension() {
     BINDING="$(sed -n 's/^omp_doorbell_binding=//p' "$HOME_DIR/state/$id.meta")" \
     NONCE="$(sed -n 's/^omp_doorbell_nonce=//p' "$HOME_DIR/state/$id.meta")" \
     node --input-type=module <<'JS'
-import { existsSync, statSync, writeFileSync } from "node:fs";
-import { connect } from "node:net";
+import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { connect, createServer } from "node:net";
 import { pathToFileURL } from "node:url";
 const handlers = new Map();
 const received = [];
+if (existsSync(process.env.SOCKET) || existsSync(process.env.BINDING)) throw new Error("OMP listener published before lifecycle registration");
 const extension = await import(pathToFileURL(process.env.PLUGIN).href);
+if (existsSync(process.env.SOCKET) || existsSync(process.env.BINDING)) throw new Error("OMP listener published before OMP initialization");
 extension.default({
   on(name, handler) { handlers.set(name, handler); },
   sendUserMessage(content) { received.push(content); },
@@ -1721,6 +1724,17 @@ const send = (body) => new Promise((resolve, reject) => {
 if (await send("Firstmate inbox wake\nwrong\n") !== "refused\n") throw new Error("OMP listener accepted a wrong nonce");
 if (await send("Firstmate inbox wake\n" + process.env.NONCE + "\n") !== "ok " + process.env.NONCE + "\n") throw new Error("OMP listener rejected its current nonce");
 if (received.length !== 1 || received[0] !== "Firstmate inbox wake") throw new Error("OMP listener delivered an unexpected message");
+const liveBinding = readFileSync(process.env.BINDING, "utf8");
+const liveHandlers = new Map();
+const liveAttempt = [];
+const liveExtension = await import(pathToFileURL(process.env.PLUGIN).href + "?live");
+liveExtension.default({
+  on(name, handler) { liveHandlers.set(name, handler); },
+  sendUserMessage(content) { liveAttempt.push(content); },
+});
+await new Promise((resolve) => setTimeout(resolve, 20));
+if (readFileSync(process.env.BINDING, "utf8") !== liveBinding) throw new Error("OMP live owned listener binding changed");
+if (liveAttempt.length !== 0) throw new Error("OMP live owned listener was replaced");
 await handlers.get("session_start")?.();
 await handlers.get("turn_start")?.();
 await handlers.get("turn_end")?.();
@@ -1737,7 +1751,44 @@ for (let i = 0; i < 50 && existsSync(process.env.SOCKET); i += 1) {
 if (existsSync(process.env.SOCKET)) throw new Error("OMP shutdown left a live socket");
 const tasktmp = process.env.SOCKET.slice(0, process.env.SOCKET.lastIndexOf("/"));
 const identity = statSync(tasktmp);
-writeFileSync(process.env.BINDING, "schema=fm-omp-doorbell.v1\npid=999999\ntasktmp_identity=" + identity.dev + ":" + identity.ino + "\nnonce=dead\n");
+const foreignBinding = "foreign-binding\n";
+writeFileSync(process.env.BINDING, foreignBinding);
+const foreign = createServer({ allowHalfOpen: true }, (client) => {
+  client.on("end", () => client.end("foreign\n"));
+});
+await new Promise((resolve, reject) => {
+  foreign.once("error", reject);
+  foreign.listen(process.env.SOCKET, resolve);
+});
+const foreignHandlers = new Map();
+const foreignExtension = await import(pathToFileURL(process.env.PLUGIN).href + "?foreign");
+foreignExtension.default({
+  on(name, handler) { foreignHandlers.set(name, handler); },
+  sendUserMessage() { throw new Error("foreign listener must not be replaced"); },
+});
+await new Promise((resolve) => setTimeout(resolve, 20));
+if (readFileSync(process.env.BINDING, "utf8") !== foreignBinding) throw new Error("OMP foreign binding changed");
+if (!existsSync(process.env.SOCKET)) throw new Error("OMP foreign listener socket disappeared");
+await new Promise((resolve) => foreign.close(resolve));
+if (existsSync(process.env.SOCKET)) unlinkSync(process.env.SOCKET);
+const staleReady = process.env.BINDING + ".stale-ready";
+const staleChild = spawn(process.execPath, ["--input-type=module", "-e", `
+  import { writeFileSync } from "node:fs";
+  import { createServer } from "node:net";
+  const server = createServer();
+  server.listen(process.env.SOCKET, () => writeFileSync(process.env.READY, "ready\\n"));
+`], {
+  env: { ...process.env, READY: staleReady },
+});
+for (let i = 0; i < 50 && (!existsSync(staleReady) || !existsSync(process.env.SOCKET)); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(staleReady) || !existsSync(process.env.SOCKET)) throw new Error("OMP stale socket fixture did not start");
+const staleExited = new Promise((resolve) => staleChild.once("exit", resolve));
+staleChild.kill("SIGKILL");
+await staleExited;
+const staleBinding = "schema=fm-omp-doorbell.v1\npid=" + staleChild.pid + "\ntasktmp_identity=" + identity.dev + ":" + identity.ino + "\nnonce=dead\n";
+writeFileSync(process.env.BINDING, staleBinding);
 const relaunchHandlers = new Map();
 const relaunched = [];
 const relaunchedExtension = await import(pathToFileURL(process.env.PLUGIN).href + "?relaunch");
@@ -1745,14 +1796,53 @@ relaunchedExtension.default({
   on(name, handler) { relaunchHandlers.set(name, handler); },
   sendUserMessage(content) { relaunched.push(content); },
 });
-for (let i = 0; i < 50 && (!existsSync(process.env.SOCKET) || !existsSync(process.env.BINDING)); i += 1) {
+for (let i = 0; i < 50 && (!existsSync(process.env.SOCKET) || readFileSync(process.env.BINDING, "utf8") === staleBinding); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
+if (readFileSync(process.env.BINDING, "utf8") === staleBinding) throw new Error("OMP stale owned socket was not reclaimed");
 if (await send("Firstmate inbox wake\n" + process.env.NONCE + "\n") !== "ok " + process.env.NONCE + "\n") throw new Error("OMP stale owned binding did not relaunch");
 if (relaunched.length !== 1) throw new Error("OMP relaunch did not own the replacement listener");
 await relaunchHandlers.get("session_shutdown")?.();
 JS
   [ "$?" -eq 0 ] || fail "OMP generated listener lifecycle failed"
+  # Opt-in integration guard: load the exact extension emitted above in a real
+  # OMP session, then verify its listener accepts the generated nonce.  This
+  # requires an installed, authenticated OMP runtime and may send one message.
+  if [ "${FM_OMP_GENERATED_LISTENER_LIVE:-0}" = 1 ]; then
+    command -v tmux >/dev/null 2>&1 || fail "FM_OMP_GENERATED_LISTENER_LIVE=1 requires tmux"
+    command -v omp >/dev/null 2>&1 || fail "FM_OMP_GENERATED_LISTENER_LIVE=1 requires omp"
+    live_socket="fm-omp-listener-live-$$-${RANDOM:-0}"
+    live_session="omplive"
+    live_profile="$CASE_DIR/real-omp-profile"
+    live_sessions="$CASE_DIR/real-omp-sessions"
+    printf -v live_command 'exec %q --no-extensions --no-skills --no-rules --no-tools --no-session --auto-approve --profile %q --session-dir %q -e %q' \
+      "$(command -v omp)" "$live_profile" "$live_sessions" "$HOME_DIR/state/$id.omp-ext.ts"
+    tmux -L "$live_socket" new-session -d -s "$live_session" -c "$WT_DIR" -- bash -lc "$live_command" \
+      || fail "real OMP generated listener guard could not launch OMP"
+    LIVE_SOCKET="$(sed -n 's/^omp_doorbell_socket=//p' "$HOME_DIR/state/$id.meta")" \
+      LIVE_NONCE="$(sed -n 's/^omp_doorbell_nonce=//p' "$HOME_DIR/state/$id.meta")" \
+      node --input-type=module <<'JS'
+import { connect } from "node:net";
+import { existsSync } from "node:fs";
+for (let i = 0; i < 100 && !existsSync(process.env.LIVE_SOCKET); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+if (!existsSync(process.env.LIVE_SOCKET)) throw new Error("real OMP did not publish its generated listener");
+const response = await new Promise((resolve, reject) => {
+  const client = connect(process.env.LIVE_SOCKET);
+  let body = "";
+  client.on("data", (chunk) => { body += chunk; });
+  client.on("error", reject);
+  client.on("end", () => resolve(body));
+  client.end("Firstmate inbox wake\n" + process.env.LIVE_NONCE + "\n");
+});
+if (response !== "ok " + process.env.LIVE_NONCE + "\n") throw new Error("real OMP rejected the generated listener nonce");
+JS
+    live_rc=$?
+    tmux -L "$live_socket" kill-server 2>/dev/null || true
+    [ "$live_rc" -eq 0 ] || fail "real OMP generated listener guard failed"
+    pass "real OMP loads and serves the generated listener extension"
+  fi
   if [ -f "$FM_TEST_OMP_HOLD_PID" ]; then kill "$(cat "$FM_TEST_OMP_HOLD_PID")" 2>/dev/null || true; fi
   unset FM_TEST_OMP_HOLD FM_TEST_OMP_HOLD_PID
   rm -rf "/tmp/fm-$id"
