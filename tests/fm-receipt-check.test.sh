@@ -954,22 +954,30 @@ test_supplied_intent_binding_requires_plan_identity() {
   mkdir -p "$fakebin"
   cat > "$fakebin/date" <<'EOF'
 #!/bin/sh
-printf '%s\n' "${FM_TEST_DATE:-1000000000200}"
+if grep -q '^validation_generation=' "$FM_TEST_META"; then
+  printf '%s\n' 1000000000200
+else
+  printf '%s\n' 1000000000100
+fi
 EOF
   chmod +x "$fakebin/date"
   preplan=$(nm_status RUN-before-plan "$head" pending)
-  PATH="$fakebin:$PATH" FM_TEST_DATE=1000000000200 FM_FAKE_NM_STATUS="$preplan" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+  PATH="$fakebin:$PATH" FM_TEST_META="$HOME_DIR/state/$id.meta" FM_FAKE_NM_STATUS="$preplan" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "pre-plan supplied-intent fixture plan failed"
   generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
   started=$(grep '^validation_plan_started_ms=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
   [ "$started" = 1000000000200 ] || fail "plan did not record its independent millisecond boundary"
-  preplan_candidate=$(nm_ulid_at_ms 1000000000101)
+  preplan_candidate=$(nm_ulid_at_ms 1000000000150)
   preplan=$(nm_status "$preplan_candidate" "$head" pending)
+  FM_FAKE_NM_STATUS="$preplan" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --attest-run "$preplan_candidate" --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "pre-publication supplied-intent run cannot be attested"
   FM_FAKE_NM_STATUS="$preplan" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run "$preplan_candidate" --generation "$generation" >/dev/null 2>&1
   rc=$?
-  expect_code 2 "$rc" "same-branch pre-plan supplied-intent run cannot bind"
+  expect_code 2 "$rc" "same-branch pre-publication supplied-intent run cannot bind"
   pass "supplied-intent logs bind only post-plan runs with matching branch, head, generation, and state"
 }
 

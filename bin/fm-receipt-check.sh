@@ -67,7 +67,7 @@
 # latest plan's recorded branch and head, it is not the recorded pre-plan run, its
 # supplied generation matches, and intent either exposes that generation or confirms
 # supplied agent intent with a ULID creation time strictly after the latest plan's
-# recorded millisecond boundary.
+# recorded post-publication millisecond boundary.
 # For supplied-agent intent, run --attest-run immediately after run creation and
 # before --bind-run; it records one plan-bound run identity that opaque logs must match.
 # --invalidate-claim appends one idempotent finding-to-criterion marker to task
@@ -1143,6 +1143,20 @@ write_meta_record() {  # <pass>
     echo "error: could not append validation metadata: $META" >&2
     return 1
   fi
+  PLAN_STARTED_MS=$(date +%s%3N 2>/dev/null || true)
+  if [ "${#PLAN_STARTED_MS}" -ne 13 ] || printf '%s' "$PLAN_STARTED_MS" | grep -q '[^0-9]'; then
+    PLAN_STARTED_MS=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000' 2>/dev/null || true)
+  fi
+  if [ "${#PLAN_STARTED_MS}" -ne 13 ] || printf '%s' "$PLAN_STARTED_MS" | grep -q '[^0-9]'; then
+    release_validation_lock
+    echo "error: validation plan millisecond timestamp is unavailable" >&2
+    return 1
+  fi
+  if ! printf 'validation_plan_started_ms=%s\n' "$PLAN_STARTED_MS" | append_meta_records; then
+    release_validation_lock
+    echo "error: could not append validation plan boundary: $META" >&2
+    return 1
+  fi
   release_validation_lock
 }
 
@@ -1154,15 +1168,8 @@ if [ "$VALIDATION_PATH" = full-no-mistakes ]; then
     || { echo "error: pre-plan No-Mistakes boundary could not be observed" >&2; exit 2; }
   PREPLAN_RUN_ID=$(fm_nm_field "$PREPLAN_OUT" id)
 fi
-PLAN_STARTED_MS=$(date +%s%3N 2>/dev/null || true)
-if [ "${#PLAN_STARTED_MS}" -ne 13 ] || printf '%s' "$PLAN_STARTED_MS" | grep -q '[^0-9]'; then
-  PLAN_STARTED_MS=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000' 2>/dev/null || true)
-fi
-if [ "${#PLAN_STARTED_MS}" -ne 13 ] || printf '%s' "$PLAN_STARTED_MS" | grep -q '[^0-9]'; then
-  echo "error: validation plan millisecond timestamp is unavailable" >&2
-  exit 2
-fi
-write_meta_record initial
+PLAN_STARTED_MS=
+write_meta_record initial || exit 2
 RECEIPT_COMMAND=
 MECHANICAL_COMMAND=
 PUSH_COMMAND=
