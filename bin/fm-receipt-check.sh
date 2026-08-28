@@ -698,18 +698,16 @@ if [ "$ACTION" = launch-run ] || [ "$ACTION" = bind-run ]; then
       || { echo "error: validation worktree no longer matches the latest plan branch and head" >&2; exit 2; }
     [ -z "$BIND_LAUNCH" ] || { echo "error: latest plan already records a launched No-Mistakes run" >&2; exit 2; }
     NM_BIN=${FM_NO_MISTAKES_BIN:-no-mistakes}
-    if ! (cd "$BIND_WORKTREE" && "$NM_BIN" axi run "${LAUNCH_ARGS[@]}") >&2; then
+    if ! BIND_LAUNCH_OUT=$(cd "$BIND_WORKTREE" && "$NM_BIN" axi run "${LAUNCH_ARGS[@]}"); then
       echo "error: No-Mistakes run could not be launched" >&2
       exit 2
     fi
-    BIND_OUT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi status) \
-      || { echo "error: launched No-Mistakes run could not be observed" >&2; exit 2; }
-    RUN_ID_INPUT=$(fm_nm_field "$BIND_OUT" id)
+    printf '%s\n' "$BIND_LAUNCH_OUT" >&2
+    RUN_ID_INPUT=$(fm_nm_field "$BIND_LAUNCH_OUT" id)
     case "$RUN_ID_INPUT" in ''|*[!A-Za-z0-9._-]*) echo "error: launched No-Mistakes run has an invalid id" >&2; exit 2 ;; esac
-  else
-    BIND_OUT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi status --run "$RUN_ID_INPUT") \
-      || { echo "error: No-Mistakes run could not be observed" >&2; exit 2; }
   fi
+  BIND_OUT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi status --run "$RUN_ID_INPUT") \
+    || { echo "error: No-Mistakes run could not be observed" >&2; exit 2; }
   BIND_OBSERVED_ID=$(fm_nm_field "$BIND_OUT" id)
   BIND_OBSERVED_BRANCH=$(fm_nm_field "$BIND_OUT" branch)
   BIND_OBSERVED_HEAD=$(fm_nm_field "$BIND_OUT" head)
