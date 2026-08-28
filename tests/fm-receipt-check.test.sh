@@ -34,10 +34,19 @@ exit 1
 EOF
 chmod +x "$FAIL_NO_MISTAKES"
 
-nm_status() {  # <run-id> <head> <outcome>
-  local status
+nm_status() {  # <run-id> <head> <outcome> [branch]
+  local status branch=${4:-"fm/${id:-unknown}"}
   if [ "$3" = passed ]; then status=completed; else status=running; fi
-  printf 'run:\n  id: "%s"\n  status: %s\n  head: "%s"\noutcome: %s\n' "$1" "$status" "$2" "$3"
+  printf 'run:\n  id: "%s"\n  branch: "%s"\n  status: %s\n  head: "%s"\noutcome: %s\n' "$1" "$branch" "$status" "$2" "$3"
+}
+
+nm_ulid_at_ms() {  # <milliseconds>
+  local value=$1 alphabet='0123456789ABCDEFGHJKMNPQRSTVWXYZ' result='' index
+  for ((index = 0; index < 10; index++)); do
+    result="${alphabet:value%32:1}$result"
+    value=$((value / 32))
+  done
+  printf '%s0000000000000000\n' "$result"
 }
 
 test_help_advertises_generation_bound_run_binding() {
@@ -813,7 +822,7 @@ test_terminal_and_failed_runs_bind_by_current_plan() {
   project="$TMP_ROOT/project-$id"
   head=$(git -C "$project" rev-parse HEAD)
   generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
-  terminal=$(printf 'run:\n  id: "RUN-terminal"\n  status: completed\n  head: "%s"\noutcome: checks-passed\n' "$head")
+  terminal=$(printf 'run:\n  id: "RUN-terminal"\n  branch: "fm/%s"\n  status: completed\n  head: "%s"\noutcome: checks-passed\n' "$id" "$head")
   FM_FAKE_NM_STATUS="$terminal" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-terminal --generation "$generation" >/dev/null \
@@ -828,13 +837,108 @@ test_terminal_and_failed_runs_bind_by_current_plan() {
   project="$TMP_ROOT/project-$id"
   head=$(git -C "$project" rev-parse HEAD)
   generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
-  failed=$(printf 'run:\n  id: "RUN-failed"\n  status: failed\n  head: "%s"\noutcome: failed\n' "$head")
+  failed=$(printf 'run:\n  id: "RUN-failed"\n  branch: "fm/%s"\n  status: failed\n  head: "%s"\noutcome: failed\n' "$id" "$head")
   FM_FAKE_NM_STATUS="$failed" FM_FAKE_NM_INTENT="Firstmate-Validation-Generation: $generation" \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run RUN-failed --generation "$generation" >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "failed terminal run cannot bind"
   pass "successful terminal runs bind while failed runs remain rejected"
+}
+
+test_supplied_intent_binding_requires_plan_identity() {
+  local id=supplied-intent base project head generation started valid_id wrong_head_id wrong_branch_id failed_id cancelled_id same_second_id valid wrong_head wrong_branch failed cancelled preplan preplan_candidate fakebin rc
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  FM_FAKE_NM_STATUS='' FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "supplied-intent fixture plan failed"
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  started=$(grep '^validation_plan_started_ms=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  valid_id=$(nm_ulid_at_ms "$((started + 1))")
+  wrong_head_id=$(nm_ulid_at_ms "$((started + 2))")
+  wrong_branch_id=$(nm_ulid_at_ms "$((started + 3))")
+  failed_id=$(nm_ulid_at_ms "$((started + 4))")
+  cancelled_id=$(nm_ulid_at_ms "$((started + 5))")
+  valid=$(nm_status "$valid_id" "$head" pending)
+  FM_FAKE_NM_STATUS="$valid" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run "$valid_id" --generation "$generation" >/dev/null \
+    || fail "post-plan run with supplied-intent log could not bind"
+  same_second_id=$(nm_ulid_at_ms "$((started - 1))")
+  preplan=$(nm_status "$same_second_id" "$head" pending)
+  FM_FAKE_NM_STATUS="$preplan" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run "$same_second_id" --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "pre-boundary supplied-intent run cannot bind"
+  printf 'validation_plan_started_ms=\n' >> "$HOME_DIR/state/$id.meta"
+  FM_FAKE_NM_STATUS="$valid" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run "$valid_id" --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "redacted runs require a recorded post-plan boundary"
+
+  wrong_head=$(nm_status "$wrong_head_id" "$base" pending)
+  FM_FAKE_NM_STATUS="$wrong_head" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run "$wrong_head_id" --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "supplied intent cannot bind a wrong-head run"
+  wrong_branch=$(nm_status "$wrong_branch_id" "$head" pending 'fm/unrelated')
+  FM_FAKE_NM_STATUS="$wrong_branch" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run "$wrong_branch_id" --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "same-head unrelated branch cannot bind from supplied intent"
+  failed=$(nm_status "$failed_id" "$head" failed)
+  FM_FAKE_NM_STATUS="$failed" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run "$failed_id" --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "failed supplied-intent run cannot bind"
+  cancelled=$(nm_status "$cancelled_id" "$head" cancelled)
+  FM_FAKE_NM_STATUS="$cancelled" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run "$cancelled_id" --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "cancelled supplied-intent run cannot bind"
+  FM_FAKE_NM_STATUS="$valid" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run "$valid_id" --generation stale-generation >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "supplied intent cannot bind a wrong generation"
+
+  id='preplan-supplied-intent'
+  base=$(make_project "$id" no-mistakes localized)
+  add_receipt "$id" AC1 test "2 passed"
+  add_receipt "$id" AC2 lint passed
+  project="$TMP_ROOT/project-$id"
+  head=$(git -C "$project" rev-parse HEAD)
+  printf 'implementation_completed_at=100\nvalidation_started_at=100\n' >> "$HOME_DIR/state/$id.meta"
+  fakebin="$TMP_ROOT/supplied-intent-date-bin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/date" <<'EOF'
+#!/bin/sh
+printf '%s\n' "${FM_TEST_DATE:-1000000000200}"
+EOF
+  chmod +x "$fakebin/date"
+  preplan=$(nm_status RUN-before-plan "$head" pending)
+  PATH="$fakebin:$PATH" FM_TEST_DATE=1000000000200 FM_FAKE_NM_STATUS="$preplan" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --plan --base "$base" >/dev/null || fail "pre-plan supplied-intent fixture plan failed"
+  generation=$(grep '^validation_generation=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  started=$(grep '^validation_plan_started_ms=' "$HOME_DIR/state/$id.meta" | tail -1 | cut -d= -f2-)
+  [ "$started" = 1000000000200 ] || fail "plan did not record its independent millisecond boundary"
+  preplan_candidate=$(nm_ulid_at_ms 1000000000101)
+  preplan=$(nm_status "$preplan_candidate" "$head" pending)
+  FM_FAKE_NM_STATUS="$preplan" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run "$preplan_candidate" --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "same-branch pre-plan supplied-intent run cannot bind"
+  pass "supplied-intent logs bind only post-plan runs with matching branch, head, generation, and state"
 }
 
 test_no_mistakes_observations_are_bounded() {
@@ -1252,7 +1356,7 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
   rc=$?
   expect_code 2 "$rc" "unresolved base cannot publish a plan"
 
-  id=preplan-run
+  id='preplan-run'
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint "passed"
@@ -1277,7 +1381,7 @@ test_high_risk_and_uncertain_inputs_fail_safe() {
     "$CHECK" "$id" --bind-run OTHER-RUN --generation "$generation" >/dev/null \
     || fail "run carrying the authoritative plan generation could not bind"
 
-  id=preplan-observation-failure
+  id='preplan-observation-failure'
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint "passed"
@@ -1337,6 +1441,7 @@ test_implementation_completion_precedes_planning
 test_plan_boundary_excludes_concurrent_receipts
 test_diff_summary_errors_fail_planning
 test_terminal_and_failed_runs_bind_by_current_plan
+test_supplied_intent_binding_requires_plan_identity
 test_no_mistakes_observations_are_bounded
 test_authoritative_docs_remain_high
 test_terminal_paths_record_completion_at_their_boundary

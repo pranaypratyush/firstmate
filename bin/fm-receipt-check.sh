@@ -61,8 +61,11 @@
 # final completion with `bin/fm-pr-check.sh <task-id> <url>`.
 #
 # --complete requires the path-specific terminal evidence named by the generated
-# instructions and records that evidence with the latest plan, path, and head;
-# exact bound runs may prove current checks-green readiness through the shared CI log predicate.
+# instructions and records that evidence with the latest plan, path, and head.
+# A full No-Mistakes run is bound only when its observed branch and head match the
+# latest plan, it is not the recorded pre-plan run, its supplied generation matches,
+# and intent either exposes that generation or confirms supplied agent intent after
+# the latest plan's recorded millisecond boundary.
 # --invalidate-claim appends one idempotent finding-to-criterion marker to task
 # metadata after confirming that the criterion and evidence contract are current.
 # Delivery mode remains authoritative: direct-PR and local-only never invoke
@@ -619,6 +622,28 @@ if [ "$ACTION" = invalidate-claim ]; then
   exit 0
 fi
 
+nm_ulid_started_at_ms() {  # <ULID>
+  local id=$1 prefix digit value=0 index
+  case "$id" in
+    [0-7][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z][0-9A-HJKMNP-TV-Z]) ;;
+    *) return 1 ;;
+  esac
+  prefix=${id:0:10}
+  for ((index = 0; index < 10; index++)); do
+    case "${prefix:index:1}" in
+      0) digit=0 ;; 1) digit=1 ;; 2) digit=2 ;; 3) digit=3 ;; 4) digit=4 ;;
+      5) digit=5 ;; 6) digit=6 ;; 7) digit=7 ;; 8) digit=8 ;; 9) digit=9 ;;
+      A) digit=10 ;; B) digit=11 ;; C) digit=12 ;; D) digit=13 ;; E) digit=14 ;;
+      F) digit=15 ;; G) digit=16 ;; H) digit=17 ;; J) digit=18 ;; K) digit=19 ;;
+      M) digit=20 ;; N) digit=21 ;; P) digit=22 ;; Q) digit=23 ;; R) digit=24 ;;
+      S) digit=25 ;; T) digit=26 ;; V) digit=27 ;; W) digit=28 ;; X) digit=29 ;;
+      Y) digit=30 ;; Z) digit=31 ;;
+    esac
+    value=$((value * 32 + digit))
+  done
+  printf '%s\n' "$value"
+}
+
 mechanical_evidence_covers_file() {
   local ledger=$1 file=$2
   jq --arg file "$file" -se '
@@ -642,23 +667,44 @@ if [ "$ACTION" = bind-run ]; then
     || { echo "error: No-Mistakes run could not be observed" >&2; exit 2; }
   BIND_INTENT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi logs --step intent --run "$RUN_ID_INPUT") \
     || { echo "error: No-Mistakes run intent could not be observed" >&2; exit 2; }
+  BIND_BRANCH=$(git -C "$BIND_WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null) \
+    || { echo "error: validation worktree branch is unavailable" >&2; exit 2; }
   BIND_OBSERVED_ID=$(fm_nm_field "$BIND_OUT" id)
+  BIND_OBSERVED_BRANCH=$(fm_nm_field "$BIND_OUT" branch)
   BIND_OBSERVED_HEAD=$(fm_nm_field "$BIND_OUT" head)
-  BIND_STATUS=$(fm_nm_field "$BIND_OUT" status)
+  BIND_OBSERVED_HEAD=$(git -C "$BIND_WORKTREE" rev-parse --verify "$BIND_OBSERVED_HEAD^{commit}" 2>/dev/null || true)
   BIND_OUTCOME=$(fm_nm_field "$BIND_OUT" outcome)
+  BIND_STATUS=$(fm_nm_field "$BIND_OUT" status)
+  BIND_PLAN_STARTED_MS=$(grep '^validation_plan_started_ms=' "$META" | tail -1 | cut -d= -f2- || true)
   [ "$RUN_ID_INPUT" != "$BIND_PREPLAN_RUN" ] || { echo "error: No-Mistakes run predates the latest plan" >&2; exit 2; }
   [ "$RUN_GENERATION_INPUT" = "$BIND_GENERATION" ] || { echo "error: run generation does not match the latest plan" >&2; exit 2; }
-  printf '%s\n' "$BIND_INTENT" | grep -Fqx "Firstmate-Validation-Generation: $BIND_GENERATION" \
-    || { echo "error: No-Mistakes run was not created for the latest plan generation" >&2; exit 2; }
+  BIND_INTENT_LINES=$(printf '%s\n' "$BIND_INTENT" | sed 's/^[[:space:]]*//')
+  if printf '%s\n' "$BIND_INTENT_LINES" | grep -Fqx "Firstmate-Validation-Generation: $BIND_GENERATION"; then
+    :
+  elif printf '%s\n' "$BIND_INTENT_LINES" | grep -Fqx 'using intent supplied by the agent'; then
+    if [ "${#BIND_PLAN_STARTED_MS}" -eq 13 ] && ! printf '%s' "$BIND_PLAN_STARTED_MS" | grep -q '[^0-9]'; then
+      BIND_BOUNDARY_MS=$BIND_PLAN_STARTED_MS
+    else
+      echo "error: supplied-intent run has no recorded post-plan boundary" >&2
+      exit 2
+    fi
+    BIND_RUN_STARTED_MS=$(nm_ulid_started_at_ms "$RUN_ID_INPUT") \
+      || { echo "error: supplied-intent run id lacks a readable creation time" >&2; exit 2; }
+    [ "$BIND_RUN_STARTED_MS" -ge "$BIND_BOUNDARY_MS" ] \
+      || { echo "error: supplied-intent run predates the latest plan" >&2; exit 2; }
+  else
+    echo "error: No-Mistakes run intent does not prove the latest plan generation" >&2
+    exit 2
+  fi
   BIND_STATE_OK=0
   case "$BIND_STATUS:$BIND_OUTCOME" in
     failed:*|cancelled:*|*:failed|*:cancelled) ;;
     passed:*|checks-passed:*|*:passed|*:checks-passed) BIND_STATE_OK=1 ;;
     running:*|fixing:*|ci:*|awaiting_approval:*) BIND_STATE_OK=1 ;;
   esac
-  [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] && [ "$BIND_OBSERVED_HEAD" = "$BIND_HEAD" ] \
-    && [ "$BIND_STATE_OK" -eq 1 ] \
-    || { echo "error: No-Mistakes run does not match the latest plan" >&2; exit 2; }
+  [ "$BIND_OBSERVED_ID" = "$RUN_ID_INPUT" ] && [ "$BIND_OBSERVED_BRANCH" = "$BIND_BRANCH" ] \
+    && [ "$BIND_OBSERVED_HEAD" = "$BIND_HEAD" ] && [ "$BIND_STATE_OK" -eq 1 ] \
+    || { echo "error: No-Mistakes run does not match the latest plan branch and head" >&2; exit 2; }
   [ -n "$BIND_GENERATION" ] || { echo "error: validation generation is missing" >&2; exit 2; }
   printf 'validation_run_id=%s\nvalidation_run_path=%s\nvalidation_run_head=%s\nvalidation_run_generation=%s\n' \
     "$RUN_ID_INPUT" "$BIND_PATH" "$BIND_HEAD" "$BIND_GENERATION" | append_meta_records \
@@ -773,6 +819,7 @@ record_validation_completed() {
         || { release_validation_lock; echo "error: bound No-Mistakes run could not be observed" >&2; return 1; }
       observed_id=$(fm_nm_field "$run_out" id)
       observed_head=$(fm_nm_field "$run_out" head)
+      observed_head=$(git -C "$worktree" rev-parse --verify "$observed_head^{commit}" 2>/dev/null || true)
       outcome=$(fm_nm_field "$run_out" outcome)
       run_status=$(fm_nm_field "$run_out" status)
       run_ready=0
@@ -1033,6 +1080,7 @@ write_meta_record() {  # <pass>
     printf 'validation_diff_lines=%s\n' "$DIFF_LINES"
     printf 'validation_pass=%s\n' "$pass"
     [ "$started" = "$IMPLEMENTATION_COMPLETED" ] || printf 'validation_started_at=%s\n' "$IMPLEMENTATION_COMPLETED"
+    printf 'validation_plan_started_ms=%s\n' "$PLAN_STARTED_MS"
     printf 'validation_ledger_receipt_count=%s\n' "$RECEIPT_COUNT"
     printf 'validation_preplan_run_id=%s\n' "${PREPLAN_RUN_ID:-}"
     printf 'validation_pr_published_generation=\n'
@@ -1055,6 +1103,14 @@ if [ "$VALIDATION_PATH" = full-no-mistakes ]; then
   PREPLAN_OUT=$(fm_nm_run_checked "$WORKTREE" "$NM_TIMEOUT" axi status) \
     || { echo "error: pre-plan No-Mistakes boundary could not be observed" >&2; exit 2; }
   PREPLAN_RUN_ID=$(fm_nm_field "$PREPLAN_OUT" id)
+fi
+PLAN_STARTED_MS=$(date +%s%3N 2>/dev/null || true)
+if [ "${#PLAN_STARTED_MS}" -ne 13 ] || printf '%s' "$PLAN_STARTED_MS" | grep -q '[^0-9]'; then
+  PLAN_STARTED_MS=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000' 2>/dev/null || true)
+fi
+if [ "${#PLAN_STARTED_MS}" -ne 13 ] || printf '%s' "$PLAN_STARTED_MS" | grep -q '[^0-9]'; then
+  echo "error: validation plan millisecond timestamp is unavailable" >&2
+  exit 2
 fi
 write_meta_record initial
 RECEIPT_COMMAND=
