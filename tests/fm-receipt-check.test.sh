@@ -54,6 +54,8 @@ test_help_advertises_generation_bound_run_binding() {
   out=$("$CHECK" --help) || fail "receipt checker help failed"
   assert_contains "$out" "--bind-run <run-id> --generation <plan-generation>" \
     "receipt checker help omitted the required run generation"
+  assert_contains "$out" "--attest-run <run-id> --generation <plan-generation>" \
+    "receipt checker help omitted the supplied-intent run attestation"
   assert_contains "$out" "--implementation-complete" \
     "receipt checker help omitted the implementation boundary action"
   assert_contains "$out" "refreshes it when that head changes" \
@@ -847,7 +849,7 @@ test_terminal_and_failed_runs_bind_by_current_plan() {
 }
 
 test_supplied_intent_binding_requires_plan_identity() {
-  local id=supplied-intent base project head generation started valid_id branch_drift_id wrong_head_id wrong_branch_id failed_id cancelled_id same_millisecond_id preplan_id valid branch_drift wrong_head wrong_branch failed cancelled preplan preplan_candidate fakebin rc
+  local id=supplied-intent base project head generation started valid_id branch_drift_id wrong_head_id wrong_branch_id failed_id cancelled_id unrelated_id same_millisecond_id preplan_id valid branch_drift wrong_head wrong_branch failed cancelled unrelated preplan preplan_candidate fakebin rc
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint passed
@@ -863,6 +865,7 @@ test_supplied_intent_binding_requires_plan_identity() {
   wrong_branch_id=$(nm_ulid_at_ms "$((started + 4))")
   failed_id=$(nm_ulid_at_ms "$((started + 5))")
   cancelled_id=$(nm_ulid_at_ms "$((started + 6))")
+  unrelated_id=$(nm_ulid_at_ms "$((started + 7))")
   git -C "$project" checkout -q -b "fm/$id-drift"
   branch_drift=$(nm_status "$branch_drift_id" "$head" pending "fm/$id-drift")
   FM_FAKE_NM_STATUS="$branch_drift" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
@@ -874,8 +877,22 @@ test_supplied_intent_binding_requires_plan_identity() {
   valid=$(nm_status "$valid_id" "$head" pending)
   FM_FAKE_NM_STATUS="$valid" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run "$valid_id" --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "supplied-intent run cannot bind without its creation attestation"
+  FM_FAKE_NM_STATUS="$valid" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --attest-run "$valid_id" --generation "$generation" >/dev/null \
+    || fail "post-plan supplied-intent run could not be attested"
+  FM_FAKE_NM_STATUS="$valid" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run "$valid_id" --generation "$generation" >/dev/null \
     || fail "post-plan run with supplied-intent log could not bind"
+  unrelated=$(nm_status "$unrelated_id" "$head" pending)
+  FM_FAKE_NM_STATUS="$unrelated" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run "$unrelated_id" --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "distinct same-branch supplied-intent run cannot bind"
   same_millisecond_id=$(nm_ulid_at_ms "$started")
   preplan=$(nm_status "$same_millisecond_id" "$head" pending)
   FM_FAKE_NM_STATUS="$preplan" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
@@ -890,13 +907,6 @@ test_supplied_intent_binding_requires_plan_identity() {
     "$CHECK" "$id" --bind-run "$preplan_id" --generation "$generation" >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "pre-boundary supplied-intent run cannot bind"
-  printf 'validation_plan_started_ms=\n' >> "$HOME_DIR/state/$id.meta"
-  FM_FAKE_NM_STATUS="$valid" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
-    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
-    "$CHECK" "$id" --bind-run "$valid_id" --generation "$generation" >/dev/null 2>&1
-  rc=$?
-  expect_code 2 "$rc" "redacted runs require a recorded post-plan boundary"
-
   wrong_head=$(nm_status "$wrong_head_id" "$base" pending)
   FM_FAKE_NM_STATUS="$wrong_head" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
@@ -926,6 +936,12 @@ test_supplied_intent_binding_requires_plan_identity() {
     "$CHECK" "$id" --bind-run "$valid_id" --generation stale-generation >/dev/null 2>&1
   rc=$?
   expect_code 2 "$rc" "supplied intent cannot bind a wrong generation"
+  printf 'validation_plan_started_ms=\n' >> "$HOME_DIR/state/$id.meta"
+  FM_FAKE_NM_STATUS="$valid" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run "$valid_id" --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "redacted runs require a recorded post-plan boundary"
 
   id='preplan-supplied-intent'
   base=$(make_project "$id" no-mistakes localized)
