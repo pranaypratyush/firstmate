@@ -2363,12 +2363,16 @@ omp_project_extension_preflight() {
     [ "$duplicate" -eq 1 ] || offenders="${offenders}${offenders:+$'\n'}$path"
   done
   trusted_reason=
-  if [ -n "$offenders" ]; then
+  if omp_firstmate_repository_identity_matches "$project"; then
     if omp_firstmate_extension_closure_matches_trusted_root "$project"; then
       offenders=
     else
       trusted_reason=$OMP_TRUSTED_CLOSURE_REASON
+      [ -n "$offenders" ] || offenders='trusted Firstmate OMP extension closure'
     fi
+  elif [ -n "$offenders" ]; then
+    omp_firstmate_extension_closure_matches_trusted_root "$project" \
+      || trusted_reason=$OMP_TRUSTED_CLOSURE_REASON
   fi
   [ -n "$offenders" ] || return 0
   if [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 1 ]; then

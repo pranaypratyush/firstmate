@@ -392,6 +392,7 @@ ok - OMP rejects copied Firstmate extensions without verified repository identit
 ok - verified Firstmate worker and scout copies auto-accept the exact OMP closure
 ok - verified Firstmate copies reject changed OMP entry content
 ok - verified Firstmate copies reject unknown OMP extensions
+ok - verified Firstmate copies reject removed OMP closure entries
 ok - verified Firstmate copies reject changed imported OMP helpers
 ok - OMP extension approval remains explicit and per launch
 ok - OMP secondmate launch and recovery use the isolated adapter and an exact home-owned session pointer

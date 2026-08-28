@@ -2233,6 +2233,30 @@ test_omp_trusted_firstmate_copy_rejects_unknown_extension() {
   pass "verified Firstmate copies reject unknown OMP extensions"
 }
 
+test_omp_trusted_firstmate_copy_rejects_removed_closure() {
+  local rec id out status head default
+  id=$(profile_id profile-omp-trusted-removed-z41)
+  rec=$(make_trusted_firstmate_copy_case profile-omp-trusted-removed "$id")
+  read_case_record "$rec"
+  git -C "$WT_DIR" rm -q .omp/extensions/fm-primary-omp.ts \
+    .omp/extensions/fm-fleet-hooks.ts .omp/extensions/fm-branch-supervision-omp.ts
+  git -C "$WT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'remove trusted extension closure'
+  head=$(git -C "$WT_DIR" rev-parse HEAD)
+  default=$(git -C "$PROJ_DIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD)
+  default=${default#origin/}
+  git -C "$PROJ_DIR" branch -f "$default" "$head"
+
+  out=$(run_trusted_copy_local_only_spawn "$head" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a missing trusted OMP closure must stop before worker launch"
+  assert_contains "$out" "missing auto-executed extension" \
+    "removed trusted closure did not name the incomplete closure condition"
+  assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
+    "removed trusted closure created an endpoint"
+  pass "verified Firstmate copies reject removed OMP closure entries"
+}
+
 test_omp_trusted_firstmate_copy_rejects_changed_imported_helper() {
   local rec id out status head
   id=$(profile_id profile-omp-trusted-changed-helper-z38)
@@ -2505,6 +2529,7 @@ test_omp_secondmate_rejects_modified_branch_helper
 test_omp_trusted_firstmate_copy_autopasses_for_worker_and_scout
 test_omp_trusted_firstmate_copy_rejects_changed_entry
 test_omp_trusted_firstmate_copy_rejects_unknown_extension
+test_omp_trusted_firstmate_copy_rejects_removed_closure
 test_omp_trusted_firstmate_copy_rejects_changed_imported_helper
 test_omp_explicit_extension_override_is_per_launch
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
