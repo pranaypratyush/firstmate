@@ -41,8 +41,8 @@
 # classifiable uncertainty resolves to high.
 # Risk is binary: high by default, or low only for a narrow CHANGELOG-only prose
 # change with file-bound strong mechanical evidence for every changed file.
-# The resolved validation_tier, validation_path, reason code, base, head, size,
-# and start time are appended to state/<task-id>.meta for durable inspection.
+# The resolved validation_tier, validation_path, reason code, base, branch, head,
+# size, and start time are appended to state/<task-id>.meta for durable inspection.
 # Every completion records validation_completed_head and refuses a current
 # worktree HEAD that differs from the latest validation_head.
 # When --plan returns path=receipts-mechanical, append fresh successful mechanical
@@ -63,9 +63,10 @@
 # --complete requires the path-specific terminal evidence named by the generated
 # instructions and records that evidence with the latest plan, path, and head.
 # A full No-Mistakes run is bound only when its observed branch and head match the
-# latest plan, it is not the recorded pre-plan run, its supplied generation matches,
-# and intent either exposes that generation or confirms supplied agent intent after
-# the latest plan's recorded millisecond boundary.
+# latest plan's recorded branch and head, it is not the recorded pre-plan run, its
+# supplied generation matches, and intent either exposes that generation or confirms
+# supplied agent intent with a ULID creation time strictly after the latest plan's
+# recorded millisecond boundary.
 # --invalidate-claim appends one idempotent finding-to-criterion marker to task
 # metadata after confirming that the criterion and evidence contract are current.
 # Delivery mode remains authoritative: direct-PR and local-only never invoke
@@ -654,11 +655,13 @@ mechanical_evidence_covers_file() {
 if [ "$ACTION" = bind-run ]; then
   BIND_WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_PATH=$(grep '^validation_path=' "$META" | tail -1 | cut -d= -f2- || true)
+  BIND_BRANCH=$(grep '^validation_branch=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_HEAD=$(grep '^validation_head=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_GENERATION=$(grep '^validation_generation=' "$META" | tail -1 | cut -d= -f2- || true)
   BIND_PREPLAN_RUN=$(grep '^validation_preplan_run_id=' "$META" | tail -1 | cut -d= -f2- || true)
   [ "$BIND_PATH" = full-no-mistakes ] || { echo "error: latest plan does not use full No-Mistakes" >&2; exit 2; }
   [ -n "$BIND_WORKTREE" ] && [ -d "$BIND_WORKTREE" ] || { echo "error: validation worktree is missing" >&2; exit 2; }
+  [ -n "$BIND_BRANCH" ] || { echo "error: validated branch is missing" >&2; exit 2; }
   BIND_HEAD=$(git -C "$BIND_WORKTREE" rev-parse --verify "$BIND_HEAD^{commit}" 2>/dev/null) \
     || { echo "error: validated head is missing" >&2; exit 2; }
   fm_worktree_is_clean "$BIND_WORKTREE" \
@@ -667,8 +670,6 @@ if [ "$ACTION" = bind-run ]; then
     || { echo "error: No-Mistakes run could not be observed" >&2; exit 2; }
   BIND_INTENT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi logs --step intent --run "$RUN_ID_INPUT") \
     || { echo "error: No-Mistakes run intent could not be observed" >&2; exit 2; }
-  BIND_BRANCH=$(git -C "$BIND_WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null) \
-    || { echo "error: validation worktree branch is unavailable" >&2; exit 2; }
   BIND_OBSERVED_ID=$(fm_nm_field "$BIND_OUT" id)
   BIND_OBSERVED_BRANCH=$(fm_nm_field "$BIND_OUT" branch)
   BIND_OBSERVED_HEAD=$(fm_nm_field "$BIND_OUT" head)
@@ -690,7 +691,7 @@ if [ "$ACTION" = bind-run ]; then
     fi
     BIND_RUN_STARTED_MS=$(nm_ulid_started_at_ms "$RUN_ID_INPUT") \
       || { echo "error: supplied-intent run id lacks a readable creation time" >&2; exit 2; }
-    [ "$BIND_RUN_STARTED_MS" -ge "$BIND_BOUNDARY_MS" ] \
+    [ "$BIND_RUN_STARTED_MS" -gt "$BIND_BOUNDARY_MS" ] \
       || { echo "error: supplied-intent run predates the latest plan" >&2; exit 2; }
   else
     echo "error: No-Mistakes run intent does not prove the latest plan generation" >&2
@@ -960,6 +961,8 @@ resolve_diff() {
 
 resolve_diff \
   || { echo "error: authoritative validation base and diff could not be resolved" >&2; exit 2; }
+PLAN_BRANCH=$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null) \
+  || { echo "error: validation worktree branch is unavailable" >&2; exit 2; }
 IMPLEMENTATION_COMPLETED=$(grep '^implementation_completed_at=' "$META" | tail -1 | cut -d= -f2- || true)
 IMPLEMENTATION_HEAD=$(grep '^implementation_completed_head=' "$META" | tail -1 | cut -d= -f2- || true)
 case "$IMPLEMENTATION_COMPLETED" in
@@ -1075,6 +1078,7 @@ write_meta_record() {  # <pass>
     printf 'validation_path=%s\n' "$VALIDATION_PATH"
     printf 'validation_reason=%s\n' "$REASON"
     printf 'validation_base=%s\n' "$BASE"
+    printf 'validation_branch=%s\n' "$PLAN_BRANCH"
     printf 'validation_head=%s\n' "$HEAD"
     printf 'validation_diff_files=%s\n' "$DIFF_FILES"
     printf 'validation_diff_lines=%s\n' "$DIFF_LINES"
