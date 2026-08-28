@@ -377,6 +377,28 @@ ok - OMP secondmate launch and recovery use the isolated adapter and an exact ho
 
 The deterministic spawn checks prove that an OMP launch refuses a git-tracked project extension without the explicit override, records the override when passed, and leaves projects without tracked extensions unchanged.
 The secondmate integration checks reran on 2026-08-27 and prove that the exact Firstmate primary and fleet-hook extensions remain permitted in the persistent home without allowing modified or unrelated tracked extension code.
+The identity-plus-content trust boundary reran on 2026-08-29 with the following deterministic commands:
+
+```sh
+bash -n bin/fm-spawn.sh
+tests/fm-spawn-dispatch-profile.test.sh
+tests/fm-omp-secondmate.test.sh
+```
+
+Observed bounded output:
+
+```text
+ok - OMP rejects copied Firstmate extensions without verified repository identity
+ok - verified Firstmate worker and scout copies auto-accept the exact OMP closure
+ok - verified Firstmate copies reject changed OMP entry content
+ok - verified Firstmate copies reject unknown OMP extensions
+ok - verified Firstmate copies reject changed imported OMP helpers
+ok - OMP extension approval remains explicit and per launch
+ok - OMP secondmate launch and recovery use the isolated adapter and an exact home-owned session pointer
+```
+
+The source fixtures prove that only an identity-verified Firstmate copy with a byte-exact discovered extension and imported-helper closure bypasses the per-launch approval.
+
 Live firing of the fleet hook's `tool_result`, `todo_reminder`, and `session.compacting` handlers is PENDING firstmate scratch OMP verification before merge; deterministic extension and spawn tests do not claim OMP event delivery.
 
 The Herdr role matrix required each expected turn-end or routed-reply notification to reach the durable queue or the primary follow-up transcript before the fixture drained it.

@@ -360,6 +360,31 @@ make_seeded_secondmate_home() {
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter for %s\n' "$id" > "$home/data/charter.md"
 }
+make_trusted_secondmate_home() {
+  local home=$1 id=$2
+  git clone --quiet "$ROOT" "$home"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  printf 'charter for %s\n' "$id" > "$home/data/charter.md"
+}
+
+make_trusted_firstmate_copy_case() {
+  local name=$1 rec case_dir home proj wt fakebin launchlog default
+  shift
+  rec=$(make_spawn_case "$name" omp "$@")
+  IFS='|' read -r case_dir home proj wt fakebin launchlog <<EOF
+$rec
+EOF
+  git -C "$proj" worktree remove --force "$wt"
+  rm -rf "$proj"
+  git clone --quiet "$ROOT" "$proj"
+  default=$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || printf origin/main)
+  default=${default#origin/}
+  git -C "$proj" remote set-head origin "$default"
+  git -C "$proj" checkout --detach --quiet
+  git -C "$proj" worktree add --quiet -b "wt-$name" "$wt"
+  printf '%s|%s|%s|%s|%s|%s\n' "$case_dir" "$home" "$proj" "$wt" "$fakebin" "$launchlog"
+}
 commit_project_omp_extension() {
   local proj=$1 wt=$2 source=${3:-}
   mkdir -p "$proj/.omp/extensions"
@@ -2069,7 +2094,7 @@ test_omp_ignores_unsupported_root_extension_manifest() {
   pass "OMP ignores unsupported root extension manifests"
 }
 
-test_omp_does_not_trust_copied_primary_adapter_in_projects() {
+test_omp_rejects_unverified_copied_primary_adapter() {
   local rec id out status
   id=$(profile_id profile-omp-copied-primary-z28)
   rec=$(make_spawn_case profile-omp-copied-primary omp "$id")
@@ -2078,10 +2103,12 @@ test_omp_does_not_trust_copied_primary_adapter_in_projects() {
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 1 "$status" "ordinary OMP projects must not inherit the secondmate adapter exemption"
+  expect_code 1 "$status" "an unverified copied primary adapter must not inherit Firstmate trust"
+  assert_contains "$out" "repository identity cannot be verified" \
+    "OMP refusal did not name the unverifiable Firstmate repository identity"
   assert_contains "$out" ".omp/extensions/fm-primary-omp.ts" \
     "OMP refusal did not name the copied primary adapter"
-  pass "OMP restricts the primary adapter exemption to secondmate homes"
+  pass "OMP rejects copied Firstmate extensions without verified repository identity"
 }
 
 test_omp_secondmate_inspects_staged_live_extensions() {
@@ -2091,18 +2118,7 @@ test_omp_secondmate_inspects_staged_live_extensions() {
   read_case_record "$rec"
   printf '%s\n' omp > "$HOME_DIR/config/secondmate-harness"
   sm="$CASE_DIR/secondmate-home"
-  make_seeded_secondmate_home "$sm" "$id"
-  mkdir -p "$sm/.omp/extensions" "$sm/state" "$sm/config" "$sm/projects"
-  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$sm/.omp/extensions/fm-primary-omp.ts"
-  cp "$ROOT/.omp/extensions/fm-fleet-hooks.ts" "$sm/.omp/extensions/fm-fleet-hooks.ts"
-  cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$sm/.omp/extensions/fm-branch-supervision-omp.ts"
-  mkdir -p "$sm/.omp/extensions/lib"
-  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$sm/.omp/extensions/lib/fm-branch-dispatch.ts"
-  cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$sm/.omp/extensions/lib/fm-branch-model-picker.ts"
-  git -C "$sm" init -q
-  git -C "$sm" add .
-  git -C "$sm" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
-    commit -qm 'seed secondmate home'
+  make_trusted_secondmate_home "$sm" "$id"
   printf '%s\n' 'export default function () {}' > "$sm/.omp/extensions/staged.ts"
   git -C "$sm" add .omp/extensions/staged.ts
 
@@ -2111,12 +2127,8 @@ test_omp_secondmate_inspects_staged_live_extensions() {
   expect_code 1 "$status" "OMP secondmate should inspect staged live extension content"
   assert_contains "$out" ".omp/extensions/staged.ts" \
     "OMP secondmate refusal inspected committed content instead of the live index and worktree"
-  assert_not_contains "$out" ".omp/extensions/fm-primary-omp.ts" \
-    "OMP secondmate refusal incorrectly flagged Firstmate's exact tracked primary extension"
-  assert_not_contains "$out" ".omp/extensions/fm-fleet-hooks.ts" \
-    "OMP secondmate refusal incorrectly flagged Firstmate's exact tracked fleet hooks"
-  assert_not_contains "$out" ".omp/extensions/fm-branch-supervision-omp.ts" \
-    "OMP secondmate refusal incorrectly flagged Firstmate's exact tracked branch extension closure"
+  assert_contains "$out" "unknown auto-executed extension '.omp/extensions/staged.ts'" \
+    "OMP staged secondmate refusal did not name the unexpected extension condition"
   assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
     "OMP staged secondmate-extension refusal created an endpoint"
   pass "OMP secondmates trust exact primary and fleet extensions while inspecting staged code"
@@ -2129,27 +2141,138 @@ test_omp_secondmate_rejects_modified_branch_helper() {
   read_case_record "$rec"
   printf '%s\n' omp > "$HOME_DIR/config/secondmate-harness"
   sm="$CASE_DIR/secondmate-home"
-  make_seeded_secondmate_home "$sm" "$id"
-  mkdir -p "$sm/.omp/extensions/lib" "$sm/state" "$sm/config" "$sm/projects"
-  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$sm/.omp/extensions/fm-primary-omp.ts"
-  cp "$ROOT/.omp/extensions/fm-fleet-hooks.ts" "$sm/.omp/extensions/fm-fleet-hooks.ts"
-  cp "$ROOT/.omp/extensions/fm-branch-supervision-omp.ts" "$sm/.omp/extensions/fm-branch-supervision-omp.ts"
-  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$sm/.omp/extensions/lib/fm-branch-dispatch.ts"
-  cp "$ROOT/.omp/extensions/lib/fm-branch-model-picker.ts" "$sm/.omp/extensions/lib/fm-branch-model-picker.ts"
-  git -C "$sm" init -q
-  git -C "$sm" add .
-  git -C "$sm" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
-    commit -qm 'seed branch extension closure'
+  make_trusted_secondmate_home "$sm" "$id"
   printf '\nexport const untrustedSecondmateChange = true;\n' >> "$sm/.omp/extensions/lib/fm-branch-dispatch.ts"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
   expect_code 1 "$status" "OMP secondmate with a modified branch helper should fail the trusted exemption"
-  assert_contains "$out" ".omp/extensions/fm-branch-supervision-omp.ts" \
-    "OMP secondmate helper mismatch did not reject the importing branch extension"
+  assert_contains "$out" ".omp/extensions/lib/fm-branch-dispatch.ts" \
+    "OMP secondmate helper mismatch did not name the changed imported helper"
   assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
     "OMP secondmate helper mismatch created an endpoint"
   pass "OMP secondmates trust the branch extension only with its exact helper closure"
+}
+
+commit_trusted_copy_change() {
+  local project=$1 worktree=$2 path=$3 message=$4 default head
+  git -C "$worktree" add "$path"
+  git -C "$worktree" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "$message"
+  head=$(git -C "$worktree" rev-parse HEAD)
+  default=$(git -C "$project" symbolic-ref --quiet --short refs/remotes/origin/HEAD)
+  default=${default#origin/}
+  git -C "$project" branch -f "$default" "$head"
+  printf '%s\n' "$head"
+}
+
+run_trusted_copy_local_only_spawn() {
+  local head=$1
+  shift
+  run_spawn "$@" --mode local-only --yolo off --accepted-local-base "$head"
+}
+
+test_omp_trusted_firstmate_copy_autopasses_for_worker_and_scout() {
+  local rec worker scout out status
+  worker=$(profile_id profile-omp-trusted-worker-z34)
+  scout=$(profile_id profile-omp-trusted-scout-z35)
+  rec=$(make_trusted_firstmate_copy_case profile-omp-trusted-copy "$worker" "$scout")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_OMP_ACK="$HOME_DIR/state/$worker.omp-started" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$worker" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "an exact verified Firstmate worker copy should launch without extension opt-in"
+  assert_no_grep 'allow_project_omp_extensions=' "$HOME_DIR/state/$worker.meta" \
+    "trusted Firstmate worker recorded an override that was never passed"
+
+  out=$(FM_TEST_OMP_ACK="$HOME_DIR/state/$scout.omp-started" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$scout" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "an exact verified Firstmate scout copy should launch without extension opt-in"
+  assert_grep 'kind=scout' "$HOME_DIR/state/$scout.meta" \
+    "trusted Firstmate scout did not retain scout delivery semantics"
+  assert_no_grep 'allow_project_omp_extensions=' "$HOME_DIR/state/$scout.meta" \
+    "trusted Firstmate scout recorded an override that was never passed"
+  pass "verified Firstmate worker and scout copies auto-accept the exact OMP closure"
+}
+
+test_omp_trusted_firstmate_copy_rejects_changed_entry() {
+  local rec id out status head
+  id=$(profile_id profile-omp-trusted-changed-entry-z36)
+  rec=$(make_trusted_firstmate_copy_case profile-omp-trusted-changed-entry "$id")
+  read_case_record "$rec"
+  printf '\nexport const changedTrustedEntryFixture = true;\n' >> "$WT_DIR/.omp/extensions/fm-primary-omp.ts"
+  head=$(commit_trusted_copy_change "$PROJ_DIR" "$WT_DIR" .omp/extensions/fm-primary-omp.ts 'change trusted entry')
+
+  out=$(run_trusted_copy_local_only_spawn "$head" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a changed trusted OMP entry must stop before worker launch"
+  assert_contains "$out" "closure member '.omp/extensions/fm-primary-omp.ts' differs" \
+    "changed trusted entry did not name its content mismatch"
+  assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
+    "changed trusted entry created an endpoint"
+  pass "verified Firstmate copies reject changed OMP entry content"
+}
+
+test_omp_trusted_firstmate_copy_rejects_unknown_extension() {
+  local rec id out status head
+  id=$(profile_id profile-omp-trusted-unknown-z37)
+  rec=$(make_trusted_firstmate_copy_case profile-omp-trusted-unknown "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'export default function () {}' > "$WT_DIR/.omp/extensions/unknown.ts"
+  head=$(commit_trusted_copy_change "$PROJ_DIR" "$WT_DIR" .omp/extensions/unknown.ts 'add unknown trusted extension')
+
+  out=$(run_trusted_copy_local_only_spawn "$head" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an unknown OMP extension in a Firstmate copy must stop before worker launch"
+  assert_contains "$out" "unknown auto-executed extension '.omp/extensions/unknown.ts'" \
+    "unknown trusted extension did not name its mismatch"
+  assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
+    "unknown trusted extension created an endpoint"
+  pass "verified Firstmate copies reject unknown OMP extensions"
+}
+
+test_omp_trusted_firstmate_copy_rejects_changed_imported_helper() {
+  local rec id out status head
+  id=$(profile_id profile-omp-trusted-changed-helper-z38)
+  rec=$(make_trusted_firstmate_copy_case profile-omp-trusted-changed-helper "$id")
+  read_case_record "$rec"
+  printf '\nexport const changedTrustedHelperFixture = true;\n' >> "$WT_DIR/.omp/extensions/lib/fm-branch-dispatch.ts"
+  head=$(commit_trusted_copy_change "$PROJ_DIR" "$WT_DIR" .omp/extensions/lib/fm-branch-dispatch.ts 'change trusted helper')
+
+  out=$(run_trusted_copy_local_only_spawn "$head" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a changed imported OMP helper must stop before worker launch"
+  assert_contains "$out" "closure member '.omp/extensions/lib/fm-branch-dispatch.ts' differs" \
+    "changed imported helper did not name its content mismatch"
+  assert_no_grep 'new-window|new-session' "$CASE_DIR/endpoint.log" \
+    "changed imported helper created an endpoint"
+  pass "verified Firstmate copies reject changed imported OMP helpers"
+}
+
+test_omp_explicit_extension_override_is_per_launch() {
+  local rec allowed rejected out status
+  allowed=$(profile_id profile-omp-explicit-allow-z39)
+  rejected=$(profile_id profile-omp-explicit-reject-z40)
+  rec=$(make_spawn_case profile-omp-explicit-override omp "$allowed" "$rejected")
+  read_case_record "$rec"
+  commit_project_omp_extension "$PROJ_DIR" "$WT_DIR"
+
+  out=$(FM_TEST_OMP_ACK="$HOME_DIR/state/$allowed.omp-started" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$allowed" "$PROJ_DIR" \
+      --allow-project-omp-extensions)
+  status=$?
+  expect_code 0 "$status" "the explicit OMP extension override should permit this reviewed launch"
+  assert_grep 'allow_project_omp_extensions=1' "$HOME_DIR/state/$allowed.meta" \
+    "the explicit OMP extension override was not recorded"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$rejected" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a prior OMP extension override must not authorize another launch"
+  assert_absent "$HOME_DIR/state/$rejected.meta" \
+    "an unapproved follow-up launch published task metadata"
+  pass "OMP extension approval remains explicit and per launch"
 }
 
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
@@ -2376,9 +2499,14 @@ test_omp_root_symlink_uses_shared_opt_in_boundary
 test_omp_ignores_hidden_direct_extension_files
 test_omp_ignores_unusable_settings_extension_entries
 test_omp_ignores_unsupported_root_extension_manifest
-test_omp_does_not_trust_copied_primary_adapter_in_projects
+test_omp_rejects_unverified_copied_primary_adapter
 test_omp_secondmate_inspects_staged_live_extensions
 test_omp_secondmate_rejects_modified_branch_helper
+test_omp_trusted_firstmate_copy_autopasses_for_worker_and_scout
+test_omp_trusted_firstmate_copy_rejects_changed_entry
+test_omp_trusted_firstmate_copy_rejects_unknown_extension
+test_omp_trusted_firstmate_copy_rejects_changed_imported_helper
+test_omp_explicit_extension_override_is_per_launch
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
 test_batch_forwards_omp_prewalk_target

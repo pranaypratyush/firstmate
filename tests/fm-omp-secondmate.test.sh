@@ -36,22 +36,14 @@ setup_case() { # <name>
   WINDOW_FLAG="$CASE/window"
   RETIRED_FLAG="$CASE/retired"
   mkdir -p "$MAIN_STATE" "$MAIN_DATA/$TASK_ID" "$MAIN_CONFIG" "$MAIN_PROJECTS" \
-    "$HOME_DIR/.omp/extensions/lib" "$HOME_DIR/state" "$HOME_DIR/config" "$HOME_DIR/data" "$HOME_DIR/projects" "$FAKEBIN" "$CASE/tmp"
+    "$FAKEBIN" "$CASE/tmp"
+  git clone --quiet "$ROOT" "$HOME_DIR"
+  mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" "$HOME_DIR/data" "$HOME_DIR/projects"
   : > "$HERDR_LOG"
-  cp "$ROOT/.omp/extensions/fm-primary-omp.ts" "$HOME_DIR/.omp/extensions/fm-primary-omp.ts"
-  cp "$ROOT/.omp/extensions/lib/fm-branch-dispatch.ts" "$HOME_DIR/.omp/extensions/lib/fm-branch-dispatch.ts"
-  cp "$ROOT/AGENTS.md" "$HOME_DIR/AGENTS.md"
-  ln -s "$ROOT/bin" "$HOME_DIR/bin"
   printf '%s\n' "$TASK_ID" > "$HOME_DIR/.fm-secondmate-home"
   printf 'OMP secondmate test charter.\n' > "$MAIN_DATA/$TASK_ID/brief.md"
   printf 'omp test/model low\n' > "$MAIN_CONFIG/secondmate-harness"
   printf 'pi\n' > "$MAIN_CONFIG/crew-harness"
-  git -C "$HOME_DIR" init -q
-  git -C "$HOME_DIR" config user.name fmtest
-  git -C "$HOME_DIR" config user.email fmtest@example.com
-  printf 'home\n' > "$HOME_DIR/README.md"
-  git -C "$HOME_DIR" add README.md .omp/extensions/fm-primary-omp.ts .omp/extensions/lib/fm-branch-dispatch.ts
-  git -C "$HOME_DIR" commit -qm init
 
   cat > "$FAKEBIN/omp" <<'JS'
 #!/usr/bin/env bun

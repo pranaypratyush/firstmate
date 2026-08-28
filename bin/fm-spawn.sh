@@ -34,13 +34,13 @@
 #   not repeat the flag, so exact-session recovery keeps the same launch profile.
 #   Remote secondmates refuse it because their control protocol does not carry a
 #   Prewalk target.
-#   --allow-project-omp-extensions bypasses omp's fail-closed check for tracked
-#   project `.omp/extensions` code and `.omp/settings.json#extensions` roots.
+#   --allow-project-omp-extensions bypasses OMP's preflight for this launch's
+#   `.omp/extensions` code and `.omp/settings.json#extensions` roots.
 #   Use it only after explicit captain approval:
-#   omp auto-executes those files before the model reasons about the task, and
-#   firstmate launches omp with --auto-approve. Firstmate's exact tracked primary,
-#   fleet-hook, and supervision-branch extensions, including their imported OMP
-#   helper closure, are allowlisted only for validated secondmate-home launches.
+#   OMP auto-executes those files before the model reasons about the task, and
+#   firstmate launches OMP with --auto-approve. A verified isolated copy of the
+#   current Firstmate repository needs no override only when every discovered
+#   extension and imported local helper exactly matches the Firstmate code root.
 #   This flag has no effect on other harnesses. Successful OMP spawns record
 #   allow_project_omp_extensions=1 in task metadata for auditability.
 #   --backend <name> is the explicit runtime session-provider backend for this
@@ -1923,35 +1923,280 @@ resolve_project_dir_arg() {
     *) printf '%s\n' "$path" ;;
   esac
 }
-omp_secondmate_extension_matches_trusted_closure() {
-  local project=$1 path=$2 trusted dependency dependencies=
-  case "$path" in
-    .omp/extensions/fm-primary-omp.ts|.omp/extensions/fm-fleet-hooks.ts|.omp/extensions/fm-branch-supervision-omp.ts) ;;
-    *) return 1 ;;
+omp_append_live_extension_offender() {  # <path>
+  local path=$1 item
+  for item in "${OMP_LIVE_EXTENSION_OFFENDERS[@]}"; do
+    [ "$item" = "$path" ] && return 0
+  done
+  OMP_LIVE_EXTENSION_OFFENDERS+=("$path")
+}
+omp_live_project_extension_offenders() {  # <project> -> OMP_LIVE_EXTENSION_OFFENDERS
+  local project=$1 omp_root extensions child relative index manifest manifest_state settings settings_state
+  OMP_LIVE_EXTENSION_OFFENDERS=()
+  omp_root="$project/.omp"
+  if [ -L "$omp_root" ] || { [ -e "$omp_root" ] && [ ! -d "$omp_root" ]; }; then
+    omp_append_live_extension_offender .omp
+    return 0
+  fi
+  [ -d "$omp_root" ] || return 0
+  extensions="$omp_root/extensions"
+  if [ -L "$extensions" ] || { [ -e "$extensions" ] && [ ! -d "$extensions" ]; }; then
+    omp_append_live_extension_offender .omp/extensions
+  elif [ -d "$extensions" ]; then
+    for child in "$extensions"/*; do
+      [ -e "$child" ] || [ -L "$child" ] || continue
+      relative=".omp/extensions/${child##*/}"
+      if [ -L "$child" ]; then
+        omp_append_live_extension_offender "$relative"
+        continue
+      fi
+      case "$child" in
+        *.ts|*.js)
+          [ -f "$child" ] && omp_append_live_extension_offender "$relative"
+          ;;
+      esac
+      [ -d "$child" ] || continue
+      for index in "$child/index.ts" "$child/index.js"; do
+        [ -e "$index" ] || [ -L "$index" ] || continue
+        omp_append_live_extension_offender "$relative/${index##*/}"
+      done
+      manifest="$child/package.json"
+      [ -e "$manifest" ] || [ -L "$manifest" ] || continue
+      if [ -L "$manifest" ] || [ ! -f "$manifest" ]; then
+        omp_append_live_extension_offender "$relative/package.json"
+        continue
+      fi
+      command -v jq >/dev/null 2>&1 || {
+        echo "error: jq is required to inspect OMP extension manifest '$relative/package.json'; refusing the OMP launch" >&2
+        return 1
+      }
+      manifest_state=$(jq -er '
+        if ((.omp // .pi).extensions? // null) == null then "none"
+        elif ((.omp // .pi).extensions | type) != "array" then "invalid"
+        elif ((.omp // .pi).extensions | length) > 0 then "declared"
+        else "none"
+        end
+      ' "$manifest" 2>/dev/null) || {
+        echo "error: could not read OMP extension manifest '$relative/package.json'; refusing the OMP launch" >&2
+        return 1
+      }
+      case "$manifest_state" in
+        declared) omp_append_live_extension_offender "$relative/package.json" ;;
+        invalid)
+          echo "error: OMP extension manifest '$relative/package.json' has a non-array extensions field; refusing the OMP launch" >&2
+          return 1
+          ;;
+      esac
+    done
+  fi
+  settings="$omp_root/settings.json"
+  [ -e "$settings" ] || [ -L "$settings" ] || return 0
+  if [ -L "$settings" ] || [ ! -f "$settings" ]; then
+    omp_append_live_extension_offender .omp/settings.json#extensions
+    return 0
+  fi
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: jq is required to inspect OMP project settings in '$project'; refusing the OMP launch" >&2
+    return 1
+  }
+  settings_state=$(jq -er '
+    if (.extensions | type) != "array" then "none"
+    elif any(.extensions[]; type == "string" and length > 0) then "declared"
+    else "none"
+    end
+  ' "$settings" 2>/dev/null) || {
+    echo "error: could not read OMP project settings '.omp/settings.json'; refusing the OMP launch" >&2
+    return 1
+  }
+  [ "$settings_state" != declared ] \
+    || omp_append_live_extension_offender .omp/settings.json#extensions
+}
+omp_firstmate_repository_identity_matches() {  # <project> -> 0 only for the trusted code root or its verified copy
+  local project=$1 root project_root root_top project_top root_common project_common root_origin project_origin origin_path
+  root=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || return 1
+  project_root=$(cd "$project" 2>/dev/null && pwd -P) || return 1
+  root_top=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null) || return 1
+  project_top=$(git -C "$project_root" rev-parse --show-toplevel 2>/dev/null) || return 1
+  root_top=$(cd "$root_top" 2>/dev/null && pwd -P) || return 1
+  project_top=$(cd "$project_top" 2>/dev/null && pwd -P) || return 1
+  [ "$root_top" = "$root" ] && [ "$project_top" = "$project_root" ] || return 1
+  root_common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  project_common=$(git -C "$project_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ "$root_common" = "$project_common" ] && return 0
+  root_origin=$(git -C "$root" remote get-url origin 2>/dev/null || true)
+  project_origin=$(git -C "$project_root" remote get-url origin 2>/dev/null || true)
+  [ -n "$project_origin" ] || return 1
+  [ -n "$root_origin" ] && [ "$project_origin" = "$root_origin" ] && return 0
+  case "$project_origin" in
+    file://*) origin_path=${project_origin#file://} ;;
+    /*) origin_path=$project_origin ;;
+    *://*|*:* ) return 1 ;;
+    *) origin_path=$project_origin ;;
   esac
-  trusted="$FM_ROOT/$path"
-  [ -f "$trusted" ] && [ ! -L "$trusted" ] \
-    && [ -f "$project/$path" ] && [ ! -L "$project/$path" ] \
-    && cmp -s "$project/$path" "$trusted" || return 1
-  case "$path" in
-    .omp/extensions/fm-primary-omp.ts)
-      dependencies=.omp/extensions/lib/fm-branch-dispatch.ts
-      ;;
-    .omp/extensions/fm-branch-supervision-omp.ts)
-      dependencies=".omp/extensions/lib/fm-branch-dispatch.ts
-.omp/extensions/lib/fm-branch-model-picker.ts"
-      ;;
+  origin_path=$(cd "$project_root" 2>/dev/null && cd "$origin_path" 2>/dev/null && pwd -P) || return 1
+  [ "$origin_path" = "$root" ]
+}
+omp_append_trusted_extension_entry() {  # <path>
+  local path=$1 item
+  for item in "${OMP_TRUSTED_EXTENSION_ENTRIES[@]}"; do
+    [ "$item" = "$path" ] && return 0
+  done
+  OMP_TRUSTED_EXTENSION_ENTRIES+=("$path")
+}
+omp_trusted_extension_entries() {  # <root> -> OMP_TRUSTED_EXTENSION_ENTRIES
+  local root=$1 omp_root extensions child relative index manifest settings settings_state
+  OMP_TRUSTED_EXTENSION_ENTRIES=()
+  OMP_TRUSTED_CLOSURE_REASON=
+  omp_root="$root/.omp"
+  [ -d "$omp_root" ] && [ ! -L "$omp_root" ] || {
+    OMP_TRUSTED_CLOSURE_REASON='.omp is missing, not a directory, or a symlink'
+    return 1
+  }
+  extensions="$omp_root/extensions"
+  [ -d "$extensions" ] && [ ! -L "$extensions" ] || {
+    OMP_TRUSTED_CLOSURE_REASON='.omp/extensions is missing, not a directory, or a symlink'
+    return 1
+  }
+  settings="$omp_root/settings.json"
+  if [ -e "$settings" ] || [ -L "$settings" ]; then
+    OMP_TRUSTED_CLOSURE_REASON='.omp/settings.json prevents a statically bounded trusted closure'
+    return 1
+  fi
+  for child in "$extensions"/*; do
+    [ -e "$child" ] || [ -L "$child" ] || continue
+    relative=".omp/extensions/${child##*/}"
+    [ ! -L "$child" ] || {
+      OMP_TRUSTED_CLOSURE_REASON="$relative is a symlink"
+      return 1
+    }
+    case "$child" in
+      *.ts|*.js)
+        [ -f "$child" ] || {
+          OMP_TRUSTED_CLOSURE_REASON="$relative is not a regular file"
+          return 1
+        }
+        omp_append_trusted_extension_entry "$relative"
+        ;;
+    esac
+    [ -d "$child" ] || continue
+    for index in "$child/index.ts" "$child/index.js"; do
+      [ -e "$index" ] || [ -L "$index" ] || continue
+      [ -f "$index" ] && [ ! -L "$index" ] || {
+        OMP_TRUSTED_CLOSURE_REASON="$relative/${index##*/} is not a regular file"
+        return 1
+      }
+      omp_append_trusted_extension_entry "$relative/${index##*/}"
+    done
+    manifest="$child/package.json"
+    [ -e "$manifest" ] || [ -L "$manifest" ] || continue
+    OMP_TRUSTED_CLOSURE_REASON="$relative/package.json prevents a statically bounded trusted closure"
+    return 1
+  done
+}
+omp_path_is_safe_regular_file() {  # <root> <relative-path>
+  local root=$1 relative=$2 current component
+  case "$relative" in
+    ''|/*|*'//'*) return 1 ;;
   esac
-  [ -n "$dependencies" ] || return 0
-  while IFS= read -r dependency; do
-    trusted="$FM_ROOT/$dependency"
-    [ -f "$trusted" ] && [ ! -L "$trusted" ] \
-      && [ -f "$project/$dependency" ] && [ ! -L "$project/$dependency" ] \
-      && cmp -s "$project/$dependency" "$trusted" || return 1
-  done <<< "$dependencies"
+  current=$root
+  while [ -n "$relative" ]; do
+    component=${relative%%/*}
+    relative=${relative#"$component"}
+    relative=${relative#/}
+    case "$component" in ''|.|..) return 1 ;; esac
+    current="$current/$component"
+    [ ! -L "$current" ] || return 1
+    if [ -n "$relative" ]; then
+      [ -d "$current" ] || return 1
+    else
+      [ -f "$current" ] && [ -r "$current" ] || return 1
+    fi
+  done
+}
+omp_relative_import_specifiers() {  # <TypeScript file> -> one relative specifier per line
+  sed -nE \
+    -e 's/.*[[:space:]]from[[:space:]]*["'"'"'](\.[^"'"'"']*)["'"'"'].*/\1/p' \
+    -e 's/.*import[[:space:]]*\(["'"'"'](\.[^"'"'"']*)["'"'"'].*/\1/p' \
+    "$1"
+}
+omp_resolve_trusted_relative_import() {  # <root> <relative importer> <relative specifier>
+  local root=$1 importer=$2 specifier=$3 base candidate resolved relative
+  case "$specifier" in ./*|../*) ;; *) return 1 ;; esac
+  base="$root/$(dirname "$importer")"
+  for candidate in "$base/$specifier" "$base/$specifier.ts" "$base/$specifier.js" \
+    "$base/$specifier/index.ts" "$base/$specifier/index.js"; do
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+    resolved="$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P)/$(basename "$candidate")"
+    case "$resolved" in "$root"/*) ;; *) return 1 ;; esac
+    relative=${resolved#"$root"/}
+    omp_path_is_safe_regular_file "$root" "$relative" || return 1
+    printf '%s\n' "$relative"
+    return 0
+  done
+  return 1
+}
+omp_path_list_contains() {  # <path> <path...>
+  local needle=$1 item
+  shift
+  for item in "$@"; do
+    [ "$item" = "$needle" ] && return 0
+  done
+  return 1
+}
+omp_firstmate_extension_closure_matches_trusted_root() {  # <project> -> exact entry and imported-helper closure
+  local project=$1 entry expected candidate relative dependency
+  local -a expected_entries candidate_entries queue visited
+  OMP_TRUSTED_CLOSURE_REASON=
+  omp_firstmate_repository_identity_matches "$project" || {
+    OMP_TRUSTED_CLOSURE_REASON='repository identity cannot be verified against the Firstmate code root'
+    return 1
+  }
+  omp_trusted_extension_entries "$FM_ROOT" || return 1
+  expected_entries=("${OMP_TRUSTED_EXTENSION_ENTRIES[@]}")
+  omp_trusted_extension_entries "$project" || return 1
+  candidate_entries=("${OMP_TRUSTED_EXTENSION_ENTRIES[@]}")
+  for entry in "${candidate_entries[@]}"; do
+    omp_path_list_contains "$entry" "${expected_entries[@]}" || {
+      OMP_TRUSTED_CLOSURE_REASON="unknown auto-executed extension '$entry'"
+      return 1
+    }
+  done
+  for entry in "${expected_entries[@]}"; do
+    omp_path_list_contains "$entry" "${candidate_entries[@]}" || {
+      OMP_TRUSTED_CLOSURE_REASON="missing auto-executed extension '$entry'"
+      return 1
+    }
+    queue+=("$entry")
+  done
+  while [ "${#queue[@]}" -gt 0 ]; do
+    relative=${queue[0]}
+    queue=("${queue[@]:1}")
+    omp_path_list_contains "$relative" "${visited[@]}" && continue
+    visited+=("$relative")
+    if ! omp_path_is_safe_regular_file "$FM_ROOT" "$relative" \
+      || ! omp_path_is_safe_regular_file "$project" "$relative"; then
+      OMP_TRUSTED_CLOSURE_REASON="closure member '$relative' is unreadable, escaping, or symlink-substituted"
+      return 1
+    fi
+    expected="$FM_ROOT/$relative"
+    candidate="$project/$relative"
+    cmp -s "$expected" "$candidate" || {
+      OMP_TRUSTED_CLOSURE_REASON="closure member '$relative' differs from the Firstmate code root"
+      return 1
+    }
+    while IFS= read -r dependency; do
+      [ -n "$dependency" ] || continue
+      dependency=$(omp_resolve_trusted_relative_import "$FM_ROOT" "$relative" "$dependency") || {
+        OMP_TRUSTED_CLOSURE_REASON="imported helper from '$relative' is missing, escaping, or symlink-substituted"
+        return 1
+      }
+      queue+=("$dependency")
+    done < <(omp_relative_import_specifiers "$expected")
+  done
 }
 omp_project_extension_preflight() {
-  local project=$1 record metadata stage path relative offenders manifest_state
+  local project=$1 record metadata stage path relative offenders manifest_state trusted_reason
   local settings_path settings_state scan_source tracked_count index_status head_status seen duplicate
   local omp_root_offender=0 extensions_root_offender=0
   local -a seen_paths
@@ -2109,27 +2354,35 @@ omp_project_extension_preflight() {
       offenders="${offenders}${offenders:+$'\n'}$settings_path#extensions"
     fi
   fi
-
-  if [ -n "$offenders" ]; then
-    filtered=
-    while IFS= read -r path; do
-      if [ "$KIND" = secondmate ] \
-        && omp_secondmate_extension_matches_trusted_closure "$project" "$path"; then
-        continue
-      fi
-      filtered="${filtered}${filtered:+$'\n'}$path"
+  omp_live_project_extension_offenders "$project" || return 1
+  for path in "${OMP_LIVE_EXTENSION_OFFENDERS[@]}"; do
+    duplicate=0
+    while IFS= read -r seen; do
+      [ "$seen" = "$path" ] && duplicate=1
     done <<< "$offenders"
-    offenders=$filtered
+    [ "$duplicate" -eq 1 ] || offenders="${offenders}${offenders:+$'\n'}$path"
+  done
+  trusted_reason=
+  if [ -n "$offenders" ]; then
+    if omp_firstmate_extension_closure_matches_trusted_root "$project"; then
+      offenders=
+    else
+      trusted_reason=$OMP_TRUSTED_CLOSURE_REASON
+    fi
   fi
   [ -n "$offenders" ] || return 0
   if [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 1 ]; then
-    echo "warning: launching omp with explicitly approved tracked project extensions:" >&2
+    [ -z "$trusted_reason" ] \
+      || echo "warning: automatic Firstmate OMP extension trust is unavailable: $trusted_reason" >&2
+    echo "warning: launching omp with explicitly approved project extension code:" >&2
     printf '%s\n' "$offenders" | sed 's/^/  /' >&2
     return 0
   fi
-  echo "error: refusing omp launch because the project tracks auto-executed OMP extension code:" >&2
+  [ -z "$trusted_reason" ] \
+    || echo "error: automatic Firstmate OMP extension trust is unavailable: $trusted_reason" >&2
+  echo "error: refusing omp launch because the project contains auto-executed OMP extension code:" >&2
   printf '%s\n' "$offenders" | sed 's/^/  /' >&2
-  echo "omp runs tracked extensions before the model reasons about the task and firstmate passes --auto-approve. Select another verified harness, or pass --allow-project-omp-extensions only after explicit captain approval." >&2
+  echo "omp runs project extensions before the model reasons about the task and firstmate passes --auto-approve. Select another verified harness, or pass --allow-project-omp-extensions only after explicit captain approval." >&2
   return 1
 }
 
