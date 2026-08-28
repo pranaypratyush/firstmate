@@ -401,6 +401,7 @@ EOF
   status=$?
   expect_code 0 "$status" "a No-Mistakes promotion should succeed"
   assert_grep 'Firstmate-Validation-Generation: <plan-generation>' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted generation-bound run creation"
+  assert_grep 'fm-receipt-check.sh promote-nm --launch-run --generation <plan-generation>' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted launch-time run recording"
   assert_grep 'fm-receipt-check.sh promote-nm --bind-run <run-id> --generation <plan-generation>' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted run binding"
   assert_grep 'fm-receipt-check.sh promote-nm --complete --terminal-evidence no-mistakes-passed' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted completion recording"
   assert_grep 'done: PR {url} checks green' "$home/data/promote-nm/brief.md" "promoted No-Mistakes brief omitted its CI-ready terminal status"

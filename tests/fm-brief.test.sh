@@ -195,7 +195,7 @@ EOF
 # one of these DOD blocks, since a broken heredoc corrupts or empties the
 # generated brief content, not just the script's own syntax.
 test_ship_modes_generate_clean_briefs() {
-  local home id mode brief status out attestation_instruction
+  local home id mode brief status out launch_instruction
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
@@ -234,10 +234,10 @@ test_ship_modes_generate_clean_briefs() {
         ;;
       no-mistakes)
         assert_grep "fm-receipt-check.sh $id --complete" "$brief" "$id: no-mistakes brief omitted pipeline completion"
-        attestation_instruction=$(grep "fm-receipt-check.sh $id --attest-run" "$brief")
-        case "$attestation_instruction" in
-          *"--attest-run"*"--bind-run"*) ;;
-          *) fail "$id: no-mistakes brief did not attest the run before binding" ;;
+        launch_instruction=$(grep "fm-receipt-check.sh $id --launch-run" "$brief")
+        case "$launch_instruction" in
+          *"--launch-run"*"--bind-run"*) ;;
+          *) fail "$id: no-mistakes brief did not launch the run before binding" ;;
         esac
         assert_grep "fm-receipt-check.sh $id --bind-run" "$brief" "$id: no-mistakes brief omitted exact run binding"
         assert_grep "ordinary findings from any validation tier" "$brief" "$id: no-mistakes brief narrowed original-worker fixes"

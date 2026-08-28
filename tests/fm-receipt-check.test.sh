@@ -54,8 +54,8 @@ test_help_advertises_generation_bound_run_binding() {
   out=$("$CHECK" --help) || fail "receipt checker help failed"
   assert_contains "$out" "--bind-run <run-id> --generation <plan-generation>" \
     "receipt checker help omitted the required run generation"
-  assert_contains "$out" "--attest-run <run-id> --generation <plan-generation>" \
-    "receipt checker help omitted the supplied-intent run attestation"
+  assert_contains "$out" "--launch-run --generation <plan-generation> -- [axi-run-args...]" \
+    "receipt checker help omitted the supplied-intent launch contract"
   assert_contains "$out" "--implementation-complete" \
     "receipt checker help omitted the implementation boundary action"
   assert_contains "$out" "refreshes it when that head changes" \
@@ -83,6 +83,8 @@ test_help_advertises_generation_bound_run_binding() {
     || fail "ship delivery renderer failed"
   assert_contains "$out" "fm-receipt-check.sh help-task --implementation-complete" \
     "generated ship sequence omitted the implementation boundary action"
+  assert_contains "$out" "fm-receipt-check.sh help-task --launch-run --generation <plan-generation>" \
+    "generated ship sequence omitted the supplied-intent launch command"
   pass "fm-receipt-check help renders an executable generation-bound bind command"
 }
 
@@ -849,7 +851,7 @@ test_terminal_and_failed_runs_bind_by_current_plan() {
 }
 
 test_supplied_intent_binding_requires_plan_identity() {
-  local id=supplied-intent base project head generation started valid_id branch_drift_id wrong_head_id wrong_branch_id failed_id cancelled_id unrelated_id same_millisecond_id preplan_id valid branch_drift wrong_head wrong_branch failed cancelled unrelated preplan preplan_candidate fakebin rc
+  local id=supplied-intent base project head generation started valid_id branch_drift_id wrong_head_id wrong_branch_id failed_id cancelled_id unrelated_id same_millisecond_id preplan_id valid branch_drift wrong_head wrong_branch failed cancelled unrelated preplan preplan_candidate fakebin launch_log launch_out rc
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint passed
@@ -879,10 +881,22 @@ test_supplied_intent_binding_requires_plan_identity() {
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run "$valid_id" --generation "$generation" >/dev/null 2>&1
   rc=$?
-  expect_code 2 "$rc" "supplied-intent run cannot bind without its creation attestation"
-  FM_FAKE_NM_STATUS="$valid" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
-    "$CHECK" "$id" --attest-run "$valid_id" --generation "$generation" >/dev/null \
-    || fail "post-plan supplied-intent run could not be attested"
+  expect_code 2 "$rc" "supplied-intent run cannot bind without its launch record"
+  printf 'validation_run_attestation=%s:%s:fm/%s:%s\n' "$generation" "$valid_id" "$id" "$head" >> "$HOME_DIR/state/$id.meta"
+  FM_FAKE_NM_STATUS="$valid" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
+    FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --bind-run "$valid_id" --generation "$generation" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "post-hoc attestation cannot bind a supplied-intent run"
+  launch_log="$TMP_ROOT/$id-launch.log"
+  launch_out=$(FM_NM_LOG="$launch_log" FM_FAKE_NM_STATUS="$valid" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --launch-run --generation "$generation" -- --intent opaque)
+  rc=$?
+  expect_code 0 "$rc" "post-plan supplied-intent run could not be launched"
+  assert_contains "$launch_out" '"schema":"fm-validation-run-launch.v1"' "launch wrapper did not report its durable proof"
+  assert_grep 'axi run --intent opaque' "$launch_log" "launch wrapper did not start No-Mistakes"
+  assert_grep "validation_run_launch=$generation:$valid_id:fm/$id:$head" "$HOME_DIR/state/$id.meta" \
+    "launch wrapper did not persist the exact plan-bound run identity"
   FM_FAKE_NM_STATUS="$valid" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run "$valid_id" --generation "$generation" >/dev/null \
@@ -970,9 +984,9 @@ EOF
   preplan_candidate=$(nm_ulid_at_ms 1000000000150)
   preplan=$(nm_status "$preplan_candidate" "$head" pending)
   FM_FAKE_NM_STATUS="$preplan" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
-    "$CHECK" "$id" --attest-run "$preplan_candidate" --generation "$generation" >/dev/null 2>&1
+    "$CHECK" "$id" --launch-run --generation "$generation" -- --intent opaque >/dev/null 2>&1
   rc=$?
-  expect_code 2 "$rc" "pre-publication supplied-intent run cannot be attested"
+  expect_code 2 "$rc" "pre-publication supplied-intent run cannot be launched"
   FM_FAKE_NM_STATUS="$preplan" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run "$preplan_candidate" --generation "$generation" >/dev/null 2>&1
