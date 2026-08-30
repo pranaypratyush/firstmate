@@ -131,6 +131,7 @@ fm_backend_tmux_send_literal() {  # <target> <text>
 fm_backend_tmux_kill() {  # <target>
   local target=${1:-} session window
   case "$target" in
+    @[0-9]*) tmux kill-window -t "$target" 2>/dev/null || true; return 0 ;;
     *:*)
       session=${target%%:*}
       window=${target#*:}
@@ -272,35 +273,57 @@ fm_backend_tmux_hermes_agent_state() {  # <target> <absolute-hermes-bin> -> aliv
 # An omitted window or a definitive missing-session/server response is
 # `missing`; any other inventory or pane read failure is `unreadable`, so a
 # transient tmux problem never licenses a duplicate.
-fm_backend_tmux_agent_state() {  # <target> [bun-realpath] [omp-realpath] [hermes-bin]
-  local target=$1 expected_bun=${2:-} expected_omp=${3:-} expected_hermes=${4:-}
+fm_backend_tmux_agent_state() {  # <target> [bun-realpath] [omp-realpath] [hermes-bin] [session]
+  local target=$1 expected_bun=${2:-} expected_omp=${3:-} expected_hermes=${4:-} expected_session=${5:-}
   local comm session window windows inventory_status
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
+    @*) ;;
     *) printf 'unreadable'; return 0 ;;
   esac
-  session=${target%%:*}
-  window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
-    inventory_status=0
+  if [ "${target#@}" != "$target" ]; then
+    if windows=$(LC_ALL=C tmux list-windows -a -F '#{window_id}' 2>&1); then
+      inventory_status=0
+    else
+      inventory_status=$?
+    fi
+    if [ "$inventory_status" -ne 0 ]; then
+      case "$windows" in
+        *"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)") printf 'missing' ;;
+        *) printf 'unreadable' ;;
+      esac
+      return 0
+    fi
+    if ! printf '%s\n' "$windows" | grep -Fqx "$target"; then
+      printf 'missing'
+      return 0
+    fi
+    [ -n "$expected_session" ] || { printf 'unreadable'; return 0; }
+    target="$expected_session:$target"
   else
-    inventory_status=$?
-  fi
-  if [ "$inventory_status" -ne 0 ]; then
-    case "$windows" in
-      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
-        printf 'missing'
-        ;;
-      *)
-        printf 'unreadable'
-        ;;
-    esac
-    return 0
-  fi
-  if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
-    printf 'missing'
-    return 0
+    session=${target%%:*}
+    window=${target#*:}
+    if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+      inventory_status=0
+    else
+      inventory_status=$?
+    fi
+    if [ "$inventory_status" -ne 0 ]; then
+      case "$windows" in
+        *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+          printf 'missing'
+          ;;
+        *)
+          printf 'unreadable'
+          ;;
+      esac
+      return 0
+    fi
+    if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
+      printf 'missing'
+      return 0
+    fi
   fi
 
   comm=$(fm_backend_tmux_current_command "$target") || {

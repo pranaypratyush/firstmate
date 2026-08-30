@@ -161,8 +161,8 @@ spawn() {
 
 agent_state() {
   PATH="$FIXTURE_PATH" bash -c \
-    '. "$1/bin/fm-backend.sh"; fm_backend_agent_state tmux "$2" "$3"' \
-    _ "$ROOT" "$TARGET" "$HOME_DIR/state/$ID.meta"
+    '. "$1/bin/fm-backend.sh"; target=$(fm_backend_target_of_meta "$2"); fm_backend_agent_state tmux "$target" "$2"' \
+    _ "$ROOT" "$HOME_DIR/state/$ID.meta"
 }
 
 wait_for_state() {
@@ -223,7 +223,11 @@ assert_contains "$(tail -n 1 "$LAB/launches")" "resume=$SESSION_FILE" \
   "recovery did not pass the exact retained session to --resume"
 assert_contains "$(cat "$META")" 'endpoint_generation=' \
   "recovery did not atomically distinguish the replacement endpoint generation"
-for artifact in "$HOME_DIR/state/$ID.omp-replacement.meta" "$HOME_DIR/state/$ID.omp-replacement.base" \
+case "$(awk -F= '$1 == "window" { print $2 }' "$META")" in
+  @*) ;;
+  *) fail "recovery did not publish its response-derived tmux window id" ;;
+esac
+for artifact in "$HOME_DIR/state/$ID.omp-replacement.intent" "$HOME_DIR/state/$ID.omp-replacement.meta" "$HOME_DIR/state/$ID.omp-replacement.base" \
   "$HOME_DIR/state/$ID.omp-replacement-ext.ts" "$HOME_DIR/state/$ID.omp-replacement-started"; do
   assert_absent "$artifact" "successful recovery retained replacement sidecar $artifact"
 done
@@ -256,6 +260,16 @@ printf '%s\n' "$SESSION_FILE" > "$SESSION_POINTER"
 rm -rf "$TASK_TMP/omp-sessions"
 pass "missing and legacy temporary session bindings are refused"
 
+printf 'base_sha256=interrupted\nbackend=tmux\n' > "$HOME_DIR/state/$ID.omp-replacement.intent"
+out=$(spawn "$ID" --recover 2>&1)
+status=$?
+[ "$status" -ne 0 ] || fail "recovery accepted an unreconciled pre-create intent"
+assert_contains "$out" 'pre-create intent without a response-derived replacement endpoint' \
+  "pre-create interruption refusal was not actionable"
+wait_for_state missing || fail "pre-create interruption refusal created an endpoint"
+rm -f "$HOME_DIR/state/$ID.omp-replacement.intent"
+pass "unreconciled pre-create intents refuse duplicate recovery"
+
 touch "$LAB/no-lease"
 out=$(spawn "$ID" --recover 2>&1)
 status=$?
@@ -282,16 +296,27 @@ cmp -s "$SESSION_FILE" "$LAB/session.before" || fail "unacknowledged recovery ch
 rm -f "$LAB/skip-ack"
 pass "failed recovery cleans only its exact replacement endpoint"
 
-PATH="$FIXTURE_PATH" tmux new-window -d -t firstmate -n "fm-$ID" -c "$WORKTREE" \
-  "FM_OMP_SESSION_POINTER='$SESSION_POINTER' '$WRAPPER_BIN/bun' '$WRAPPER_BIN/omp' --session-dir '$SESSION_DIR' --resume '$SESSION_FILE' -e '$HOME_DIR/state/$ID.omp-ext.ts'"
-wait_for_state alive || fail "interrupted replacement fixture was not live"
-awk -v generation="interrupted-$$" '
+INTERRUPTED_WID=$(PATH="$FIXTURE_PATH" tmux new-window -dP -F '#{window_id}' -t firstmate -n "fm-$ID" -c "$WORKTREE" \
+  "FM_OMP_SESSION_POINTER='$SESSION_POINTER' '$WRAPPER_BIN/bun' '$WRAPPER_BIN/omp' --session-dir '$SESSION_DIR' --resume '$SESSION_FILE' -e '$HOME_DIR/state/$ID.omp-ext.ts'")
+awk -v generation="interrupted-$$" -v window="$INTERRUPTED_WID" '
+  /^window=/ { print "window=" window; next }
   /^endpoint_generation=/ { if (!seen++) print "endpoint_generation=" generation; next }
   { print }
   END { if (!seen) print "endpoint_generation=" generation }
 ' "$META" > "$HOME_DIR/state/$ID.omp-replacement.meta"
 hash_file "$META" > "$HOME_DIR/state/$ID.omp-replacement.base"
 touch "$HOME_DIR/state/$ID.omp-replacement-started"
+candidate_omp_bin=$(awk -F= '$1 == "omp_bin" { print $2 }' "$HOME_DIR/state/$ID.omp-replacement.meta")
+candidate_omp_bun=$(awk -F= '$1 == "omp_bun" { print $2 }' "$HOME_DIR/state/$ID.omp-replacement.meta")
+candidate_session=$(awk -F= '$1 == "tmux_session" { print $2 }' "$HOME_DIR/state/$ID.omp-replacement.meta")
+for _ in $(seq 1 80); do
+  state=$(PATH="$FIXTURE_PATH" bash -c \
+    '. "$1/bin/fm-backend.sh"; fm_backend_source tmux; fm_backend_tmux_agent_state "$2" "$3" "$4" "" "$5"' \
+    _ "$ROOT" "$INTERRUPTED_WID" "$candidate_omp_bun" "$candidate_omp_bin" "$candidate_session")
+  [ "$state" != alive ] || break
+  sleep 0.05
+done
+[ "$state" = alive ] || fail "interrupted replacement fixture was not live"
 out=$(spawn "$ID" --recover 2>&1) || fail "interrupted recovery reconciliation failed: $out"
 assert_contains "$out" "recovered $ID harness=omp" \
   "interrupted recovery did not report reconciled success"

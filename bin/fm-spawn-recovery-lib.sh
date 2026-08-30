@@ -82,6 +82,7 @@ fm_spawn_recovery_pointer_valid() { # <pointer> <session-dir> [required-session]
 }
 
 fm_spawn_recovery_candidate_paths() { # <state> <task-id>
+  FM_SPAWN_RECOVERY_INTENT="$1/$2.omp-replacement.intent"
   FM_SPAWN_RECOVERY_CANDIDATE="$1/$2.omp-replacement.meta"
   FM_SPAWN_RECOVERY_BASE="$1/$2.omp-replacement.base"
   FM_SPAWN_RECOVERY_NOTE="$1/$2.omp-replacement-brief"
@@ -152,7 +153,8 @@ fm_spawn_recovery_preselect() { # <state> <data> <task-id>
   esac
 
   FM_SPAWN_RECOVERY_PENDING=0
-  if [ -e "$FM_SPAWN_RECOVERY_CANDIDATE" ] || [ -L "$FM_SPAWN_RECOVERY_CANDIDATE" ] \
+  if [ -e "$FM_SPAWN_RECOVERY_INTENT" ] || [ -L "$FM_SPAWN_RECOVERY_INTENT" ] \
+     || [ -e "$FM_SPAWN_RECOVERY_CANDIDATE" ] || [ -L "$FM_SPAWN_RECOVERY_CANDIDATE" ] \
      || [ -e "$FM_SPAWN_RECOVERY_BASE" ] || [ -L "$FM_SPAWN_RECOVERY_BASE" ]; then
     FM_SPAWN_RECOVERY_PENDING=1
   else
@@ -182,6 +184,14 @@ fm_spawn_recovery_preselect() { # <state> <data> <task-id>
   fi
   FM_SPAWN_RECOVERY_HERDR_SESSION=
   FM_SPAWN_RECOVERY_HERDR_WORKSPACE=
+  FM_SPAWN_RECOVERY_TMUX_SESSION=
+  if [ "$backend" = tmux ]; then
+    if [ "${target#@}" != "$target" ]; then
+      FM_SPAWN_RECOVERY_TMUX_SESSION=$(fm_spawn_recovery_exact "$meta" tmux_session) || return 1
+    else
+      FM_SPAWN_RECOVERY_TMUX_SESSION=${target%%:*}
+    fi
+  fi
   if [ "$backend" = herdr ]; then
     FM_SPAWN_RECOVERY_HERDR_SESSION=$(fm_spawn_recovery_exact "$meta" herdr_session) || return 1
     FM_SPAWN_RECOVERY_HERDR_WORKSPACE=$(fm_spawn_recovery_exact "$meta" herdr_workspace_id) || return 1
@@ -219,7 +229,19 @@ fm_spawn_recovery_prepare_artifacts() { # <brief>
   printf '\n\nRecovery continuation: Firstmate replaced a proven-missing OMP endpoint in the preserved isolated copy. Re-read the brief, inspect the current branch and uncommitted work, and continue without resetting or discarding work.\n' >> "$FM_SPAWN_RECOVERY_NOTE"
 }
 
-fm_spawn_recovery_stage_candidate() { # <state> <task-id> <backend> <target> [herdr-session workspace tab pane]
+fm_spawn_recovery_begin_attempt() { # <state> <task-id> <backend>
+  local state=$1 id=$2 backend=$3 intent_tmp base_sha
+  [ ! -e "$FM_SPAWN_RECOVERY_INTENT" ] && [ ! -L "$FM_SPAWN_RECOVERY_INTENT" ] || return 1
+  base_sha=$(fm_spawn_recovery_sha256 "$FM_SPAWN_RECOVERY_META") || return 1
+  intent_tmp=$(mktemp "$state/.${id}.omp-replacement-intent.XXXXXX") || return 1
+  {
+    printf 'base_sha256=%s\n' "$base_sha"
+    printf 'backend=%s\n' "$backend"
+  } > "$intent_tmp" || { rm -f -- "$intent_tmp"; return 1; }
+  mv -f -- "$intent_tmp" "$FM_SPAWN_RECOVERY_INTENT" || { rm -f -- "$intent_tmp"; return 1; }
+}
+
+fm_spawn_recovery_stage_candidate() { # <state> <task-id> <backend> <target> [session workspace tab pane]
   local state=$1 id=$2 backend=$3 target=$4 session=${5:-} workspace=${6:-} tab=${7:-} pane=${8:-}
   local base_tmp candidate_tmp base_sha generation
   generation="$id-$(date +%s)-$$-${RANDOM:-0}"
@@ -233,12 +255,16 @@ fm_spawn_recovery_stage_candidate() { # <state> <task-id> <backend> <target> [he
     /^endpoint_task_id=/ { print "endpoint_task_id=" id; next }
     /^endpoint_generation=/ { if (!generation_seen++) print "endpoint_generation=" generation; next }
     /^backend=/ { if (backend != "tmux") print "backend=" backend; next }
+    /^tmux_session=/ { if (backend == "tmux") { print "tmux_session=" session; tmux_session_seen=1 }; next }
     /^herdr_session=/ { if (backend == "herdr") print "herdr_session=" session; next }
     /^herdr_workspace_id=/ { if (backend == "herdr") print "herdr_workspace_id=" workspace; next }
     /^herdr_tab_id=/ { if (backend == "herdr") print "herdr_tab_id=" tab; next }
     /^herdr_pane_id=/ { if (backend == "herdr") print "herdr_pane_id=" pane; next }
     { print }
-    END { if (!generation_seen) print "endpoint_generation=" generation }
+    END {
+      if (!generation_seen) print "endpoint_generation=" generation
+      if (backend == "tmux" && !tmux_session_seen) print "tmux_session=" session
+    }
   ' "$FM_SPAWN_RECOVERY_META" > "$candidate_tmp"; then
     rm -f -- "$candidate_tmp"
     return 1
@@ -246,6 +272,7 @@ fm_spawn_recovery_stage_candidate() { # <state> <task-id> <backend> <target> [he
   fm_backend_validate_task_endpoint "$candidate_tmp" "$id" || { rm -f -- "$candidate_tmp"; return 1; }
   [ "$FM_BACKEND_VALIDATED_BACKEND" = "$backend" ] && [ "$FM_BACKEND_VALIDATED_TARGET" = "$target" ] || { rm -f -- "$candidate_tmp"; return 1; }
   mv -f -- "$candidate_tmp" "$FM_SPAWN_RECOVERY_CANDIDATE" || { rm -f -- "$candidate_tmp"; return 1; }
+  rm -f -- "$FM_SPAWN_RECOVERY_INTENT" || return 1
   FM_SPAWN_RECOVERY_NEW_TARGET=$target
 }
 
@@ -275,22 +302,26 @@ fm_spawn_recovery_publish() { # <state> <task-id>
 }
 
 fm_spawn_recovery_remove_sidecars() {
-  rm -f -- "$FM_SPAWN_RECOVERY_CANDIDATE" "$FM_SPAWN_RECOVERY_BASE" \
+  rm -f -- "$FM_SPAWN_RECOVERY_INTENT" "$FM_SPAWN_RECOVERY_CANDIDATE" "$FM_SPAWN_RECOVERY_BASE" \
     "$FM_SPAWN_RECOVERY_NOTE" "$FM_SPAWN_RECOVERY_EXTENSION" \
     "$FM_SPAWN_RECOVERY_READY" "$FM_SPAWN_RECOVERY_STARTED"
 }
 
 fm_spawn_recovery_candidate_state() { # <backend> <target> <candidate-meta>
-  local backend=$1 target=$2 meta=$3 omp_bin omp_bun
+  local backend=$1 target=$2 meta=$3 omp_bin omp_bun tmux_session
   case "$backend" in
     tmux)
       omp_bin=$(fm_spawn_recovery_exact "$meta" omp_bin) || return 1
       omp_bun=$(fm_spawn_recovery_exact "$meta" omp_bun) || return 1
+      tmux_session=
+      if [ "${target#@}" != "$target" ]; then
+        tmux_session=$(fm_spawn_recovery_exact "$meta" tmux_session) || return 1
+      fi
       fm_backend_source tmux || return 1
-      fm_backend_tmux_agent_state "$target" "$omp_bun" "$omp_bin"
+      fm_backend_tmux_agent_state "$target" "$omp_bun" "$omp_bin" "" "$tmux_session"
       ;;
     herdr)
-      fm_backend_agent_state herdr "$target"
+      fm_backend_agent_state herdr "$target" "$meta"
       ;;
     *) printf 'unverified' ;;
   esac
@@ -299,6 +330,12 @@ fm_spawn_recovery_candidate_state() { # <backend> <target> <candidate-meta>
 fm_spawn_recovery_reconcile_pending() { # <state> <task-id>
   local state=$1 id=$2 current expected candidate_state candidate_target candidate_backend
   FM_SPAWN_RECOVERY_RECONCILED=retry
+  if { [ -e "$FM_SPAWN_RECOVERY_INTENT" ] || [ -L "$FM_SPAWN_RECOVERY_INTENT" ]; } \
+     && [ ! -e "$FM_SPAWN_RECOVERY_CANDIDATE" ] && [ ! -L "$FM_SPAWN_RECOVERY_CANDIDATE" ]; then
+    [ -f "$FM_SPAWN_RECOVERY_INTENT" ] && [ ! -L "$FM_SPAWN_RECOVERY_INTENT" ] || return 1
+    echo "error: interrupted OMP recovery has a pre-create intent without a response-derived replacement endpoint; preserving task state" >&2
+    return 1
+  fi
   if [ ! -e "$FM_SPAWN_RECOVERY_CANDIDATE" ] && [ -f "$FM_SPAWN_RECOVERY_BASE" ] && [ ! -L "$FM_SPAWN_RECOVERY_BASE" ]; then
     IFS= read -r expected < "$FM_SPAWN_RECOVERY_BASE" || return 1
     current=$(fm_spawn_recovery_sha256 "$FM_SPAWN_RECOVERY_META") || return 1
@@ -353,8 +390,13 @@ fm_spawn_recovery_cleanup_replacement() { # <backend> <target>
     return 0
   fi
   if [ -n "$target" ]; then
-    fm_backend_kill "$backend" "$target" 2>/dev/null || return 1
-    state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf 'unreadable')
+    if [ "$backend" = herdr ]; then
+      fm_backend_source herdr || return 1
+      fm_backend_herdr_recovery_kill "$target" "$FM_SPAWN_RECOVERY_CANDIDATE" 2>/dev/null || return 1
+    else
+      fm_backend_kill "$backend" "$target" 2>/dev/null || return 1
+    fi
+    state=$(fm_spawn_recovery_candidate_state "$backend" "$target" "$FM_SPAWN_RECOVERY_CANDIDATE" 2>/dev/null || printf 'unreadable')
     [ "$state" = missing ] || {
       echo "warning: OMP recovery stopped its replacement but observed endpoint state $state instead of missing" >&2
       return 1

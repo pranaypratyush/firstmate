@@ -2436,7 +2436,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.omp-ext.ts" "$sub_state/$child_id.omp-ready" \
       "$sub_state/$child_id.omp-started" "$sub_state/$child_id.omp-session" \
-      "$sub_state/$child_id.omp-replacement.meta" "$sub_state/$child_id.omp-replacement.base" \
+      "$sub_state/$child_id.omp-replacement.intent" "$sub_state/$child_id.omp-replacement.meta" "$sub_state/$child_id.omp-replacement.base" \
       "$sub_state/$child_id.omp-replacement-brief" "$sub_state/$child_id.omp-replacement-ext.ts" \
       "$sub_state/$child_id.omp-replacement-ready" "$sub_state/$child_id.omp-replacement-started" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
@@ -2731,7 +2731,7 @@ rm -rf -- "$STATE/$ID.omp-sessions"
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
   "$STATE/$ID.omp-started" "$STATE/$ID.omp-session" \
-  "$STATE/$ID.omp-replacement.meta" "$STATE/$ID.omp-replacement.base" \
+  "$STATE/$ID.omp-replacement.intent" "$STATE/$ID.omp-replacement.meta" "$STATE/$ID.omp-replacement.base" \
   "$STATE/$ID.omp-replacement-brief" "$STATE/$ID.omp-replacement-ext.ts" \
   "$STATE/$ID.omp-replacement-ready" "$STATE/$ID.omp-replacement-started" \
   "$STATE/$ID.grok-turnend-token" "$STATE/$ID.kimi-turnend-token" \

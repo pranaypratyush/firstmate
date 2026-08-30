@@ -387,8 +387,8 @@ fm_backend_endpoint_atom_valid() {  # <value>
 }
 
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
-  local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
-  local session pane recorded_session workspace tab terminal worktree_id surface
+  local meta=$1 id=$2 backend_count backend window original_window worktree project binding_count binding
+  local session pane recorded_session workspace tab terminal worktree_id surface tmux_session
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -403,6 +403,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     echo "REFUSED: task $id has a missing, empty, or ambiguous window endpoint; preserving task state." >&2
     return 1
   }
+  original_window=$window
   worktree=$(fm_backend_meta_exact_value "$meta" worktree) || {
     echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
     return 1
@@ -448,9 +449,17 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     tmux)
       session=${window%%:*}
       pane=${window#*:}
-      if [ "$pane" = "$window" ] || [ "$pane" != "fm-$id" ] \
+      if [ "${window#@}" != "$window" ]; then
+        case "$window" in @*[!0-9]*|@) window= ;; esac
+        [ "$binding" = "$id" ] || window=
+        tmux_session=$(fm_backend_meta_exact_value "$meta" tmux_session) || tmux_session=
+        fm_backend_endpoint_atom_valid "$tmux_session" || window=
+      elif [ "$pane" = "$window" ] || [ "$pane" != "fm-$id" ] \
         || [ -z "$session" ]; then
-        echo "REFUSED: tmux endpoint '$window' is malformed or does not belong to task $id; preserving task state." >&2
+        window=
+      fi
+      if [ -z "$window" ]; then
+        echo "REFUSED: tmux endpoint '$original_window' is malformed or does not belong to task $id; preserving task state." >&2
         return 1
       fi
       ;;
@@ -937,7 +946,7 @@ fm_backend_hermes_session_ready() {  # <task-meta>
 }
 
 fm_backend_agent_state() {  # <backend> <target> [task-meta]
-  local backend=$1 target=$2 meta=${3:-} record_harness='' base_state
+  local backend=$1 target=$2 meta=${3:-} record_harness='' base_state record_tmux_session=''
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   FM_BACKEND_AGENT_OMP_BIN=
   FM_BACKEND_AGENT_OMP_BUN=
@@ -954,10 +963,19 @@ fm_backend_agent_state() {  # <backend> <target> [task-meta]
       printf 'unreadable'
       return 0
     fi
+    if [ "$backend" = tmux ] && [ "${target#@}" != "$target" ]; then
+      record_tmux_session=$(fm_meta_get "$meta" tmux_session)
+    fi
   fi
   case "$backend" in
-    tmux) base_state=$(fm_backend_tmux_agent_state "$target" "$FM_BACKEND_AGENT_OMP_BUN" "$FM_BACKEND_AGENT_OMP_BIN" "$FM_BACKEND_AGENT_HERMES_BIN") ;;
-    herdr) base_state=$(fm_backend_herdr_agent_state "$target") ;;
+    tmux) base_state=$(fm_backend_tmux_agent_state "$target" "$FM_BACKEND_AGENT_OMP_BUN" "$FM_BACKEND_AGENT_OMP_BIN" "$FM_BACKEND_AGENT_HERMES_BIN" "$record_tmux_session") ;;
+    herdr)
+      base_state=$(fm_backend_herdr_agent_state "$target")
+      if [ "$base_state" != missing ] && [ -n "$meta" ] \
+         && ! fm_backend_herdr_task_binding_matches "$target" "$meta"; then
+        base_state=unreadable
+      fi
+      ;;
     *) base_state=unverified ;;
   esac
   printf '%s' "$base_state"

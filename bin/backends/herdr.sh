@@ -1756,6 +1756,65 @@ fm_backend_herdr_agent_state() {  # <target>
   esac
 }
 
+fm_backend_herdr_task_binding_matches() {  # <target> <task-meta>
+  local target=$1 meta=$2 id session workspace tab pane pane_out tab_out
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  case "$(basename "$meta")" in *.meta) id=$(basename "$meta" .meta) ;; *) return 1 ;; esac
+  fm_backend_herdr_parse_target "$target" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  [ "$session" = "$(fm_meta_get "$meta" herdr_session)" ] || return 1
+  [ "$pane" = "$(fm_meta_get "$meta" herdr_pane_id)" ] || return 1
+  workspace=$(fm_meta_get "$meta" herdr_workspace_id)
+  tab=$(fm_meta_get "$meta" herdr_tab_id)
+  [ -n "$workspace" ] && [ -n "$tab" ] || return 1
+  pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  printf '%s' "$pane_out" | jq -e --arg pane "$pane" --arg tab "$tab" --arg workspace "$workspace" '
+    .result.pane.pane_id == $pane
+    and .result.pane.tab_id == $tab
+    and .result.pane.workspace_id == $workspace
+  ' >/dev/null 2>&1 || return 1
+  tab_out=$(fm_backend_herdr_cli "$session" tab get "$tab" 2>/dev/null) || return 1
+  printf '%s' "$tab_out" | jq -e --arg tab "$tab" --arg workspace "$workspace" --arg label "fm-$id" '
+    .result.tab.tab_id == $tab
+    and .result.tab.workspace_id == $workspace
+    and .result.tab.label == $label
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_recovery_send_text_line() {  # <target> <text> <task-meta>
+  local target=$1 text=$2 meta=$3
+  fm_backend_herdr_target_ready "$target" || return 1
+  fm_backend_herdr_task_binding_matches "$target" "$meta" || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$text" >/dev/null 2>&1
+}
+
+fm_backend_herdr_recovery_kill() {  # <target> <task-meta>
+  local target=$1 meta=$2 session pane lock_path attempt=0 lock_held=0 status
+  fm_backend_herdr_parse_target "$target" || return 1
+  session=$FM_BACKEND_HERDR_SESSION
+  pane=$FM_BACKEND_HERDR_PANE
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+    . "$FM_BACKEND_HERDR_ROOT/bin/fm-wake-lib.sh"
+  fi
+  lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
+  while [ "$attempt" -lt 50 ]; do
+    if fm_lock_try_acquire "$lock_path"; then
+      lock_held=1
+      break
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  [ "$lock_held" = 1 ] || return 1
+  fm_backend_herdr_task_binding_matches "$target" "$meta" \
+    && fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1
+  status=$?
+  fm_lock_release "$lock_path" || true
+  [ "$status" -eq 0 ] || return 1
+  [ "$(fm_backend_herdr_pane_presence_state "$session" "$pane")" = dead ]
+}
+
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
 fm_backend_herdr_agent_alive() {  # <target>

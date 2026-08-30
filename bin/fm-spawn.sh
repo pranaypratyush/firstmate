@@ -1177,6 +1177,9 @@ ARG3=
 FIRSTMATE_HOME=
 
 if [ "$RECOVER" -eq 1 ]; then
+  SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
+  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  SPAWN_META_LOCK_HELD=1
   fm_spawn_recovery_preselect "$STATE" "$DATA" "$ID" || exit 1
   KIND=$FM_SPAWN_RECOVERY_KIND
   PROJ=$FM_SPAWN_RECOVERY_PROJECT
@@ -2763,12 +2766,16 @@ if [ "$RECOVER" -eq 0 ] && [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; th
 fi
 if [ "$RECOVER" -eq 1 ]; then
   SPAWN_START_DIR=$WT
+  fm_spawn_recovery_begin_attempt "$STATE_REAL" "$ID" "$BACKEND" || {
+    echo "error: OMP recovery could not persist its pre-create replacement intent" >&2
+    exit 1
+  }
   case "$BACKEND" in
     tmux)
-      RECOVERY_TMUX_SESSION=${FM_SPAWN_RECOVERY_OLD_TARGET%%:*}
+      RECOVERY_TMUX_SESSION=$FM_SPAWN_RECOVERY_TMUX_SESSION
       SES=$(fm_backend_tmux_container_ensure "$RECOVERY_TMUX_SESSION") || exit 1
-      T="$SES:$W"
       WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_START_DIR") || exit 1
+      T="$WID"
       WT_TARGET=$WID
       ;;
     herdr)
@@ -3056,7 +3063,13 @@ fi
 spawn_send_text_line() {  # <target> <text>
   case "$BACKEND" in
     tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
-    herdr) fm_backend_herdr_send_text_line "$1" "$2" ;;
+    herdr)
+      if [ "$RECOVER" -eq 1 ]; then
+        fm_backend_herdr_recovery_send_text_line "$1" "$2" "$FM_SPAWN_RECOVERY_CANDIDATE"
+      else
+        fm_backend_herdr_send_text_line "$1" "$2"
+      fi
+      ;;
     zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
     orca) fm_backend_orca_send_text_line "$1" "$2" ;;
     cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
@@ -3739,8 +3752,10 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
-fm_lock_acquire_wait "$SPAWN_META_LOCK"
-SPAWN_META_LOCK_HELD=1
+if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+  fm_lock_acquire_wait "$SPAWN_META_LOCK"
+  SPAWN_META_LOCK_HELD=1
+fi
 if [ "$RECOVER" -eq 0 ]; then
 {
   echo "window=$META_WINDOW"
@@ -3809,7 +3824,7 @@ if [ "$RECOVER" -eq 0 ]; then
 } > "$STATE/$ID.meta"
 else
   fm_spawn_recovery_stage_candidate "$STATE_REAL" "$ID" "$BACKEND" "$T" \
-    "${HERDR_SES:-}" "${HERDR_WORKSPACE_ID:-}" "${HERDR_TAB_ID:-}" "${HERDR_PANE_ID:-}" || {
+    "${SES:-${HERDR_SES:-}}" "${HERDR_WORKSPACE_ID:-}" "${HERDR_TAB_ID:-}" "${HERDR_PANE_ID:-}" || {
     echo "error: OMP recovery could not stage exact replacement endpoint metadata" >&2
     exit 1
   }

@@ -680,7 +680,7 @@ test_no_mistakes_origin_remote_allows() {
   printf '{}\n' > "$case_dir/state/task-x1.omp-sessions/selected.jsonl"
   printf '%s\n' "$case_dir/state/task-x1.omp-sessions/selected.jsonl" \
     > "$case_dir/state/task-x1.omp-session"
-  touch "$case_dir/state/task-x1.omp-replacement.meta" \
+  touch "$case_dir/state/task-x1.omp-replacement.intent" "$case_dir/state/task-x1.omp-replacement.meta" \
     "$case_dir/state/task-x1.omp-replacement.base" \
     "$case_dir/state/task-x1.omp-replacement-brief" \
     "$case_dir/state/task-x1.omp-replacement-ext.ts" \
@@ -706,6 +706,8 @@ test_no_mistakes_origin_remote_allows() {
   assert_absent "$case_dir/state/task-x1.omp-sessions" "nm-origin: OMP session directory survived teardown"
   assert_absent "$case_dir/state/task-x1.omp-replacement.meta" \
     "nm-origin: OMP replacement sidecars survived teardown"
+  assert_absent "$case_dir/state/task-x1.omp-replacement.intent" \
+    "nm-origin: OMP replacement pre-create intent survived teardown"
   assert_absent "$case_dir/state/.task-x1.open-decisions-cursor" \
     "nm-origin: open-decisions cursor survived teardown"
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
