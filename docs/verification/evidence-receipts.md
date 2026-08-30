@@ -14,7 +14,7 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - High-risk, broad, sensitive, weakly proven, materially expanded, or uncertain changes retain full No-Mistakes validation.
 - `direct-PR` and `local-only` retain the evidence gate and current-state reconciliation without entering No-Mistakes.
 - The explicit implementation-complete action records one current timestamp for the current clean commit, refreshes that timestamp when the head changes, remains idempotent for the same head, and supplies the plan interval origin.
-- Completion requires observed post-plan mechanical evidence, an exact No-Mistakes run that is distinct from the plan's recorded active-run snapshot, matches the plan's recorded branch and head, and exposes the latest unguessable plan generation; supplied-intent logs that omit it are unprovable and rejected, alongside the existing current checks-green status or CI-log evidence, a GitHub PR with forge-observed exact-head metadata, a supported non-GitHub direct-PR with the existing canonical HTTPS PR URL predicate and no head observation, or a clean fast-forward-ready branch.
+- Completion requires observed post-plan mechanical evidence, an exact No-Mistakes run that is distinct from the plan's recorded active-run snapshot, matches the plan's recorded branch and head, carries the latest unguessable plan generation, and when intent is redacted has both a ULID creation time strictly later than the recorded post-publication millisecond plan boundary and its exact immutable plan-bound launch record, plus current checks-green status or CI-log evidence, a GitHub PR with forge-observed exact-head metadata, a supported non-GitHub direct-PR with the existing canonical HTTPS PR URL predicate and no head observation, or a clean fast-forward-ready branch.
 - Receipt append and check share one executable owner that resolves and pins every raw data-path component inside the store process, opens and verifies the task directory relative to that pinned parent, and then opens relative no-follow brief and single-link ledger paths portably on Linux and macOS.
 - Receipt storage physicalizes the trusted Firstmate-home prefix for standard system symlinks, then retains no-follow checks for the data suffix, task directory, and task artifacts.
 - Promotion pins and verifies its scout task directory before reading or replacing the brief and ledger, and refuses symlinked or out-of-root task paths before mutation.
@@ -37,7 +37,7 @@ The exact receipt key and type schema is owned by the header and `--help` output
 - One pinned state-directory owner snapshots single-link no-follow metadata and performs compare-bound atomic replacements for every validation metadata update.
 - PR registration publishes canonical PR identity and its validation publication generation through one compare-bound pinned metadata replacement after the watcher artifacts publish, and revokes those artifacts if that replacement fails.
 - Successful exact branch-and-head runs can bind after reaching checks-passed or passed, while failed and cancelled runs remain ineligible.
-- No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary, and supplied-agent intent markers without the exact generation line are rejected as unprovable.
+- No-Mistakes status, intent, and CI-log observations use the shared bounded call boundary, with a supplied-agent intent marker accepted only alongside the plan's millisecond ULID boundary and exact launch-time record when the installed log surface omits the exact generation line.
 - Every completion requires path-specific terminal evidence, records its plan path and validated head, invalidates stale completion metadata when the worktree head changes, and refuses completion until the change is replanned or revalidated.
 - Local-only readiness and guarded landing consume one fail-closed executable default-branch resolver.
 - Planning and completion refuse tracked, staged, or untracked worktree changes.
@@ -95,7 +95,7 @@ ok - implementation completion refreshes per head and remains idempotent
 ok - plan publication holds the pinned ledger boundary against concurrent receipts
 ok - diff summary errors fail closed before risk classification
 ok - successful terminal runs bind while failed runs remain rejected
-ok - supplied-intent logs without exact generations remain unprovable
+ok - supplied-intent logs bind only post-plan runs with matching branch, head, generation, and state
 ok - No-Mistakes status, intent, and CI-log observations are bounded
 ok - authoritative documentation remains high
 ok - terminal delivery paths record one completion timestamp at their boundary
