@@ -853,7 +853,7 @@ test_terminal_and_failed_runs_bind_by_current_plan() {
 }
 
 test_supplied_intent_binding_requires_plan_identity() {
-  local id=supplied-intent base project head generation started valid_id branch_drift_id wrong_head_id wrong_branch_id failed_id cancelled_id unrelated_id same_millisecond_id preplan_id valid branch_drift wrong_head wrong_branch failed cancelled unrelated preplan preplan_candidate fakebin launch_log launch_out unqualified rc
+  local id=supplied-intent base project head generation started valid_id branch_drift_id wrong_head_id wrong_branch_id failed_id cancelled_id unrelated_id same_millisecond_id preplan_id valid branch_drift wrong_head wrong_branch failed cancelled unrelated preplan preplan_candidate fakebin launch_log launch_out launch_receipt wrong_launch_receipt launch_intent launch_digest launch_nonce unqualified rc
   base=$(make_project "$id" no-mistakes localized)
   add_receipt "$id" AC1 test "2 passed"
   add_receipt "$id" AC2 lint passed
@@ -892,19 +892,40 @@ test_supplied_intent_binding_requires_plan_identity() {
   expect_code 2 "$rc" "post-hoc attestation cannot bind a supplied-intent run"
   launch_log="$TMP_ROOT/$id-launch.log"
   unqualified=$(nm_status "$unrelated_id" "$head" pending)
-  launch_out=$(FM_NM_LOG="$launch_log" FM_FAKE_NM_LAUNCH="$valid" FM_FAKE_NM_STATUS_FOR_RUN="$valid" FM_FAKE_NM_STATUS="$unqualified" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
-    "$CHECK" "$id" --launch-run --generation "$generation" -- --intent opaque)
+  launch_intent=$(printf 'opaque\nFirstmate-Validation-Generation: %s' "$generation")
+  launch_digest=$(printf '%s' "$launch_intent" | sha256sum | cut -d' ' -f1)
+  launch_nonce="fm-$generation"
+  launch_receipt=$(printf 'launch_receipt:\n  run_id: "%s"\n  disposition: created\n  launch_nonce: "%s"\n  branch: "fm/%s"\n  head_sha: "%s"\n  submitted_head_sha: "%s"\n  intent_digest: "%s"\n' \
+    "$valid_id" "$launch_nonce" "$id" "$head" "$head" "$launch_digest")
+  FM_FAKE_NM_LAUNCH="$launch_receipt" FM_FAKE_NM_STATUS_FOR_RUN="$valid" FM_FAKE_NM_STATUS="$unqualified" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --launch-run --generation "$generation" -- --intent opaque >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "strict launch proof requires the generation in the exact supplied intent"
+  FM_FAKE_NM_LAUNCH="$launch_receipt" FM_FAKE_NM_STATUS_FOR_RUN="$valid" FM_FAKE_NM_STATUS="$unqualified" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --launch-run --generation "$generation" -- --intent "$launch_intent" --launch-nonce caller-owned >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "strict launch proof owns its nonce"
+  wrong_launch_receipt=$(printf 'launch_receipt:\n  run_id: "%s"\n  disposition: created\n  launch_nonce: "%s"\n  branch: "fm/%s"\n  head_sha: "%s"\n  submitted_head_sha: "%s"\n  intent_digest: "%064d"\n' \
+    "$valid_id" "$launch_nonce" "$id" "$head" "$head" 0)
+  FM_FAKE_NM_LAUNCH="$wrong_launch_receipt" FM_FAKE_NM_STATUS_FOR_RUN="$valid" FM_FAKE_NM_STATUS="$unqualified" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --launch-run --generation "$generation" -- --intent "$launch_intent" >/dev/null 2>&1
+  rc=$?
+  expect_code 2 "$rc" "strict launch proof rejects a mismatched persisted-intent digest"
+  launch_out=$(FM_NM_LOG="$launch_log" FM_FAKE_NM_LAUNCH="$launch_receipt" FM_FAKE_NM_STATUS_FOR_RUN="$valid" FM_FAKE_NM_STATUS="$unqualified" FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
+    "$CHECK" "$id" --launch-run --generation "$generation" -- --intent "$launch_intent")
   rc=$?
   expect_code 0 "$rc" "post-plan supplied-intent run could not be launched"
   assert_contains "$launch_out" '"schema":"fm-validation-run-launch.v1"' "launch wrapper did not report its durable proof"
-  assert_grep 'axi run --intent opaque' "$launch_log" "launch wrapper did not start No-Mistakes"
+  assert_contains "$launch_out" "\"intent_digest\":\"$launch_digest\"" "launch wrapper did not report the exact intent digest"
+  assert_grep "axi run --intent opaque" "$launch_log" "launch wrapper did not start No-Mistakes"
+  assert_grep "launch-nonce $launch_nonce" "$launch_log" "launch wrapper did not require a strict launch receipt"
   assert_grep "axi status --run $valid_id" "$launch_log" "launch wrapper did not validate its returned run id"
-  assert_grep "validation_run_launch=$generation:$valid_id:fm/$id:$head" "$HOME_DIR/state/$id.meta" \
-    "launch wrapper did not persist the exact plan-bound run identity"
+  assert_grep "validation_run_launch=$generation:$valid_id:fm/$id:$head:$launch_nonce:$launch_digest" "$HOME_DIR/state/$id.meta" \
+    "launch wrapper did not persist the exact strict receipt identity"
   FM_FAKE_NM_STATUS="$valid" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \
     "$CHECK" "$id" --bind-run "$valid_id" --generation "$generation" >/dev/null \
-    || fail "post-plan run with supplied-intent log could not bind"
+    || fail "post-plan run with strict supplied-intent receipt could not bind"
   unrelated=$(nm_status "$unrelated_id" "$head" pending)
   FM_FAKE_NM_STATUS="$unrelated" FM_FAKE_NM_INTENT='using intent supplied by the agent' \
     FM_NO_MISTAKES_BIN="$FAKE_NO_MISTAKES" FM_HOME="$HOME_DIR" \

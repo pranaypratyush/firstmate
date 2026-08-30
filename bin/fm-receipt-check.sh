@@ -64,12 +64,12 @@
 # --complete requires the path-specific terminal evidence named by the generated
 # instructions and records that evidence with the latest plan, path, and head.
 # A full No-Mistakes run is bound only when its observed branch and head match the
-# latest plan's recorded branch and head, it is not the recorded pre-plan run, its
-# supplied generation matches, and intent either exposes that generation or confirms
-# supplied agent intent with a ULID creation time strictly after the latest plan's
-# recorded post-publication millisecond boundary.
-# For supplied-agent intent, launch through --launch-run; it records one plan-bound
-# run identity at creation time that opaque logs must match before --bind-run.
+# latest plan's recorded branch and head, it is not the recorded pre-plan run, and
+# its supplied generation matches. Exact intent logs may expose that generation
+# directly. Supplied-agent intent must instead launch through --launch-run, which
+# uses No-Mistakes strict proof mode to atomically bind a plan-derived nonce, the
+# exact persisted-intent digest, full branch/head identity, and one run ID before
+# the pipeline is driven.
 # --invalidate-claim appends one idempotent finding-to-criterion marker to task
 # metadata after confirming that the criterion and evidence contract are current.
 # Delivery mode remains authoritative: direct-PR and local-only never invoke
@@ -697,14 +697,62 @@ if [ "$ACTION" = launch-run ] || [ "$ACTION" = bind-run ]; then
     [ "$BIND_CURRENT_BRANCH" = "$BIND_BRANCH" ] && [ "$BIND_CURRENT_HEAD" = "$BIND_HEAD" ] \
       || { echo "error: validation worktree no longer matches the latest plan branch and head" >&2; exit 2; }
     [ -z "$BIND_LAUNCH" ] || { echo "error: latest plan already records a launched No-Mistakes run" >&2; exit 2; }
+    BIND_INTENT=
+    BIND_INTENT_SET=0
+    BIND_ARG_INDEX=0
+    while [ "$BIND_ARG_INDEX" -lt "${#LAUNCH_ARGS[@]}" ]; do
+      BIND_ARG=${LAUNCH_ARGS[$BIND_ARG_INDEX]}
+      case "$BIND_ARG" in
+        --intent)
+          BIND_ARG_INDEX=$((BIND_ARG_INDEX + 1))
+          [ "$BIND_ARG_INDEX" -lt "${#LAUNCH_ARGS[@]}" ] \
+            || { echo "error: --launch-run requires a value for --intent" >&2; exit 2; }
+          [ "$BIND_INTENT_SET" -eq 0 ] \
+            || { echo "error: --launch-run accepts exactly one --intent" >&2; exit 2; }
+          BIND_INTENT=${LAUNCH_ARGS[$BIND_ARG_INDEX]}
+          BIND_INTENT_SET=1
+          ;;
+        --intent=*)
+          [ "$BIND_INTENT_SET" -eq 0 ] \
+            || { echo "error: --launch-run accepts exactly one --intent" >&2; exit 2; }
+          BIND_INTENT=${BIND_ARG#--intent=}
+          BIND_INTENT_SET=1
+          ;;
+        --launch-nonce|--launch-nonce=*)
+          echo "error: --launch-run owns --launch-nonce" >&2
+          exit 2
+          ;;
+      esac
+      BIND_ARG_INDEX=$((BIND_ARG_INDEX + 1))
+    done
+    [ "$BIND_INTENT_SET" -eq 1 ] \
+      || { echo "error: --launch-run requires one explicit --intent" >&2; exit 2; }
+    printf '%s\n' "$BIND_INTENT" | grep -Fqx "Firstmate-Validation-Generation: $BIND_GENERATION" \
+      || { echo "error: supplied intent does not contain the latest plan generation as an exact line" >&2; exit 2; }
+    command -v sha256sum >/dev/null 2>&1 || { echo "error: sha256sum is required for strict launch proof" >&2; exit 2; }
+    BIND_INTENT_DIGEST=$(printf '%s' "$BIND_INTENT" | sha256sum | cut -d' ' -f1)
+    BIND_LAUNCH_NONCE="fm-$BIND_GENERATION"
     NM_BIN=${FM_NO_MISTAKES_BIN:-no-mistakes}
-    if ! BIND_LAUNCH_OUT=$(cd "$BIND_WORKTREE" && "$NM_BIN" axi run "${LAUNCH_ARGS[@]}"); then
+    if ! BIND_LAUNCH_OUT=$(cd "$BIND_WORKTREE" && "$NM_BIN" axi run "${LAUNCH_ARGS[@]}" --launch-nonce "$BIND_LAUNCH_NONCE"); then
       echo "error: No-Mistakes run could not be launched" >&2
       exit 2
     fi
     printf '%s\n' "$BIND_LAUNCH_OUT" >&2
-    RUN_ID_INPUT=$(fm_nm_field "$BIND_LAUNCH_OUT" id)
-    case "$RUN_ID_INPUT" in ''|*[!A-Za-z0-9._-]*) echo "error: launched No-Mistakes run has an invalid id" >&2; exit 2 ;; esac
+    RUN_ID_INPUT=$(fm_nm_field "$BIND_LAUNCH_OUT" run_id)
+    BIND_RECEIPT_DISPOSITION=$(fm_nm_field "$BIND_LAUNCH_OUT" disposition)
+    BIND_RECEIPT_NONCE=$(fm_nm_field "$BIND_LAUNCH_OUT" launch_nonce)
+    BIND_RECEIPT_BRANCH=$(fm_nm_field "$BIND_LAUNCH_OUT" branch)
+    BIND_RECEIPT_HEAD=$(fm_nm_field "$BIND_LAUNCH_OUT" head_sha)
+    BIND_RECEIPT_SUBMITTED_HEAD=$(fm_nm_field "$BIND_LAUNCH_OUT" submitted_head_sha)
+    BIND_RECEIPT_INTENT_DIGEST=$(fm_nm_field "$BIND_LAUNCH_OUT" intent_digest)
+    case "$RUN_ID_INPUT" in ''|*[!A-Za-z0-9._-]*) echo "error: strict launch receipt has an invalid run id" >&2; exit 2 ;; esac
+    case "$BIND_RECEIPT_DISPOSITION" in created|reused) ;; *) echo "error: strict launch receipt has an invalid disposition" >&2; exit 2 ;; esac
+    [ "$BIND_RECEIPT_NONCE" = "$BIND_LAUNCH_NONCE" ] \
+      && [ "$BIND_RECEIPT_BRANCH" = "$BIND_BRANCH" ] \
+      && [ "$BIND_RECEIPT_HEAD" = "$BIND_HEAD" ] \
+      && [ "$BIND_RECEIPT_SUBMITTED_HEAD" = "$BIND_HEAD" ] \
+      && [ "$BIND_RECEIPT_INTENT_DIGEST" = "$BIND_INTENT_DIGEST" ] \
+      || { echo "error: strict launch receipt does not match the latest plan and exact intent" >&2; exit 2; }
   fi
   BIND_OUT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi status --run "$RUN_ID_INPUT") \
     || { echo "error: No-Mistakes run could not be observed" >&2; exit 2; }
@@ -727,23 +775,14 @@ if [ "$ACTION" = launch-run ] || [ "$ACTION" = bind-run ]; then
     && [ "$BIND_OBSERVED_HEAD" = "$BIND_HEAD" ] && [ "$BIND_STATE_OK" -eq 1 ] \
     || { echo "error: No-Mistakes run does not match the latest plan branch and head" >&2; exit 2; }
   if [ "$ACTION" = launch-run ]; then
-    if [ "${#BIND_PLAN_STARTED_MS}" -eq 13 ] && ! printf '%s' "$BIND_PLAN_STARTED_MS" | grep -q '[^0-9]'; then
-      BIND_BOUNDARY_MS=$BIND_PLAN_STARTED_MS
-    else
-      echo "error: supplied-intent run has no recorded post-plan boundary" >&2
-      exit 2
-    fi
-    BIND_RUN_STARTED_MS=$(nm_ulid_started_at_ms "$RUN_ID_INPUT") \
-      || { echo "error: supplied-intent run id lacks a readable creation time" >&2; exit 2; }
-    [ "$BIND_RUN_STARTED_MS" -gt "$BIND_BOUNDARY_MS" ] \
-      || { echo "error: supplied-intent run predates the latest plan" >&2; exit 2; }
-    BIND_EXPECTED_LAUNCH="$BIND_GENERATION:$RUN_ID_INPUT:$BIND_BRANCH:$BIND_HEAD"
+    BIND_EXPECTED_LAUNCH="$BIND_GENERATION:$RUN_ID_INPUT:$BIND_BRANCH:$BIND_HEAD:$BIND_LAUNCH_NONCE:$BIND_INTENT_DIGEST"
     printf 'validation_run_launch=%s\n' "$BIND_EXPECTED_LAUNCH" | append_meta_records \
       || { echo "error: could not record the launched No-Mistakes run" >&2; exit 2; }
     release_validation_lock
     jq -cn --arg task "$ID" --arg run "$RUN_ID_INPUT" --arg generation "$BIND_GENERATION" \
-      --arg branch "$BIND_BRANCH" --arg head "$BIND_HEAD" \
-      '{schema:"fm-validation-run-launch.v1",task:$task,status:"launched",run:$run,generation:$generation,branch:$branch,head:$head}'
+      --arg branch "$BIND_BRANCH" --arg head "$BIND_HEAD" --arg nonce "$BIND_LAUNCH_NONCE" \
+      --arg intent_digest "$BIND_INTENT_DIGEST" --arg disposition "$BIND_RECEIPT_DISPOSITION" \
+      '{schema:"fm-validation-run-launch.v1",task:$task,status:"launched",run:$run,generation:$generation,branch:$branch,head:$head,launch_nonce:$nonce,intent_digest:$intent_digest,disposition:$disposition}'
     exit 0
   fi
   BIND_INTENT=$(fm_nm_run_checked "$BIND_WORKTREE" "$NM_TIMEOUT" axi logs --step intent --run "$RUN_ID_INPUT") \
@@ -762,10 +801,16 @@ if [ "$ACTION" = launch-run ] || [ "$ACTION" = bind-run ]; then
       || { echo "error: supplied-intent run id lacks a readable creation time" >&2; exit 2; }
     [ "$BIND_RUN_STARTED_MS" -gt "$BIND_BOUNDARY_MS" ] \
       || { echo "error: supplied-intent run predates the latest plan" >&2; exit 2; }
-    BIND_EXPECTED_LAUNCH="$BIND_GENERATION:$RUN_ID_INPUT:$BIND_BRANCH:$BIND_HEAD"
-    BIND_LAUNCH=$(grep '^validation_run_launch=' "$META" | tail -1 | cut -d= -f2- || true)
-    [ "$BIND_LAUNCH" = "$BIND_EXPECTED_LAUNCH" ] \
-      || { echo "error: supplied-intent run lacks the required launch record" >&2; exit 2; }
+    BIND_LAUNCH_PREFIX="$BIND_GENERATION:$RUN_ID_INPUT:$BIND_BRANCH:$BIND_HEAD:fm-$BIND_GENERATION:"
+    case "$BIND_LAUNCH" in
+      "$BIND_LAUNCH_PREFIX"*) BIND_LAUNCH_DIGEST=${BIND_LAUNCH#"$BIND_LAUNCH_PREFIX"} ;;
+      *) BIND_LAUNCH_DIGEST= ;;
+    esac
+    if [ "${#BIND_LAUNCH_DIGEST}" -ne 64 ] \
+       || printf '%s' "$BIND_LAUNCH_DIGEST" | grep -q '[^0-9a-f]'; then
+      echo "error: supplied-intent run lacks the required strict launch receipt" >&2
+      exit 2
+    fi
   else
     echo "error: No-Mistakes run intent does not prove the latest plan generation" >&2
     exit 2
