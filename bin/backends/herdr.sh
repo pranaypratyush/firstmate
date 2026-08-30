@@ -1757,9 +1757,21 @@ fm_backend_herdr_agent_state() {  # <target>
 }
 
 fm_backend_herdr_task_binding_matches() {  # <target> <task-meta>
-  local target=$1 meta=$2 id session workspace tab pane pane_out tab_out
+  local target=$1 meta=$2 id session workspace tab pane pane_out tab_out binding_count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  case "$(basename "$meta")" in *.meta) id=$(basename "$meta" .meta) ;; *) return 1 ;; esac
+  binding_count=$(grep -c '^endpoint_task_id=' "$meta" 2>/dev/null || true)
+  case "$binding_count" in
+    1) id=$(fm_backend_meta_exact_value "$meta" endpoint_task_id) || return 1 ;;
+    0)
+      case "$(basename "$meta")" in
+        *.omp-replacement.meta) return 1 ;;
+        *.meta) id=$(basename "$meta" .meta) ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "$id" ] || return 1
   fm_backend_herdr_parse_target "$target" || return 1
   session=$FM_BACKEND_HERDR_SESSION
   pane=$FM_BACKEND_HERDR_PANE

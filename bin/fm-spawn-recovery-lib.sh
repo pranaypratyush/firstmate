@@ -204,7 +204,7 @@ fm_spawn_recovery_prepare_session() { # <state> <task-id>
   session_dir="$state/$id.omp-sessions"
   pointer="$state/$id.omp-session"
   legacy_dir="$FM_SPAWN_RECOVERY_TASKTMP/omp-sessions"
-  if [ ! -e "$pointer" ] && { [ -e "$legacy_dir" ] || [ -L "$legacy_dir" ]; }; then
+  if [ -e "$legacy_dir" ] || [ -L "$legacy_dir" ]; then
     echo "error: legacy OMP session binding under $legacy_dir is not accepted by recovery and is marked for removal" >&2
     return 1
   fi

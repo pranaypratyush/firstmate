@@ -139,9 +139,14 @@ if [ -n "\$resume" ]; then
 else
   printf '{"type":"session","version":3}\n' > "\$session_file"
 fi
-printf 'resume=%s\tsession=%s\textension=%s\n' "\$resume" "\$session_file" "\$extension" >> '$LAB/launches'
+reported_session="\$session_file"
+if [ -f '$LAB/report-different-session' ]; then
+  reported_session="\$session_dir/reported-different.jsonl"
+  printf '{"type":"session","version":3}\n' > "\$reported_session"
+fi
+printf 'resume=%s\tsession=%s\treported=%s\textension=%s\n' "\$resume" "\$session_file" "\$reported_session" "\$extension" >> '$LAB/launches'
 [ ! -f '$LAB/skip-ack' ] || while :; do sleep 1; done
-'$REAL_BUN' '$WRAPPER_BIN/ack-extension.ts' "\$extension" "\$session_file" || exit 4
+'$REAL_BUN' '$WRAPPER_BIN/ack-extension.ts' "\$extension" "\$reported_session" || exit 4
 while :; do sleep 1; done
 SH
 chmod +x "$WRAPPER_BIN/tmux" "$WRAPPER_BIN/treehouse" "$WRAPPER_BIN/omp"
@@ -232,6 +237,14 @@ for artifact in "$HOME_DIR/state/$ID.omp-replacement.intent" "$HOME_DIR/state/$I
   assert_absent "$artifact" "successful recovery retained replacement sidecar $artifact"
 done
 pass "missing OMP endpoint resumes exact session before metadata publication"
+kill_worker
+touch "$LAB/report-different-session"
+out=$(spawn "$ID" --recover 2>&1) || fail "recovery with a divergent session_start report failed: $out"
+wait_for_state alive || fail "recovery with a divergent session_start report was not live"
+[ "$(cat "$SESSION_POINTER")" = "$SESSION_FILE" ] \
+  || fail "recovery allowed session_start to rewrite the retained pointer"
+rm -f "$LAB/report-different-session"
+pass "recovery session_start cannot rewrite the retained session pointer"
 
 meta_hash=$(hash_file "$META")
 out=$(spawn "$ID" --recover 2>&1)
@@ -250,6 +263,12 @@ status=$?
 wait_for_state missing || fail "missing-pointer refusal created an endpoint"
 printf '%s\n' "$SESSION_FILE" > "$SESSION_POINTER"
 mkdir -p "$TASK_TMP/omp-sessions"
+out=$(spawn "$ID" --recover 2>&1)
+status=$?
+[ "$status" -ne 0 ] || fail "recovery accepted legacy temporary state beside a durable pointer"
+assert_contains "$out" 'legacy OMP session binding' \
+  "coexisting legacy temporary state refusal was not actionable"
+wait_for_state missing || fail "coexisting legacy temporary state created an endpoint"
 rm -f "$SESSION_POINTER"
 out=$(spawn "$ID" --recover 2>&1)
 status=$?
@@ -269,6 +288,18 @@ assert_contains "$out" 'pre-create intent without a response-derived replacement
 wait_for_state missing || fail "pre-create interruption refusal created an endpoint"
 rm -f "$HOME_DIR/state/$ID.omp-replacement.intent"
 pass "unreconciled pre-create intents refuse duplicate recovery"
+cp "$META" "$LAB/meta.before"
+printf 'prewalk_into=missing/recovery-target\n' >> "$META"
+out=$(spawn "$ID" --recover 2>&1)
+status=$?
+[ "$status" -ne 0 ] || fail "recovery accepted a post-create setup mismatch"
+wait_for_state missing || fail "post-create setup failure retained its replacement endpoint"
+assert_absent "$HOME_DIR/state/$ID.omp-replacement.meta" \
+  "post-create setup failure retained staged replacement metadata"
+assert_absent "$HOME_DIR/state/$ID.omp-replacement.intent" \
+  "post-create setup failure retained pre-create intent"
+cp "$LAB/meta.before" "$META"
+pass "post-create setup failure cleans the response-derived replacement"
 
 touch "$LAB/no-lease"
 out=$(spawn "$ID" --recover 2>&1)
@@ -325,6 +356,34 @@ assert_contains "$(cat "$META")" "endpoint_generation=interrupted-$$" \
 assert_absent "$HOME_DIR/state/$ID.omp-replacement.meta" \
   "interrupted recovery retained candidate metadata after reconciliation"
 pass "acknowledged interrupted replacement publishes on guarded retry"
+HERDR_CANDIDATE="$HOME_DIR/state/$ID.omp-replacement.meta"
+cat > "$HERDR_CANDIDATE" <<EOF
+endpoint_task_id=$ID
+herdr_session=recovery-herdr
+herdr_workspace_id=w1
+herdr_tab_id=t1
+herdr_pane_id=p1
+EOF
+PATH="$FIXTURE_PATH" bash -c '
+  expected_id=$3
+  . "$1/bin/fm-backend.sh"
+  fm_backend_source herdr
+  fm_backend_herdr_cli() {
+    local session=$1
+    shift
+    [ "$session" = recovery-herdr ] || return 1
+    case "$1:$2" in
+      pane:get) printf "%s\n" "{\"result\":{\"pane\":{\"pane_id\":\"p1\",\"tab_id\":\"t1\",\"workspace_id\":\"w1\"}}}" ;;
+      tab:get) printf "%s\n" "{\"result\":{\"tab\":{\"tab_id\":\"t1\",\"workspace_id\":\"w1\",\"label\":\"fm-$expected_id\"}}}" ;;
+      *) return 1 ;;
+    esac
+  }
+  fm_backend_herdr_task_binding_matches "recovery-herdr:p1" "$2"
+' _ "$ROOT" "$HERDR_CANDIDATE" "$ID" \
+  || fail "Herdr candidate binding derived its task label from the replacement sidecar name"
+rm -f "$HERDR_CANDIDATE"
+pass "Herdr replacement binding uses exact endpoint task identity"
+
 
 kill_worker
 cp "$META" "$LAB/tmux.meta"

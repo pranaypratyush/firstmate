@@ -2792,6 +2792,11 @@ EOF
       T="$HERDR_SES:$HERDR_PANE_ID"
       ;;
   esac
+  fm_spawn_recovery_stage_candidate "$STATE_REAL" "$ID" "$BACKEND" "$T" \
+    "${SES:-${HERDR_SES:-}}" "${HERDR_WORKSPACE_ID:-}" "${HERDR_TAB_ID:-}" "${HERDR_PANE_ID:-}" || {
+    echo "error: OMP recovery could not stage exact replacement endpoint metadata" >&2
+    exit 1
+  }
   FM_SPAWN_RECOVERY_NEW_TARGET=$T
   FM_SPAWN_RECOVERY_ATTEMPT=1
 else
@@ -3533,7 +3538,9 @@ export default function (pi: any) {
 EOF
       ;;
     omp)
+      OMP_PUBLISH_SESSION=true
       if [ "$RECOVER" -eq 1 ]; then
+        OMP_PUBLISH_SESSION=false
         fm_spawn_recovery_prepare_artifacts "$BRIEF" || {
           echo "error: OMP recovery could not prepare replacement-only launch artifacts" >&2
           exit 1
@@ -3568,7 +3575,7 @@ function publishSession(ctx: any) {
 }
 export default function (omp: any) {
   omp.on("session_start", (_event: any, ctx: any) => {
-    publishSession(ctx);
+    if ($OMP_PUBLISH_SESSION) publishSession(ctx);
     execFile("touch", ["$OMP_READY"]);
   });
   omp.on("turn_start", () => execFile("touch", ["$OMP_STARTED"]));
@@ -3822,12 +3829,6 @@ if [ "$RECOVER" -eq 0 ]; then
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
-else
-  fm_spawn_recovery_stage_candidate "$STATE_REAL" "$ID" "$BACKEND" "$T" \
-    "${SES:-${HERDR_SES:-}}" "${HERDR_WORKSPACE_ID:-}" "${HERDR_TAB_ID:-}" "${HERDR_PANE_ID:-}" || {
-    echo "error: OMP recovery could not stage exact replacement endpoint metadata" >&2
-    exit 1
-  }
 fi
 if [ "$RECOVER" -eq 0 ]; then
   [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0

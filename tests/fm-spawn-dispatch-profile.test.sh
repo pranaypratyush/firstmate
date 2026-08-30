@@ -165,6 +165,14 @@ case "$cmd $sub" in
       printf '%s\n' '{"result":{"tabs":[]}}'
     fi
     ;;
+  "tab get")
+    if [ "${3:-}" = w2:t2 ]; then
+      printf '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2","label":"%s"}}}\n' \
+        "$FM_FAKE_HERDR_RECLAIM_TASK_LABEL"
+    else
+      printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t1","workspace_id":"w1","label":"1"}}}'
+    fi
+    ;;
   "pane list")
     printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}'
     ;;
@@ -203,7 +211,13 @@ case "$cmd $sub" in
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
       exit 1
     fi
-    printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' "${3:-w1:p2}" "${FM_FAKE_PANE_PATH:-}"
+    pane_id=${3:-w1:p2}
+    case "$pane_id" in
+      w2:*) pane_tab=w2:t2; pane_workspace=w2 ;;
+      *) pane_tab=w1:t1; pane_workspace=w1 ;;
+    esac
+    printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"%s","foreground_cwd":"%s"}}}\n' \
+      "$pane_id" "$pane_tab" "$pane_workspace" "${FM_FAKE_PANE_PATH:-}"
     ;;
   "pane run")
     if printf '%s' "${4:-}" | grep -Fq 'fm-treehouse-get.sh'; then

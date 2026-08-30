@@ -56,7 +56,8 @@ For legacy env-shebang launches, a bare `bun` argv token or the canonical runtim
 The canonical `omp_bun` and `omp_bin` identities must be absolute, executable, and whitespace-free because the portable process reader exposes one flattened argument string.
 Legacy launches invoke the selected OMP entrypoint directly, with env-based Bun shebangs receiving a launch-local `PATH` binding and explicit absolute Bun shebangs using their declared interpreter, while standalone launches invoke the selected executable directly without passing it through Bun.
 The primary adapter refuses unsupported paths before marker publication and replaces its marker atomically so a pre-existing symlink is never followed to its target.
-Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
+Ordinary OMP recovery authorizes only an authoritatively `missing` endpoint because a dead shell can still retain live or rebound task identity.
+On Herdr, the recorded server and full endpoint inventory must also remain readable; a missing server, an agent-less pane, or a rebound workspace, tab, pane, or task label refuses recovery.
 
 For positive attribution, the probe combines two independent name sources rather than making either one load-bearing.
 `#{pane_current_command}` and the pane tty foreground process group's kernel `comm` values expose different name fields, and which one retains executable identity is platform-dependent.
