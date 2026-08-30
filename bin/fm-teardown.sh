@@ -2431,10 +2431,14 @@ cleanup_firstmate_home_children() {
       child_busy_gen=$(cat "$sub_state/$child_id.busy-gen" 2>/dev/null || true)
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
+    rm -rf -- "$sub_state/$child_id.omp-sessions"
     rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.omp-ext.ts" "$sub_state/$child_id.omp-ready" \
-      "$sub_state/$child_id.omp-started" \
+      "$sub_state/$child_id.omp-started" "$sub_state/$child_id.omp-session" \
+      "$sub_state/$child_id.omp-replacement.meta" "$sub_state/$child_id.omp-replacement.base" \
+      "$sub_state/$child_id.omp-replacement-brief" "$sub_state/$child_id.omp-replacement-ext.ts" \
+      "$sub_state/$child_id.omp-replacement-ready" "$sub_state/$child_id.omp-replacement-started" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.hermes-turnend-token" "$sub_state/$child_id.hermes-session" \
       "$sub_state/$child_id.hermes-started"
@@ -2723,9 +2727,13 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 rm -rf -- "$STATE/$ID.inbox"
+rm -rf -- "$STATE/$ID.omp-sessions"
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-ready" \
-  "$STATE/$ID.omp-started" \
+  "$STATE/$ID.omp-started" "$STATE/$ID.omp-session" \
+  "$STATE/$ID.omp-replacement.meta" "$STATE/$ID.omp-replacement.base" \
+  "$STATE/$ID.omp-replacement-brief" "$STATE/$ID.omp-replacement-ext.ts" \
+  "$STATE/$ID.omp-replacement-ready" "$STATE/$ID.omp-replacement-started" \
   "$STATE/$ID.grok-turnend-token" "$STATE/$ID.kimi-turnend-token" \
   "$STATE/$ID.hermes-turnend-token" "$STATE/$ID.hermes-session" \
   "$STATE/$ID.hermes-started" \

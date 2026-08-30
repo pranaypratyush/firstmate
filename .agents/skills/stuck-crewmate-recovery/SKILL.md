@@ -26,13 +26,19 @@ Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding
 A no-mistakes run matched to the crew's branch and current code remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active run instead of creating a duplicate worker.
 
 When no authoritative run accounts for the task, inspect only its recorded backend and worktree inventory.
-Use `treehouse status` for treehouse-backed tmux, herdr, zellij, or cmux tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
+Use `treehouse status` for treehouse-backed tmux, Herdr, zellij, or cmux tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
 Do not sweep another home's endpoints or infer ownership from a matching window label.
 
-Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.
-Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.
+For a recorded ordinary OMP task on tmux or Herdr, run `FM_HOME=<this-firstmate-home> bin/fm-spawn.sh <id> --recover` only after the current-state check agrees that the recorded endpoint is missing.
+The command independently requires the exact leased isolated worktree, recorded launch and delivery identity, a regular durable `state/<id>.omp-session` pointer to a direct child of `state/<id>.omp-sessions/`, and an authoritatively missing endpoint.
+It refuses a live, dead-shell, ambiguous, or unreadable endpoint before creating a replacement; Herdr recovery also requires the recorded server and endpoint inventory to remain readable, so a missing Herdr server is not a supported recovery case.
+Legacy ordinary-worker sessions under `/tmp/fm-<id>/omp-sessions/` are not recoverable and must not be migrated into the durable binding.
+The command resumes the exact retained session in the existing worktree, waits for `turn_start`, and atomically replaces only the endpoint identity after that acknowledgement.
+An interrupted attempt is reconciled from its replacement record on the next identical command; a failed uncommitted attempt stops only its exact replacement endpoint and preserves the original worktree, branch, session, and task records.
+
+For every other recorded harness or backend, preserve its uncommitted changes and commits, prove that no live agent still owns the recorded task, and follow the recorded adapter's existing-worktree relaunch procedure.
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
-If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
+If the worktree, durable session, backend inventory, or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
 ## Live-endpoint escalation
 

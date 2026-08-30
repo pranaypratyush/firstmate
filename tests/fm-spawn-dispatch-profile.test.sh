@@ -35,6 +35,21 @@ make_spawn_fakebin() {
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+fake_omp_ack() {
+  local marker=$1 prefix session_dir session
+  [ -n "$marker" ] || return 0
+  prefix=${marker%.omp-started}
+  if [ "$prefix" = "$marker" ]; then
+    : > "$marker"
+    return 0
+  fi
+  session_dir="$prefix.omp-sessions"
+  session="$session_dir/selected.jsonl"
+  mkdir -p "$session_dir"
+  printf '{}\n' > "$session"
+  printf '%s\n' "$session" > "$prefix.omp-session"
+  : > "$marker"
+}
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
@@ -71,7 +86,7 @@ case "${1:-}" in
           if grep -Fq 'FM_OMP_HARNESS=omp' "$FM_FAKE_LAUNCH_LOG" 2>/dev/null; then
             if [ -n "${FM_FAKE_OMP_ACK:-}" ]; then
               while IFS= read -r ack; do
-                [ -z "$ack" ] || : > "$ack"
+                [ -z "$ack" ] || fake_omp_ack "$ack"
               done <<EOF
 $FM_FAKE_OMP_ACK
 EOF
@@ -79,7 +94,7 @@ EOF
             if [ "${FM_FAKE_OMP_DYNAMIC_ACK:-0}" = 1 ]; then
               for extension in "$FM_FAKE_OMP_ACK_DIR"/*.omp-ext.ts; do
                 [ -e "$extension" ] || continue
-                : > "${extension%.omp-ext.ts}.omp-started"
+                fake_omp_ack "${extension%.omp-ext.ts}.omp-started"
               done
             fi
             if [ -n "${FM_FAKE_OMP_META_TAMPER:-}" ]; then
@@ -99,6 +114,21 @@ SH
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
+fake_omp_ack() {
+  local marker=$1 prefix session_dir session
+  [ -n "$marker" ] || return 0
+  prefix=${marker%.omp-started}
+  if [ "$prefix" = "$marker" ]; then
+    : > "$marker"
+    return 0
+  fi
+  session_dir="$prefix.omp-sessions"
+  session="$session_dir/selected.jsonl"
+  mkdir -p "$session_dir"
+  printf '{}\n' > "$session"
+  printf '%s\n' "$session" > "$prefix.omp-session"
+  : > "$marker"
+}
 cmd=${1:-}
 sub=${2:-}
 case "$cmd $sub" in
@@ -189,10 +219,10 @@ case "$cmd $sub" in
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       printf '%s\n' "${4:-}" >> "$FM_FAKE_LAUNCH_LOG"
       if printf '%s' "${4:-}" | grep -Fq 'FM_OMP_HARNESS=omp'; then
-        [ -z "${FM_FAKE_OMP_ACK:-}" ] || : > "$FM_FAKE_OMP_ACK"
+        [ -z "${FM_FAKE_OMP_ACK:-}" ] || fake_omp_ack "$FM_FAKE_OMP_ACK"
         if [ "${FM_FAKE_OMP_DYNAMIC_ACK:-0}" = 1 ]; then
           ack=$(printf '%s\n' "${4:-}" | sed -n "s/.* -e '\([^']*\)\.omp-ext\.ts'.*/\1.omp-started/p")
-          [ -z "$ack" ] || : > "$ack"
+          [ -z "$ack" ] || fake_omp_ack "$ack"
         fi
       fi
     fi
@@ -204,7 +234,7 @@ case "$cmd $sub" in
     case "${4:-}" in
       enter)
         if grep -Fq 'FM_OMP_HARNESS=omp' "${FM_FAKE_LAUNCH_LOG:-/dev/null}" 2>/dev/null; then
-          [ -z "${FM_FAKE_OMP_ACK:-}" ] || : > "$FM_FAKE_OMP_ACK"
+          [ -z "${FM_FAKE_OMP_ACK:-}" ] || fake_omp_ack "$FM_FAKE_OMP_ACK"
         fi
         ;;
     esac

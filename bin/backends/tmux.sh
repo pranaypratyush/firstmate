@@ -59,12 +59,15 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$1" "$2" "$3" "$4" "$5" "${7:-}" "${8:-}" "${9:-}" "${10:-}"
 }
 
-# fm_backend_tmux_container_ensure: reuse the current tmux session when
-# firstmate itself runs inside tmux, else ensure a dedicated detached
-# "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
-# prints the resolved session name.
-fm_backend_tmux_container_ensure() {
-  if [ -n "${TMUX:-}" ]; then
+# fm_backend_tmux_container_ensure: ensure an exact recorded session when one
+# is supplied. Otherwise reuse the current tmux session or ensure a dedicated
+# detached "firstmate" session. Prints the resolved session name.
+fm_backend_tmux_container_ensure() {  # [recorded-session]
+  local session=${1:-}
+  if [ -n "$session" ]; then
+    tmux has-session -t "$session" 2>/dev/null || tmux new-session -d -s "$session"
+    printf '%s' "$session"
+  elif [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else
     tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate

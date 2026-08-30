@@ -561,7 +561,7 @@ wait_for "worker extension readiness" file_exists "$HOME_DIR/state/$WORKER_ID.om
 wait_for "worker first turn" file_exists "$HOME_DIR/state/$WORKER_ID.turn-ended"
 wait_for "exact idle worker identity" agent_is "$WORKER_TARGET" omp 'idle done'
 WORKER_SESSION=$(session_file_for "$WORKER_TARGET")
-case "$WORKER_SESSION" in "/tmp/fm-$WORKER_ID/omp-sessions/"*.jsonl) ;; *) fail "worker Herdr identity did not bind its task-owned session" ;; esac
+case "$WORKER_SESSION" in "$HOME_DIR/state/$WORKER_ID.omp-sessions/"*.jsonl) ;; *) fail "worker Herdr identity did not bind its durable task session" ;; esac
 file_has "$WORKER_SESSION" 'Herdr worker is ready.' || fail "worker launch brief did not complete"
 await_primary_wake_and_drain "worker startup turn-end delivery" "$worker_start_wake_offset" \
   "FIRSTMATE WATCHER WAKE: signal: $HOME_DIR/state/$WORKER_ID.turn-ended" \

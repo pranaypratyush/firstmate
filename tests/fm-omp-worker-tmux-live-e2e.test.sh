@@ -178,7 +178,7 @@ wait_text_count() {
 }
 
 wait_launch_brief_once() {
-  local session_dir=/tmp/fm-$WORKER_ID/omp-sessions attempts=120 i=0 count file file_count
+  local session_dir="$HOME_DIR/state/$WORKER_ID.omp-sessions" attempts=120 i=0 count file file_count
   while [ "$i" -lt "$attempts" ]; do
     count=0
     for file in "$session_dir"/*.jsonl; do
@@ -289,9 +289,9 @@ for _ in $(seq 1 120); do
   sleep 0.25
 done
 [ "$(agent_state "$WORKER_TARGET")" = dead ] || fail "OMP clean exit did not return to the shell"
-SESSION_DIR="/tmp/fm-$WORKER_ID/omp-sessions"
-SESSION_FILE=$(find "$SESSION_DIR" -type f -name '*.jsonl' -print 2>/dev/null | head -1)
-[ -n "$SESSION_FILE" ] || fail "OMP worker session file was not retained for resume"
+SESSION_DIR="$HOME_DIR/state/$WORKER_ID.omp-sessions"
+SESSION_FILE=$(cat "$HOME_DIR/state/$WORKER_ID.omp-session" 2>/dev/null || true)
+[ -n "$SESSION_FILE" ] && [ -f "$SESSION_FILE" ] || fail "OMP worker session file was not retained for resume"
 
 OMP_RESUME_BUN=$(sed -n 's/^omp_bun=//p' "$HOME_DIR/state/$WORKER_ID.meta")
 OMP_RESUME_BIN=$(sed -n 's/^omp_bin=//p' "$HOME_DIR/state/$WORKER_ID.meta")

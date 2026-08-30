@@ -676,6 +676,16 @@ test_no_mistakes_origin_remote_allows() {
   touch "$case_dir/state/task-x1.omp-ext.ts" "$case_dir/state/task-x1.omp-ready" \
     "$case_dir/state/task-x1.omp-started" \
     "$case_dir/state/.task-x1.open-decisions-cursor"
+  mkdir -p "$case_dir/state/task-x1.omp-sessions"
+  printf '{}\n' > "$case_dir/state/task-x1.omp-sessions/selected.jsonl"
+  printf '%s\n' "$case_dir/state/task-x1.omp-sessions/selected.jsonl" \
+    > "$case_dir/state/task-x1.omp-session"
+  touch "$case_dir/state/task-x1.omp-replacement.meta" \
+    "$case_dir/state/task-x1.omp-replacement.base" \
+    "$case_dir/state/task-x1.omp-replacement-brief" \
+    "$case_dir/state/task-x1.omp-replacement-ext.ts" \
+    "$case_dir/state/task-x1.omp-replacement-ready" \
+    "$case_dir/state/task-x1.omp-replacement-started"
   # Push the task branch to origin and fetch so the worktree sees it.
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
@@ -692,6 +702,10 @@ test_no_mistakes_origin_remote_allows() {
   assert_absent "$case_dir/state/task-x1.omp-ext.ts" "nm-origin: OMP extension survived teardown"
   assert_absent "$case_dir/state/task-x1.omp-ready" "nm-origin: OMP readiness marker survived teardown"
   assert_absent "$case_dir/state/task-x1.omp-started" "nm-origin: OMP launch marker survived teardown"
+  assert_absent "$case_dir/state/task-x1.omp-session" "nm-origin: OMP session pointer survived teardown"
+  assert_absent "$case_dir/state/task-x1.omp-sessions" "nm-origin: OMP session directory survived teardown"
+  assert_absent "$case_dir/state/task-x1.omp-replacement.meta" \
+    "nm-origin: OMP replacement sidecars survived teardown"
   assert_absent "$case_dir/state/.task-x1.open-decisions-cursor" \
     "nm-origin: open-decisions cursor survived teardown"
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
