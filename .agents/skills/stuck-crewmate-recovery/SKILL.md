@@ -22,16 +22,19 @@ This procedure covers ordinary `kind=ship` and `kind=scout` direct reports.
 Load `secondmate-provisioning` instead for `kind=secondmate` recovery.
 
 Treat the digest's endpoint result as a presence signal, not proof that the task's work or validation run is gone.
-Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding to relaunch.
+Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding how to preserve the work.
 A no-mistakes run matched to the crew's branch and current code remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active run instead of creating a duplicate worker.
 
 When no authoritative run accounts for the task, inspect only its recorded backend and worktree inventory.
 Use `treehouse status` for treehouse-backed tmux, herdr, zellij, or cmux tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
 Do not sweep another home's endpoints or infer ownership from a matching window label.
 
-Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.
-Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.
-Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
+Ordinary-worker recovery is never automatic.
+Do not resume an old session, restart an old worker, close an endpoint, or reuse its isolated copy.
+When the recorded endpoint is authoritatively `missing`, the operator may explicitly run `bin/fm-clean-commit-relaunch.sh <source-task-id> <destination-task-id>` only after preparing the destination's complete ship brief.
+That command accepts only a readable, completely clean source isolated copy at an exact committed branch tip in the recorded physical repository, then makes a separate destination worker and preserves the source as evidence.
+Uncommitted, dirty, unreadable, dead-but-present, ambiguous, malformed, cross-home, or manual-salvage cases stay blocked with every source record intact.
+An active or parked No-Mistakes run is never changed by the relaunch; its recorded custody holds destination code mutation until Firstmate supplies a supported decision.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
 ## Live-endpoint escalation
@@ -50,8 +53,5 @@ Escalate in order:
    `/fresh` rotates provider-stream state while retaining the local transcript, session file, and identity, and is rejected during active streaming, so abort the current turn first when needed.
    This does not fix a herdr composer-submit freeze where input is swallowed and `/fresh` cannot be submitted; that distinct case still requires the existing kill-plus-respawn recovery.
    If `/fresh` cannot be submitted or does not clear the wedge, continue with the recovery below.
-5. If the crewmate is genuinely wedged after redirection, exit the agent with the adapter's exit command and relaunch with the same brief plus a `progress so far` note appended to it.
-   Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
-   A low context reading is not wedging; modern harnesses auto-compact and keep going.
-   The worktree and commits persist, so relaunch is cheap.
-6. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
+5. If the crewmate is genuinely wedged after redirection, preserve its endpoint and worktree and report the failure for an explicit operator decision.
+6. If the work cannot be continued safely, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.

@@ -147,6 +147,10 @@
 #   local-only ship and makes the pooled worktree use the current local default
 #   branch without fetching or publishing it. Other delivery modes reject it.
 #   The SHA must equal the project's current local default-branch tip.
+#   --accepted-clean-commit and --accepted-clean-commit-source-common are private
+#   carriers for bin/fm-clean-commit-relaunch.sh only.
+#   They import one admitted local commit into a distinct physical destination
+#   repository and are rejected unless that relaunch command marks the spawn.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
@@ -305,6 +309,10 @@ BACKEND_SET=0
 ALLOW_PROJECT_OMP_EXTENSIONS=0
 ACCEPTED_LOCAL_BASE=
 ACCEPTED_LOCAL_BASE_SET=0
+CLEAN_COMMIT=
+CLEAN_COMMIT_SET=0
+CLEAN_COMMIT_SOURCE_COMMON=
+CLEAN_COMMIT_SOURCE_COMMON_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
@@ -328,6 +336,22 @@ for a in "$@"; do
         }
         ACCEPTED_LOCAL_BASE=$a
         ACCEPTED_LOCAL_BASE_SET=1
+        ;;
+      accepted-clean-commit)
+        [ "$CLEAN_COMMIT_SET" -eq 0 ] || {
+          echo "error: --accepted-clean-commit may be specified only once" >&2
+          exit 1
+        }
+        CLEAN_COMMIT=$a
+        CLEAN_COMMIT_SET=1
+        ;;
+      accepted-clean-commit-source-common)
+        [ "$CLEAN_COMMIT_SOURCE_COMMON_SET" -eq 0 ] || {
+          echo "error: --accepted-clean-commit-source-common may be specified only once" >&2
+          exit 1
+        }
+        CLEAN_COMMIT_SOURCE_COMMON=$a
+        CLEAN_COMMIT_SOURCE_COMMON_SET=1
         ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
@@ -363,6 +387,36 @@ for a in "$@"; do
       }
       ACCEPTED_LOCAL_BASE=${a#--accepted-local-base=}
       ACCEPTED_LOCAL_BASE_SET=1
+      ;;
+    --accepted-clean-commit)
+      [ "$CLEAN_COMMIT_SET" -eq 0 ] || {
+        echo "error: --accepted-clean-commit may be specified only once" >&2
+        exit 1
+      }
+      want_value=accepted-clean-commit
+      ;;
+    --accepted-clean-commit=*)
+      [ "$CLEAN_COMMIT_SET" -eq 0 ] || {
+        echo "error: --accepted-clean-commit may be specified only once" >&2
+        exit 1
+      }
+      CLEAN_COMMIT=${a#--accepted-clean-commit=}
+      CLEAN_COMMIT_SET=1
+      ;;
+    --accepted-clean-commit-source-common)
+      [ "$CLEAN_COMMIT_SOURCE_COMMON_SET" -eq 0 ] || {
+        echo "error: --accepted-clean-commit-source-common may be specified only once" >&2
+        exit 1
+      }
+      want_value=accepted-clean-commit-source-common
+      ;;
+    --accepted-clean-commit-source-common=*)
+      [ "$CLEAN_COMMIT_SOURCE_COMMON_SET" -eq 0 ] || {
+        echo "error: --accepted-clean-commit-source-common may be specified only once" >&2
+        exit 1
+      }
+      CLEAN_COMMIT_SOURCE_COMMON=${a#--accepted-clean-commit-source-common=}
+      CLEAN_COMMIT_SOURCE_COMMON_SET=1
       ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
     --allow-project-omp-extensions) ALLOW_PROJECT_OMP_EXTENSIONS=1 ;;
@@ -451,6 +505,41 @@ if [ "$ACCEPTED_LOCAL_BASE_SET" -eq 1 ]; then
     echo "error: --accepted-local-base must be a full 40- to 64-character commit SHA" >&2
     exit 1
   fi
+fi
+if [ "$CLEAN_COMMIT_SET" -eq 1 ]; then
+  [ "${FM_CLEAN_COMMIT_RELAUNCH:-}" = 1 ] || {
+    echo "error: --accepted-clean-commit is reserved for bin/fm-clean-commit-relaunch.sh" >&2
+    exit 1
+  }
+  if [ "$KIND" != ship ]; then
+    echo "error: --accepted-clean-commit is valid only for a ship spawn" >&2
+    exit 1
+  fi
+  [ "$ACCEPTED_LOCAL_BASE_SET" -eq 0 ] || {
+    echo "error: --accepted-clean-commit cannot be combined with --accepted-local-base" >&2
+    exit 1
+  }
+  case "$CLEAN_COMMIT" in
+    ''|*[!0-9a-f]*)
+      echo "error: --accepted-clean-commit must be a full lowercase hexadecimal commit SHA" >&2
+      exit 1
+      ;;
+  esac
+  if [ "${#CLEAN_COMMIT}" -lt 40 ] || [ "${#CLEAN_COMMIT}" -gt 64 ]; then
+    echo "error: --accepted-clean-commit must be a full 40- to 64-character commit SHA" >&2
+    exit 1
+  fi
+fi
+if [ "$CLEAN_COMMIT_SOURCE_COMMON_SET" -eq 1 ]; then
+  [ "$CLEAN_COMMIT_SET" -eq 1 ] && [ "${FM_CLEAN_COMMIT_RELAUNCH:-}" = 1 ] || {
+    echo "error: --accepted-clean-commit-source-common is reserved for bin/fm-clean-commit-relaunch.sh" >&2
+    exit 1
+  }
+  [ -d "$CLEAN_COMMIT_SOURCE_COMMON" ] && [ ! -L "$CLEAN_COMMIT_SOURCE_COMMON" ] || {
+    echo "error: --accepted-clean-commit-source-common must name a readable ordinary Git directory" >&2
+    exit 1
+  }
+  CLEAN_COMMIT_SOURCE_COMMON=$(cd "$CLEAN_COMMIT_SOURCE_COMMON" && pwd -P)
 fi
 
 REMOTE_RUNPOD_DELIVERY_LOCK=
@@ -828,8 +917,8 @@ if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
   echo "error: backend=cmux does not support --secondmate spawns yet" >&2
   exit 1
 fi
-if [ "$ACCEPTED_LOCAL_BASE_SET" -eq 1 ] && [ "$BACKEND" = orca ]; then
-  echo "error: --accepted-local-base applies only to Treehouse-backed spawns; backend=orca owns its worktree" >&2
+if { [ "$ACCEPTED_LOCAL_BASE_SET" -eq 1 ] || [ "$CLEAN_COMMIT_SET" -eq 1 ]; } && [ "$BACKEND" = orca ]; then
+  echo "error: an accepted spawn base applies only to Treehouse-backed spawns; backend=orca owns its worktree" >&2
   exit 1
 fi
 ORCA_ABORT_CLEANUP=0
@@ -2548,14 +2637,32 @@ refuse_spawn_pool_lease() { # <reason> <inspect-target>
 }
 
 validate_spawn_pool_lease() { # <source> <inspect-target>
-  local source=$1 inspect_target=$2 default target expected
+  local source=$1 inspect_target=$2 default target expected destination_common
   if ! fm_pool_worktree_clean "$WT"; then
     local dirty
     dirty=$(fm_pool_first_real_porcelain_line "$WT" 2>/dev/null || printf 'unreadable status')
     refuse_spawn_pool_lease "$source yielded a dirty pool worktree ($dirty; allowed only a lone untracked treehouse.toml)" "$inspect_target"
     return 1
   fi
-  if [ -n "$ACCEPTED_LOCAL_BASE" ]; then
+  if [ "$CLEAN_COMMIT_SOURCE_COMMON_SET" -eq 1 ]; then
+    destination_common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    destination_common=$(cd "$destination_common" 2>/dev/null && pwd -P || true)
+    [ -n "$destination_common" ] || {
+      refuse_spawn_pool_lease "$source could not identify the destination physical repository" "$inspect_target"
+      return 1
+    }
+    [ "$destination_common" != "$CLEAN_COMMIT_SOURCE_COMMON" ] || {
+      refuse_spawn_pool_lease "$source would reuse the source physical repository" "$inspect_target"
+      return 1
+    }
+  fi
+  if [ -n "$CLEAN_COMMIT" ]; then
+    if ! git -C "$WT" fetch --quiet --no-tags "$PROJ_ABS" "$CLEAN_COMMIT"; then
+      refuse_spawn_pool_lease "$source could not import the accepted clean commit from its recorded project repository" "$inspect_target"
+      return 1
+    fi
+    target=$CLEAN_COMMIT
+  elif [ -n "$ACCEPTED_LOCAL_BASE" ]; then
     target=$ACCEPTED_LOCAL_BASE
   else
     if ! git -C "$WT" fetch --quiet origin; then
@@ -2587,7 +2694,9 @@ validate_spawn_pool_lease() { # <source> <inspect-target>
 
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual current
-  if [ -n "$ACCEPTED_LOCAL_BASE" ]; then
+  if [ -n "$CLEAN_COMMIT" ]; then
+    target=$CLEAN_COMMIT
+  elif [ -n "$ACCEPTED_LOCAL_BASE" ]; then
     target=$ACCEPTED_LOCAL_BASE
   else
     if ! git -C "$worktree" fetch --quiet origin; then
@@ -3171,6 +3280,17 @@ fi
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+fi
+if [ "$CLEAN_COMMIT_SET" -eq 1 ] && [ "$KIND" = ship ] && [ "$BACKEND" != orca ]; then
+  CLEAN_COMMIT_BRANCH="fm/relaunch-$ID"
+  if git -C "$WT" show-ref --verify --quiet "refs/heads/$CLEAN_COMMIT_BRANCH"; then
+    echo "error: relaunch destination branch already exists: $CLEAN_COMMIT_BRANCH" >&2
+    exit 1
+  fi
+  if ! git -C "$WT" checkout --quiet -b "$CLEAN_COMMIT_BRANCH" "$CLEAN_COMMIT"; then
+    echo "error: could not create relaunch destination branch $CLEAN_COMMIT_BRANCH at $CLEAN_COMMIT" >&2
+    exit 1
+  fi
 fi
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
