@@ -14,15 +14,17 @@ import { dirname, join } from "node:path";
 
 export const FM_TASK_INBOX_DOORBELL_SIGNAL = "SIGUSR2";
 
+type TaskInboxDoorbellMessage = {
+	customType: string;
+	content: string;
+	display: boolean;
+	attribution: "agent";
+	details: { kind: "task-inbox"; runtime: "omp" };
+};
+
 type OmpDoorbellApi = {
 	sendMessage?: (
-		message: {
-			customType: string;
-			content: string;
-			display: boolean;
-			attribution: "agent";
-			details: { kind: "task-inbox"; runtime: "omp" };
-		},
+		message: TaskInboxDoorbellMessage,
 		options: { deliverAs: "steer"; triggerTurn: true },
 	) => void;
 };
@@ -30,7 +32,7 @@ type OmpDoorbellApi = {
 export type TaskInboxDoorbellOptions = {
 	inboxDir?: string;
 	readyMarker?: string;
-	currentSession?: () => string;
+	deliverSession?: (expectedSession: string, message: TaskInboxDoorbellMessage) => boolean;
 };
 
 export type TaskInboxDoorbell = {
@@ -38,7 +40,12 @@ export type TaskInboxDoorbell = {
 	retire: () => void;
 };
 
-function configuredOptions(options: TaskInboxDoorbellOptions): Required<TaskInboxDoorbellOptions> | undefined {
+type ConfiguredDoorbellOptions = Pick<TaskInboxDoorbellOptions, "inboxDir" | "readyMarker"> & {
+	inboxDir: string;
+	readyMarker: string;
+};
+
+function configuredOptions(options: TaskInboxDoorbellOptions): ConfiguredDoorbellOptions | undefined {
 	const inboxDir = options.inboxDir ?? process.env.FM_OMP_TASK_INBOX_DIR ?? "";
 	const readyMarker = options.readyMarker ?? process.env.FM_OMP_TASK_DOORBELL_READY ?? "";
 	if (!inboxDir.startsWith("/") || !readyMarker.startsWith("/")) return undefined;
@@ -76,14 +83,13 @@ function bestEffortUnlink(path: string): void {
 	}
 }
 
-function requestContent(raw: string, currentSession: (() => string) | undefined): string | undefined {
-	if (!raw.startsWith("omp_session=")) return raw;
+function requestContent(raw: string): { content: string; expectedSession?: string } | undefined {
+	if (!raw.startsWith("omp_session=")) return { content: raw };
 	const separator = raw.indexOf("\n--\n");
 	if (separator < 0) return undefined;
 	const expectedSession = raw.slice("omp_session=".length, separator);
 	if (!expectedSession.startsWith("/") || !expectedSession.endsWith(".jsonl")) return undefined;
-	if (!currentSession || currentSession() !== expectedSession) return undefined;
-	return raw.slice(separator + "\n--\n".length);
+	return { content: raw.slice(separator + "\n--\n".length), expectedSession };
 }
 
 function reconcileAmbiguousClaims(requestDir: string): void {
@@ -139,22 +145,29 @@ export function installTaskInboxDoorbell(
 				}
 				try {
 					if (typeof omp.sendMessage !== "function") throw new Error("OMP sendMessage unavailable");
-					const content = requestContent(readFileSync(ambiguous, "utf8"), options.currentSession);
-					if (content === undefined) {
+					const request = requestContent(readFileSync(ambiguous, "utf8"));
+					if (request === undefined) {
 						renameSync(ambiguous, `${pending}.refused`);
 						continue;
 					}
-					invoked = true;
-					omp.sendMessage(
-						{
-							customType: "firstmate-task-inbox-doorbell",
-							content,
-							display: false,
-							attribution: "agent",
-							details: { kind: "task-inbox", runtime: "omp" },
-						},
-						{ deliverAs: "steer", triggerTurn: true },
-					);
+					const message: TaskInboxDoorbellMessage = {
+						customType: "firstmate-task-inbox-doorbell",
+						content: request.content,
+						display: false,
+						attribution: "agent",
+						details: { kind: "task-inbox", runtime: "omp" },
+					};
+					if (request.expectedSession) {
+						invoked = true;
+						if (!options.deliverSession?.(request.expectedSession, message)) {
+							invoked = false;
+							renameSync(ambiguous, `${pending}.refused`);
+							continue;
+						}
+					} else {
+						invoked = true;
+						omp.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
+					}
 					renameSync(ambiguous, `${pending}.delivered`);
 				} catch {
 					if (!invoked) bestEffortRename(ambiguous, `${pending}.failed`);

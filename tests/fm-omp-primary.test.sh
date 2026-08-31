@@ -492,12 +492,14 @@ let markerLines = readFileSync(marker, "utf8").trim().split("\n");
 if (markerLines.length !== 4 || markerLines[1] !== String(process.pid)) {
   throw new Error(`invalid OMP primary marker ${markerLines.join("|")}`);
 }
-const extensionContext = { sessionManager: { getSessionFile: () => `${process.env.FIXTURE}/omp-session.jsonl` } };
+const originalSession = `${process.env.FIXTURE}/omp-session.jsonl`;
+let liveSession = originalSession;
+const extensionContext = { sessionManager: { getSessionFile: () => liveSession } };
 if (existsSync(process.env.FM_OMP_TASK_DOORBELL_READY)) {
   throw new Error("OMP primary doorbell published readiness before session initialization");
 }
 await handlers.get("session_start")({ type: "session_start" }, extensionContext);
-if (readFileSync(process.env.FM_OMP_SESSION_POINTER, "utf8").trim() !== `${process.env.FIXTURE}/omp-session.jsonl`) {
+if (readFileSync(process.env.FM_OMP_SESSION_POINTER, "utf8").trim() !== originalSession) {
   throw new Error("OMP primary integration did not publish the exact secondmate session pointer");
 }
 if (readFileSync(process.env.FM_OMP_TASK_DOORBELL_READY, "utf8") !== `${process.pid}\n`) {
@@ -508,7 +510,7 @@ if (readFileSync(process.env.FM_OMP_TASK_TURN_STARTED, "utf8") !== `${process.pi
   throw new Error("OMP primary integration did not publish the task-bound turn-start marker");
 }
 const primaryRequest = `${process.env.FM_OMP_TASK_DOORBELL_READY}.requests/primary.pending`;
-writeFileSync(primaryRequest, `Firstmate instruction waiting: list ${process.env.FM_OMP_TASK_INBOX_DIR}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.FM_OMP_TASK_INBOX_DIR}/handled/.`);
+writeFileSync(primaryRequest, `omp_session=${originalSession}\n--\nFirstmate instruction waiting: list ${process.env.FM_OMP_TASK_INBOX_DIR}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.FM_OMP_TASK_INBOX_DIR}/handled/.`);
 process.emit("SIGUSR2");
 if (
   watcherMessages.length !== 1 ||
@@ -520,6 +522,13 @@ if (
   throw new Error(`OMP primary secondmate doorbell was not acknowledged exactly once: ${JSON.stringify(watcherMessages)}`);
 }
 watcherMessages.length = 0;
+liveSession = `${process.env.FIXTURE}/switched-omp-session.jsonl`;
+const staleRequest = `${process.env.FM_OMP_TASK_DOORBELL_READY}.requests/stale.pending`;
+writeFileSync(staleRequest, `omp_session=${originalSession}\n--\nFirstmate instruction waiting: list ${process.env.FM_OMP_TASK_INBOX_DIR}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.FM_OMP_TASK_INBOX_DIR}/handled/.`);
+process.emit("SIGUSR2");
+if (watcherMessages.length !== 0 || !existsSync(`${staleRequest}.refused`)) {
+  throw new Error("OMP primary notified a session after its exact target changed");
+}
 const startup = await handlers.get("before_agent_start")({ type: "before_agent_start" }, {});
 if (startup?.message?.customType !== "firstmate-sessionstart-nudge" || startup.message.content !== "OMP_PRIMARY_STARTUP_NUDGE" || startup.message.attribution !== "agent") {
   throw new Error(`startup nudge was not bound to the first provider turn: ${JSON.stringify(startup)}`);

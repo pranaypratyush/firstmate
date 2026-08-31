@@ -1166,9 +1166,8 @@ import { pathToFileURL } from "node:url";
 
 const { installTaskInboxDoorbell } =
   await import(pathToFileURL(process.env.FM_TEST_OMP_HELPER).href);
-const doorbell = installTaskInboxDoorbell(
-  {
-    sendMessage(message, options) {
+const omp = {
+  sendMessage(message, options) {
       appendFileSync(process.env.FM_TEST_OMP_SENT, `${JSON.stringify({ message, options })}\n`);
       writeFileSync(process.env.FM_TEST_OMP_TURN_STARTED, `${process.pid}\n`);
       if (!existsSync(process.env.FM_TEST_OMP_SKIP_HANDLED)) {
@@ -1182,10 +1181,17 @@ const doorbell = installTaskInboxDoorbell(
       }
     },
   },
+};
+const doorbell = installTaskInboxDoorbell(
+  omp,
   {
     inboxDir: process.env.FM_TEST_OMP_INBOX,
     readyMarker: process.env.FM_TEST_OMP_READY,
-    currentSession: () => readFileSync(process.env.FM_TEST_OMP_SESSION, "utf8").trim(),
+    deliverSession: (expectedSession, message) => {
+      if (readFileSync(process.env.FM_TEST_OMP_SESSION, "utf8").trim() !== expectedSession) return false;
+      omp.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
+      return true;
+    },
   },
 );
 doorbell.activate();

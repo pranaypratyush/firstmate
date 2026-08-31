@@ -200,9 +200,13 @@ function runGuard(event: SessionStopEvent): Promise<ProcessResult> {
 export default function (omp: ExtensionAPI) {
   if (!primaryIntegrationApplies()) return;
   publishNativeProcessIdentity();
-  let activeSession = "";
+  let taskInboxSessionManager: ExtensionContext["sessionManager"] | undefined;
   const taskInboxDoorbell = installTaskInboxDoorbell(omp, {
-    currentSession: () => activeSession,
+    deliverSession: (expectedSession, message) => {
+      if (taskInboxSessionManager?.getSessionFile() !== expectedSession) return false;
+      omp.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
+      return true;
+    },
   });
   let pendingStartupNudge = "";
 
@@ -259,7 +263,7 @@ export default function (omp: ExtensionAPI) {
   };
 
   omp.on("session_start", (_event, ctx) => {
-    activeSession = ctx.sessionManager.getSessionFile() || "";
+    taskInboxSessionManager = ctx.sessionManager;
     watch.sessionStart();
     publishSecondmateSession(ctx);
     taskInboxDoorbell.activate();
@@ -271,7 +275,7 @@ export default function (omp: ExtensionAPI) {
   });
 
   omp.on("session_switch", (event, ctx) => {
-    activeSession = ctx.sessionManager.getSessionFile() || "";
+    taskInboxSessionManager = ctx.sessionManager;
     watch.sessionShutdown();
     watch.sessionStart();
     publishSecondmateSession(ctx);

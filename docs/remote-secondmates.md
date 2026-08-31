@@ -184,7 +184,7 @@ FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
 
 For an OMP secondmate, ordinary routed text reselects the exact remote task and writes only its canonical durable inbox.
 Before enqueue or notification, the remote control binds the seeded home identity, endpoint task, retained OMP session, tracked primary-extension closure, loaded extension instance, and canonical launch paths.
-Payload text and handled acknowledgement remain in that inbox, while the loaded extension delivers only its constant doorbell through `sendMessage(..., { triggerTurn: true })`; neither composer text nor Enter transports or proves the request.
+Payload text and handled acknowledgement remain in that inbox, while the loaded extension delivers only its constant doorbell through a live session-bound `sendMessage(..., { triggerTurn: true })` call after the request's exact session matches the session manager; neither composer text nor Enter transports or proves the request.
 An unavailable programmatic delivery after binding returns exit 6 with the request durably queued, and an ambiguous programmatic request returns exit 7 without replay.
 An accepted doorbell that does not start its bound turn or receive its handled acknowledgement returns exit 8 with the queue retained.
 An identity, session, or extension mismatch, including an unavailable initial extension binding, returns exit 9 before notification and requires reconciliation rather than resend.
