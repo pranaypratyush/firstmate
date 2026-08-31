@@ -73,6 +73,8 @@ _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_TASK_INBOX_LIB_DIR/fm-wake-lib.sh"
 # shellcheck source=/dev/null
 . "$_FM_TASK_INBOX_LIB_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-marker-lib.sh
+. "$_FM_TASK_INBOX_LIB_DIR/fm-marker-lib.sh"
 
 FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
@@ -178,7 +180,7 @@ fm_task_inbox_body() {  # <record-path>
 }
 
 fm_task_inbox_corr_record() {  # <state-dir> <task-id> <corr>
-  local state=$1 task=$2 corr=$3 dir parent f body
+  local state=$1 task=$2 corr=$3 dir parent f body carrier
   case "$corr" in
     [a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]) ;;
     *) return 1 ;;
@@ -188,7 +190,9 @@ fm_task_inbox_corr_record() {  # <state-dir> <task-id> <corr>
     for f in "$parent"/*.msg; do
       [ -f "$f" ] || continue
       body=$(fm_task_inbox_body "$f") || continue
-      if [[ "$body" =~ (^|[[:space:]])corr=${corr}([[:space:]]|$) ]]; then
+      if fm_message_from_firstmate "$body" \
+        && fm_operational_input_body "$body" carrier \
+        && [[ "$carrier" = "corr=$corr"[[:space:]]* ]]; then
         printf '%s' "$f"
         return 0
       fi

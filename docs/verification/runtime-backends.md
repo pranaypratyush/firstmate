@@ -1124,12 +1124,15 @@ ok - live steering-inbox doorbell guard: 2 harnesses verified
 
 The OMP wake transport was changed on 2026-08-30 from terminal submission to an acknowledged programmatic extension request on tmux and Herdr.
 The deterministic extension and primary-adapter fixtures cover canonical counted requests, `triggerTurn=true`, post-retirement signal safety, exact-identity revalidation for pending retries, pre-call payload failure fallback, ambiguous-claim inbox anchoring without resend, ordinary non-OMP composer routing, ordinary worker wiring, and secondmate wiring through the primary extension.
+The remote OMP delivery route was exercised deterministically on 2026-08-31 through the remote fixture, including canonical-parent binding, programmatic turn delivery, durable acknowledgement, inactive or stale binding refusal, timeout retention, and no-replay refusal for both active and handled canonical records.
+This fixture makes no live Herdr call and does not start, terminate, or mutate a persistent remote secondmate.
 The required live OMP-under-Herdr smoke is intentionally deferred until after Firstmate updates; no live Herdr or OMP lifecycle was driven from this worktree.
 
 ```sh
 set -o pipefail
 tests/fm-omp-task-inbox-doorbell.test.sh | grep -E '^ok - (OMP extension drains|doorbell routing selects|OMP pending retries|fm-send and both)'
 tests/fm-omp-primary.test.sh | grep -F 'ok - OMP primary extension binds secondmate doorbells after session readiness'
+tests/fm-remote-secondmate-lifecycle-e2e.test.sh | grep -F 'ok - remote OMP delivery replaces the reproducible typed no-turn regression with one bound inbox request, programmatic turn, and handled acknowledgement'
 ```
 
 Observed result:
@@ -1140,6 +1143,7 @@ ok - doorbell routing selects OMP programmatic wake and preserves both composer 
 ok - OMP pending retries revalidate identity while ambiguous claims suppress resend
 ok - fm-send and both tmux/Herdr adapters preserve task-bound OMP programmatic doorbells
 ok - OMP primary extension binds secondmate doorbells after session readiness
+ok - remote OMP delivery replaces the reproducible typed no-turn regression with one bound inbox request, programmatic turn, and handled acknowledgement
 ```
 
 ## Codex App host tools
