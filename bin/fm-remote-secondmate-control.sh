@@ -171,6 +171,8 @@ remote_omp_delivery_binding() { # <id>
     || remote_omp_delivery_refuse "endpoint metadata is not a persistent secondmate"
   fm_backend_agent_record_identity "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$REMOTE_ENDPOINT_META" \
     || remote_omp_delivery_refuse "endpoint task or OMP launch identity is stale or malformed"
+  fm_backend_source "$REMOTE_ENDPOINT_BACKEND" \
+    || remote_omp_delivery_refuse "exact remote OMP backend is unavailable"
   [ "$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$REMOTE_ENDPOINT_META" 2>/dev/null)" = alive ] \
     || remote_omp_delivery_refuse "exact remote OMP endpoint is not live"
 

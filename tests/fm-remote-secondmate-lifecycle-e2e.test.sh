@@ -1161,7 +1161,7 @@ assert_contains "$OMP_REMOTE_LAUNCH" \
 
 # Reproduce the old explicit-pane transport with a real task-bound OMP listener
 cat > "$REMOTE_ROOT/bin/omp" <<'JS'
-import { appendFileSync, existsSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const { installTaskInboxDoorbell } =
@@ -1322,7 +1322,7 @@ remote_env "$ROOT/bin/fm-on.sh" remote-omp fm-remote-secondmate-control.sh send 
 bad_exit_rc=$?
 set -e
 [ "$bad_exit_rc" = 9 ] || fail "uncorrelated remote OMP slash carrier was not refused (rc=$bad_exit_rc)"
-assert_grep 'canonical parent correlation' "$TMP_ROOT/remote-omp-bad-exit.out" \
+assert_grep 'canonical lowercase parent correlation' "$TMP_ROOT/remote-omp-bad-exit.out" \
   "uncorrelated remote OMP slash carrier did not report its named refusal"
 
 UPPERCASE_CARRIER="[fm-from-firstmate]"$'\xE2\x81\xA3'"corr=ABCDEF0123456789 uppercase correlation"
