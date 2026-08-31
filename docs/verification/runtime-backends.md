@@ -559,6 +559,28 @@ ok - spawn guards Treehouse reset before non-ancestor acquisition
 # all fm-spawn-pool-base-freshen tests passed
 ```
 
+### Clean-commit destination base
+
+The explicit clean-commit destination base was validated on 2026-08-31 by the portable relaunch regression.
+
+```sh
+bash tests/fm-clean-commit-relaunch.test.sh
+```
+
+Bounded output:
+
+```text
+ok - clean unpushed commit relaunches through a fresh destination while preserving the source
+ok - destination failures and concurrent admission preserve source ownership
+# all fm-clean-commit-relaunch tests passed
+```
+
+The exact-commit path shares the Treehouse-backed tmux, Herdr, Zellij, and cmux destination boundary before any harness-specific setup or first-turn delivery.
+
+Orca is not applicable because `fm-spawn.sh` refuses the exact-commit carrier before Orca creates a worktree or terminal.
+
+The portable regression makes no live-harness claim because the selected base is resolved before harness launch templates, and it does not drive live Herdr lifecycle behavior.
+
 The structural multi-row composer reader, Kimi pointer-delivery path, and OpenCode 1.18.4 busy-queue behavior are pinned by:
 
 ```sh
