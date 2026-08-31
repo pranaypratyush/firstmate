@@ -313,6 +313,7 @@ CLEAN_COMMIT=
 CLEAN_COMMIT_SET=0
 CLEAN_COMMIT_SOURCE_COMMON=
 CLEAN_COMMIT_SOURCE_COMMON_SET=0
+CLEAN_COMMIT_CUSTODY_HOLD=${FM_CLEAN_COMMIT_CUSTODY_HOLD:-0}
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
@@ -530,6 +531,8 @@ if [ "$CLEAN_COMMIT_SET" -eq 1 ]; then
     exit 1
   fi
 fi
+case "$CLEAN_COMMIT_CUSTODY_HOLD" in 0|1) ;; *) echo "error: clean-commit custody hold must be 0 or 1" >&2; exit 1 ;; esac
+[ "$CLEAN_COMMIT_CUSTODY_HOLD" -eq 0 ] || { [ "$CLEAN_COMMIT_SET" -eq 1 ] && [ "${FM_CLEAN_COMMIT_RELAUNCH:-}" = 1 ]; } || { echo "error: clean-commit custody hold is reserved for bin/fm-clean-commit-relaunch.sh" >&2; exit 1; }
 if [ "$CLEAN_COMMIT_SOURCE_COMMON_SET" -eq 1 ]; then
   [ "$CLEAN_COMMIT_SET" -eq 1 ] && [ "${FM_CLEAN_COMMIT_RELAUNCH:-}" = 1 ] || {
     echo "error: --accepted-clean-commit-source-common is reserved for bin/fm-clean-commit-relaunch.sh" >&2
@@ -3302,6 +3305,9 @@ if [ "$CLEAN_COMMIT_SET" -eq 1 ] && [ "$KIND" = ship ] && [ "$BACKEND" != orca ]
     exit 1
   fi
 fi
+if [ "$CLEAN_COMMIT_CUSTODY_HOLD" -eq 1 ]; then
+  find "$WT" -path "$WT/.git" -prune -o -exec chmod a-w {} + || exit 1
+fi
 if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ] \
   && [ "$PREWALK_WORKTREE_READY" != 1 ]; then
   validate_omp_prewalk_for_launch_dir "$WT"
@@ -3705,6 +3711,7 @@ SPAWN_META_LOCK_HELD=1
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  [ "$CLEAN_COMMIT_CUSTODY_HOLD" -eq 0 ] || echo "code_mutation_hold=firstmate-custody-decision-required"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

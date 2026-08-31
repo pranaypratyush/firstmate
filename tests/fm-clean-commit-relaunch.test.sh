@@ -77,6 +77,11 @@ EOF
     echo 'validation service unavailable' >&2
     exit 2
     ;;
+  empty) exit 0 ;;
+  mixed-error)
+    echo 'no active run; validation service unavailable' >&2
+    exit 2
+    ;;
   unknown)
     cat <<EOF
 id: run-source
@@ -203,7 +208,7 @@ test_clean_committed_unpushed_success_preserves_source() {
 
 test_dirty_staged_untracked_and_git_operation_refuse() {
   local kind rec out status operation
-  for kind in dirty staged untracked operation operation-symlink; do
+  for kind in dirty staged untracked operation operation-symlink bisect; do
     rec=$(make_case "refuse-$kind")
     read_case "$rec"
     case "$kind" in
@@ -218,6 +223,7 @@ test_dirty_staged_untracked_and_git_operation_refuse() {
         operation=$(git -C "$SOURCE_DIR" rev-parse --git-path MERGE_HEAD)
         ln -s /dev/null "$operation"
         ;;
+      bisect) git -C "$SOURCE_DIR" bisect start >/dev/null ;;
     esac
     source_snapshot "$CASE_DIR/before"
     out=$(run_relaunch)
@@ -342,13 +348,17 @@ test_validation_custody_handoff_holds_destination() {
       "$custody validation did not place destination custody hold in its brief"
     jq -e --arg custody "$custody" '.no_mistakes_custody.state == $custody and .no_mistakes_custody.run_id == "run-source" and .no_mistakes_custody.next_action == "firstmate-custody-decision-required"' \
       "$HOME_DIR/data/dest/relaunch-handoff.json" >/dev/null || fail "$custody validation custody was not structurally preserved"
+    [ ! -w "$DEST_DIR/README.md" ] || fail "$custody custody hold left destination code writable"
+    FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" "$RELAUNCH" release-custody dest continue >/dev/null \
+      || fail "$custody custody decision did not release destination code work"
+    [ -w "$DEST_DIR/README.md" ] || fail "$custody custody release did not restore destination code writes"
   done
   pass 'active and parked no-mistakes custody is preserved and holds destination code mutation'
 }
 
 test_unreadable_validation_custody_refuses() {
   local custody rec out status
-  for custody in unreadable unknown; do
+  for custody in unreadable unknown empty mixed-error; do
     rec=$(make_case "$custody-validation")
     read_case "$rec"
     source_snapshot "$CASE_DIR/before"
@@ -360,6 +370,26 @@ test_unreadable_validation_custody_refuses() {
     [ ! -e "$HOME_DIR/state/dest.meta" ] || fail "$custody validation custody allocated a destination"
   done
   pass 'unreadable and unclassifiable no-mistakes custody refuse without source mutation'
+}
+
+test_dangling_destination_state_refuses() {
+  local name rec out status path
+  for name in meta status inbox handoff; do
+    rec=$(make_case "dangling-$name")
+    read_case "$rec"
+    case "$name" in
+      meta) path=$HOME_DIR/state/dest.meta ;;
+      status) path=$HOME_DIR/state/dest.status ;;
+      inbox) path=$HOME_DIR/state/dest.inbox ;;
+      handoff) path=$HOME_DIR/data/dest/relaunch-handoff.json ;;
+    esac
+    ln -s "$CASE_DIR/absent" "$path"
+    FM_ENDPOINT_STATE_VALUE=missing out=$(run_relaunch)
+    status=$?
+    [ "$status" -ne 0 ] || fail "dangling destination $name unexpectedly relaunched"
+    [ -L "$path" ] || fail "dangling destination $name was replaced"
+  done
+  pass 'dangling destination state refuses before publication'
 }
 
 test_missing_or_symlinked_source_brief_refuses() {
@@ -423,6 +453,7 @@ test_nonship_crosshome_and_identity_sources_refuse
 test_missing_source_branch_commit_refuses
 test_validation_custody_handoff_holds_destination
 test_unreadable_validation_custody_refuses
+test_dangling_destination_state_refuses
 test_missing_or_symlinked_source_brief_refuses
 test_destination_failure_and_concurrent_admission_preserve_source
 
