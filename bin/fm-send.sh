@@ -881,6 +881,16 @@ else
         exit 1
         ;;
     esac
+    if [ "$PRESERVE_INBOUND_FROM_FIRSTMATE" = 1 ]; then
+      existing_corr=$(fm_pending_reply_extract_corr "$MESSAGE")
+      if [ -n "$existing_corr" ] \
+        && INBOX_RECORD=$(fm_task_inbox_unhandled_corr "$STATE" "$TARGET_TASK_ID" "$existing_corr"); then
+        fm_lock_release "$INBOX_META_LOCK"
+        INBOX_META_LOCK_HELD=0
+        echo "error: remote-omp-inbox-duplicate: the canonical request is already durable at $INBOX_RECORD; do not resend" >&2
+        exit 10
+      fi
+    fi
     if [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_TURNSTART_REQUIRED" = 1 ]; then
       if ! fm_send_setup_omp_turnstart; then
         fm_lock_release "$INBOX_META_LOCK"
@@ -1035,6 +1045,7 @@ else
         7:omp) verdict='remote-omp-inbox-ambiguous'; send_rc=0 ;;
         8:omp) verdict='remote-omp-inbox-no-turn'; send_rc=0 ;;
         9:omp) verdict='remote-omp-binding-refused'; send_rc=0 ;;
+        10:omp) verdict='remote-omp-inbox-duplicate'; send_rc=0 ;;
         *) verdict=send-failed ;;
       esac
     fi
@@ -1113,7 +1124,7 @@ else
       ;;
     delivered-no-turn-persistence-failed)
       ;;
-    remote-omp-inbox-unavailable|remote-omp-inbox-ambiguous|remote-omp-inbox-no-turn)
+    remote-omp-inbox-unavailable|remote-omp-inbox-ambiguous|remote-omp-inbox-no-turn|remote-omp-inbox-duplicate)
       # The exact remote inbox record is durable, but the caller receives the
       # named non-resend verdict below rather than a generic success.
       ;;
@@ -1187,6 +1198,11 @@ else
       [ "$post_delivery_failed" -eq 0 ] || exit 1
       echo "error: remote-omp-inbox-queued: the remote request is durable but no bound turn started; do not resend" >&2
       exit 8
+      ;;
+    remote-omp-inbox-duplicate)
+      [ "$post_delivery_failed" -eq 0 ] || exit 1
+      echo "error: remote-omp-inbox-duplicate: the remote request is already durable; do not resend" >&2
+      exit 10
       ;;
   esac
   [ "$post_delivery_failed" -eq 0 ] || exit 1

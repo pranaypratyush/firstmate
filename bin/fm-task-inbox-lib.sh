@@ -177,6 +177,24 @@ fm_task_inbox_body() {  # <record-path>
   return 1
 }
 
+fm_task_inbox_unhandled_corr() {  # <state-dir> <task-id> <corr>
+  local state=$1 task=$2 corr=$3 dir f body
+  case "$corr" in
+    [[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]) ;;
+    *) return 1 ;;
+  esac
+  dir=$(fm_task_inbox_dir "$state" "$task")
+  for f in "$dir"/*.msg; do
+    [ -f "$f" ] || continue
+    body=$(fm_task_inbox_body "$f") || continue
+    if [[ "$body" =~ (^|[[:space:]])corr=${corr}([[:space:]]|$) ]]; then
+      printf '%s' "$f"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # The constant self-describing doorbell line for the inbox containing a record.
 # Self-describing on purpose: a worker whose brief predates the inbox contract
 # still receives the complete instruction in the line itself.

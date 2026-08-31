@@ -1333,15 +1333,21 @@ assert_grep 'did not durably acknowledge' "$TMP_ROOT/remote-omp-timeout.out" \
   "remote OMP acknowledgement timeout did not name the missing receipt"
 [ -f "$OMP_INBOX/002.msg" ] || fail "remote OMP acknowledgement timeout lost its durable request"
 sent_before_retry=$(wc -l < "$OMP_SENT")
+OMP_TIMEOUT_BODY=$(FM_ROOT_OVERRIDE="$REMOTE_ROOT" /bin/bash -c \
+  '. "$1/bin/fm-task-inbox-lib.sh"; fm_task_inbox_body "$2"' _ "$REMOTE_ROOT" "$OMP_INBOX/002.msg")
 set +e
 remote_env "$ROOT/bin/fm-on.sh" remote-omp fm-remote-secondmate-control.sh send remote-omp \
-  "[fm-from-firstmate]"$'\xE2\x81\xA3'"corr=0123456789abcdef acknowledgement timeout" \
+  "$OMP_TIMEOUT_BODY" \
   > "$TMP_ROOT/remote-omp-retry.out" 2>&1
 retry_rc=$?
 set -e
-[ "$retry_rc" = 8 ] || fail "remote OMP retry did not preserve its queued receipt requirement (rc=$retry_rc)"
-[ "$(wc -l < "$OMP_SENT")" = "$((sent_before_retry + 1))" ] \
+[ "$retry_rc" = 10 ] || fail "remote OMP retry did not refuse the existing canonical request (rc=$retry_rc)"
+assert_grep 'remote-omp-inbox-duplicate' "$TMP_ROOT/remote-omp-retry.out" \
+  "remote OMP retry did not name its non-resend refusal"
+[ "$(wc -l < "$OMP_SENT")" = "$sent_before_retry" ] \
   || fail "remote OMP retry replayed a prior programmatic request"
+[ ! -e "$OMP_INBOX/003.msg" ] \
+  || fail "remote OMP retry allocated a second canonical request"
 rm -f "$OMP_SKIP_HANDLED"
 
 cp "$OMP_CONTROL_STATE/remote-omp.meta" "$TMP_ROOT/remote-omp.meta.before-stale"
