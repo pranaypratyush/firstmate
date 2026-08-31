@@ -92,7 +92,6 @@ const sessionBoundDoorbell = installTaskInboxDoorbell(
   {
     inboxDir: process.env.INBOX,
     readyMarker: sessionBound,
-    deliverSession: (expectedSession) => expectedSession === "/sessions/current.jsonl",
   },
 );
 sessionBoundDoorbell.activate();
@@ -104,26 +103,17 @@ assert.equal(existsSync(sessionBound), true);
 sessionBoundDoorbell.retire();
 
 const sessionAddressed = `${process.env.READY}.session-addressed`;
-let addressedSession = "";
-let addressedSends = 0;
 const sessionAddressedDoorbell = installTaskInboxDoorbell(
-  { sendMessage() { throw new Error("session-bound delivery bypassed its target callback"); } },
+  { sendMessage() { throw new Error("session-addressed request was delivered without a target boundary"); } },
   {
     inboxDir: process.env.INBOX,
     readyMarker: sessionAddressed,
-    deliverSession: (expectedSession) => {
-      addressedSession = expectedSession;
-      addressedSends += 1;
-      return expectedSession === "/sessions/current.jsonl";
-    },
   },
 );
 sessionAddressedDoorbell.activate();
 writeFileSync(`${sessionAddressed}.requests/one.pending`, `omp_session=/sessions/current.jsonl\n--\n${line}`);
 process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
-assert.equal(addressedSession, "/sessions/current.jsonl");
-assert.equal(addressedSends, 1);
-assert.equal(existsSync(`${sessionAddressed}.requests/one.pending.delivered`), true);
+assert.equal(existsSync(`${sessionAddressed}.requests/one.pending.refused`), true);
 sessionAddressedDoorbell.retire();
 
 const uncertain = `${process.env.READY}.uncertain`;

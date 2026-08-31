@@ -32,7 +32,6 @@ type OmpDoorbellApi = {
 export type TaskInboxDoorbellOptions = {
 	inboxDir?: string;
 	readyMarker?: string;
-	deliverSession?: (expectedSession: string, message: TaskInboxDoorbellMessage) => boolean;
 };
 
 export type TaskInboxDoorbell = {
@@ -158,16 +157,11 @@ export function installTaskInboxDoorbell(
 						details: { kind: "task-inbox", runtime: "omp" },
 					};
 					if (request.expectedSession) {
-						invoked = true;
-						if (!options.deliverSession?.(request.expectedSession, message)) {
-							invoked = false;
-							renameSync(ambiguous, `${pending}.refused`);
-							continue;
-						}
-					} else {
-						invoked = true;
-						omp.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
+						renameSync(ambiguous, `${pending}.refused`);
+						continue;
 					}
+					invoked = true;
+					omp.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
 					renameSync(ambiguous, `${pending}.delivered`);
 				} catch {
 					if (!invoked) bestEffortRename(ambiguous, `${pending}.failed`);

@@ -510,7 +510,7 @@ if (readFileSync(process.env.FM_OMP_TASK_TURN_STARTED, "utf8") !== `${process.pi
   throw new Error("OMP primary integration did not publish the task-bound turn-start marker");
 }
 const primaryRequest = `${process.env.FM_OMP_TASK_DOORBELL_READY}.requests/primary.pending`;
-writeFileSync(primaryRequest, `omp_session=${originalSession}\n--\nFirstmate instruction waiting: list ${process.env.FM_OMP_TASK_INBOX_DIR}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.FM_OMP_TASK_INBOX_DIR}/handled/.`);
+writeFileSync(primaryRequest, `Firstmate instruction waiting: list ${process.env.FM_OMP_TASK_INBOX_DIR}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.FM_OMP_TASK_INBOX_DIR}/handled/.`);
 process.emit("SIGUSR2");
 if (
   watcherMessages.length !== 1 ||
@@ -522,12 +522,11 @@ if (
   throw new Error(`OMP primary secondmate doorbell was not acknowledged exactly once: ${JSON.stringify(watcherMessages)}`);
 }
 watcherMessages.length = 0;
-liveSession = `${process.env.FIXTURE}/switched-omp-session.jsonl`;
-const staleRequest = `${process.env.FM_OMP_TASK_DOORBELL_READY}.requests/stale.pending`;
-writeFileSync(staleRequest, `omp_session=${originalSession}\n--\nFirstmate instruction waiting: list ${process.env.FM_OMP_TASK_INBOX_DIR}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.FM_OMP_TASK_INBOX_DIR}/handled/.`);
+const sessionAddressedRequest = `${process.env.FM_OMP_TASK_DOORBELL_READY}.requests/session-addressed.pending`;
+writeFileSync(sessionAddressedRequest, `omp_session=${originalSession}\n--\nFirstmate instruction waiting: list ${process.env.FM_OMP_TASK_INBOX_DIR}/*.msg and, in numeric order, read and act on each, then mv each handled file to ${process.env.FM_OMP_TASK_INBOX_DIR}/handled/.`);
 process.emit("SIGUSR2");
-if (watcherMessages.length !== 0 || !existsSync(`${staleRequest}.refused`)) {
-  throw new Error("OMP primary notified a session after its exact target changed");
+if (watcherMessages.length !== 0 || !existsSync(`${sessionAddressedRequest}.refused`)) {
+  throw new Error("OMP primary sent a request without a session-addressed notification boundary");
 }
 const startup = await handlers.get("before_agent_start")({ type: "before_agent_start" }, {});
 if (startup?.message?.customType !== "firstmate-sessionstart-nudge" || startup.message.content !== "OMP_PRIMARY_STARTUP_NUDGE" || startup.message.attribution !== "agent") {

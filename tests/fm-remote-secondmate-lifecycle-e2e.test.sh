@@ -1161,7 +1161,7 @@ assert_contains "$OMP_REMOTE_LAUNCH" \
 
 # Reproduce the old explicit-pane transport with a real task-bound OMP listener
 cat > "$REMOTE_ROOT/bin/omp" <<'JS'
-import { appendFileSync, existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const { installTaskInboxDoorbell } =
@@ -1180,18 +1180,12 @@ const omp = {
         );
       }
     },
-  },
 };
 const doorbell = installTaskInboxDoorbell(
   omp,
   {
     inboxDir: process.env.FM_TEST_OMP_INBOX,
     readyMarker: process.env.FM_TEST_OMP_READY,
-    deliverSession: (expectedSession, message) => {
-      if (readFileSync(process.env.FM_TEST_OMP_SESSION, "utf8").trim() !== expectedSession) return false;
-      omp.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
-      return true;
-    },
   },
 );
 doorbell.activate();
@@ -1285,39 +1279,39 @@ assert_grep 'pane send-text' "$HERDR_LOG" \
 [ ! -e "$OMP_INBOX/001.msg" ] \
   || fail "remote OMP /exit was converted into an ordinary inbox instruction"
 
-# The repaired route sends no payload to the pane. It binds the listener,
-# enqueues exactly once, programmatically triggers its turn, and leaves the
-# worker's durable handled move as the acknowledgement.
 : > "$HERDR_LOG"
 : > "$OMP_SENT"
+set +e
 remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp "ordinary remote OMP steer" \
-  > "$TMP_ROOT/remote-omp-delivery.out" 2>&1 \
-  || fail "bound remote OMP inbox delivery failed:"$'\n'"$(cat "$TMP_ROOT/remote-omp-delivery.out")"$'\n'"listener:"$'\n'"$(cat "$TMP_ROOT/remote-omp-listener.out")"$'\n'"programmatic sends:"$'\n'"$(cat "$OMP_SENT" 2>/dev/null)"
-OMP_RECORD="$OMP_INBOX/handled/001.msg"
-[ -f "$OMP_RECORD" ] || fail "bound remote OMP delivery did not durably acknowledge its canonical inbox record"
+  > "$TMP_ROOT/remote-omp-delivery.out" 2>&1
+delivery_rc=$?
+set -e
+[ "$delivery_rc" = 9 ] || fail "session-addressed remote OMP request did not refuse delivery (rc=$delivery_rc)"
+assert_grep 'remote-omp-binding-refused' "$TMP_ROOT/remote-omp-delivery.out" \
+  "session-addressed remote OMP request did not report its named refusal"
+OMP_RECORD="$OMP_INBOX/001.msg"
+[ -f "$OMP_RECORD" ] || fail "session-addressed remote OMP request did not retain its canonical inbox record"
 OMP_BODY=$(FM_ROOT_OVERRIDE="$REMOTE_ROOT" /bin/bash -c \
   '. "$1/bin/fm-task-inbox-lib.sh"; fm_task_inbox_body "$2"' _ "$REMOTE_ROOT" "$OMP_RECORD")
 assert_contains "$OMP_BODY" "ordinary remote OMP steer" \
-  "bound remote OMP delivery did not preserve the payload in the canonical inbox"
-assert_grep '"deliverAs":"steer","triggerTurn":true' "$OMP_SENT" \
-  "bound remote OMP delivery did not use programmatic triggerTurn"
+  "session-addressed remote OMP refusal did not preserve the payload in the canonical inbox"
+[ ! -s "$OMP_SENT" ] || fail "session-addressed remote OMP request sent a programmatic notification"
 assert_no_grep 'pane send-text' "$HERDR_LOG" \
-  "bound remote OMP delivery typed payload or doorbell into the remote composer"
+  "session-addressed remote OMP refusal typed payload into the remote composer"
 assert_no_grep 'pane send-keys' "$HERDR_LOG" \
-  "bound remote OMP delivery used Enter as a transport or receipt"
-[ -f "$OMP_TURN_STARTED" ] || fail "bound remote OMP delivery did not publish its task-bound turn start"
-[ -f "$OMP_INBOX/handled/001.msg" ] || fail "bound remote OMP inbox request lacked the durable handled acknowledgement"
+  "session-addressed remote OMP refusal used Enter as a transport"
+[ ! -e "$OMP_TURN_STARTED" ] || fail "session-addressed remote OMP refusal started a turn"
 sent_before_handled_retry=$(wc -l < "$OMP_SENT")
 set +e
 remote_env "$ROOT/bin/fm-on.sh" remote-omp fm-remote-secondmate-control.sh send remote-omp "$OMP_BODY" \
   > "$TMP_ROOT/remote-omp-handled-retry.out" 2>&1
 handled_retry_rc=$?
 set -e
-[ "$handled_retry_rc" = 10 ] || fail "handled remote OMP retry did not refuse its canonical request (rc=$handled_retry_rc)"
+[ "$handled_retry_rc" = 10 ] || fail "refused remote OMP retry did not refuse its canonical request (rc=$handled_retry_rc)"
 assert_grep 'remote-omp-inbox-duplicate' "$TMP_ROOT/remote-omp-handled-retry.out" \
   "handled remote OMP retry did not name its non-resend refusal"
 [ "$(wc -l < "$OMP_SENT")" = "$sent_before_handled_retry" ] \
-  || fail "handled remote OMP retry replayed a programmatic request"
+  || fail "refused remote OMP retry replayed a programmatic request"
 [ ! -e "$OMP_INBOX/002.msg" ] \
   || fail "handled remote OMP retry allocated a second canonical request"
 
@@ -1356,22 +1350,21 @@ assert_grep 'remote-omp-binding-refused' "$TMP_ROOT/remote-omp-unavailable.out" 
 assert_no_grep 'pane send-text' "$HERDR_LOG" "inactive remote OMP extension touched the composer"
 printf '%s\n' "$OMP_LISTENER_PID" > "$OMP_READY"
 
-touch "$OMP_SKIP_HANDLED"
 set +e
-remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp "acknowledgement timeout" \
-  > "$TMP_ROOT/remote-omp-timeout.out" 2>&1
-timeout_rc=$?
+remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp "session-addressed refusal" \
+  > "$TMP_ROOT/remote-omp-refusal.out" 2>&1
+refusal_rc=$?
 set -e
-[ "$timeout_rc" = 8 ] || fail "remote OMP acknowledgement timeout did not retain a named queue verdict (rc=$timeout_rc)"
-assert_grep 'did not durably acknowledge' "$TMP_ROOT/remote-omp-timeout.out" \
-  "remote OMP acknowledgement timeout did not name the missing receipt"
-[ -f "$OMP_INBOX/002.msg" ] || fail "remote OMP acknowledgement timeout lost its durable request"
+[ "$refusal_rc" = 9 ] || fail "remote OMP session-addressed refusal did not retain a named verdict (rc=$refusal_rc)"
+assert_grep 'remote-omp-binding-refused' "$TMP_ROOT/remote-omp-refusal.out" \
+  "remote OMP session-addressed refusal did not name the missing target boundary"
+[ -f "$OMP_INBOX/002.msg" ] || fail "remote OMP session-addressed refusal lost its durable request"
 sent_before_retry=$(wc -l < "$OMP_SENT")
-OMP_TIMEOUT_BODY=$(FM_ROOT_OVERRIDE="$REMOTE_ROOT" /bin/bash -c \
+OMP_REFUSAL_BODY=$(FM_ROOT_OVERRIDE="$REMOTE_ROOT" /bin/bash -c \
   '. "$1/bin/fm-task-inbox-lib.sh"; fm_task_inbox_body "$2"' _ "$REMOTE_ROOT" "$OMP_INBOX/002.msg")
 set +e
 remote_env "$ROOT/bin/fm-on.sh" remote-omp fm-remote-secondmate-control.sh send remote-omp \
-  "$OMP_TIMEOUT_BODY" \
+  "$OMP_REFUSAL_BODY" \
   > "$TMP_ROOT/remote-omp-retry.out" 2>&1
 retry_rc=$?
 set -e
@@ -1382,7 +1375,6 @@ assert_grep 'remote-omp-inbox-duplicate' "$TMP_ROOT/remote-omp-retry.out" \
   || fail "remote OMP retry replayed a prior programmatic request"
 [ ! -e "$OMP_INBOX/003.msg" ] \
   || fail "remote OMP retry allocated a second canonical request"
-rm -f "$OMP_SKIP_HANDLED"
 
 LIVE_SESSION="$OMP_REMOTE_HOME/state/omp-sessions/replaced.jsonl"
 printf '{"type":"session"}\n' > "$LIVE_SESSION"
@@ -1441,7 +1433,7 @@ set -e
 [ "$missing_rc" = 9 ] || fail "missing remote OMP endpoint did not refuse delivery (rc=$missing_rc)"
 [ ! -e "$OMP_INBOX/004.msg" ] || fail "missing remote OMP endpoint enqueued a request after refusing delivery"
 rm -f "$HERDR_FORCE_IDLE"
-pass "remote OMP delivery replaces the reproducible typed no-turn regression with one bound inbox request, programmatic turn, and handled acknowledgement"
+pass "remote OMP delivery refuses unaddressable exact-session notifications without transport"
 
 pass "remote OMP primary, fallback, result metadata, pane launch, and existing safety refusals hold end to end"
 
