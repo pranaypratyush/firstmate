@@ -336,24 +336,20 @@ test_missing_source_branch_commit_refuses() {
   pass 'a source whose branch no longer reaches its exact HEAD refuses without mutation'
 }
 
-test_validation_custody_handoff_holds_destination() {
+test_active_or_parked_validation_custody_refuses() {
   local custody rec out status
   for custody in active parked; do
     rec=$(make_case "${custody}-validation")
     read_case "$rec"
+    source_snapshot "$CASE_DIR/before"
     FM_ENDPOINT_STATE_VALUE=missing FM_NM_CUSTODY_VALUE=$custody out=$(run_relaunch)
     status=$?
-    expect_code 0 "$status" "$custody validation source should relaunch onto a separate destination"
-    assert_grep '<!-- fm-clean-commit-relaunch-custody-hold -->' "$HOME_DIR/data/dest/brief.md" \
-      "$custody validation did not place destination custody hold in its brief"
-    jq -e --arg custody "$custody" '.no_mistakes_custody.state == $custody and .no_mistakes_custody.run_id == "run-source" and .no_mistakes_custody.next_action == "firstmate-custody-decision-required"' \
-      "$HOME_DIR/data/dest/relaunch-handoff.json" >/dev/null || fail "$custody validation custody was not structurally preserved"
-    [ ! -w "$DEST_DIR/README.md" ] || fail "$custody custody hold left destination code writable"
-    FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" "$RELAUNCH" release-custody dest continue >/dev/null \
-      || fail "$custody custody decision did not release destination code work"
-    [ -w "$DEST_DIR/README.md" ] || fail "$custody custody release did not restore destination code writes"
+    source_snapshot "$CASE_DIR/after"
+    [ "$status" -ne 0 ] || fail "$custody validation custody unexpectedly relaunched"
+    cmp -s "$CASE_DIR/before" "$CASE_DIR/after" || fail "$custody validation custody changed source state"
+    [ ! -e "$HOME_DIR/state/dest.meta" ] || fail "$custody validation custody allocated a destination"
   done
-  pass 'active and parked no-mistakes custody is preserved and holds destination code mutation'
+  pass 'active and parked no-mistakes custody refuse before destination creation'
 }
 
 test_unreadable_validation_custody_refuses() {
@@ -451,7 +447,7 @@ test_collisions_and_repository_mismatch_refuse
 test_destination_physical_repository_collision_refuses
 test_nonship_crosshome_and_identity_sources_refuse
 test_missing_source_branch_commit_refuses
-test_validation_custody_handoff_holds_destination
+test_active_or_parked_validation_custody_refuses
 test_unreadable_validation_custody_refuses
 test_dangling_destination_state_refuses
 test_missing_or_symlinked_source_brief_refuses

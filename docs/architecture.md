@@ -169,7 +169,7 @@ The headers in `bin/fm-treehouse-get.sh`, `bin/treehouse-git-guard/git`, and `bi
 `fm-spawn.sh` then revalidates that the acquired slot is clean and fast-forwardable before launch, and [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) owns the portable regression coverage.
 Ordinary-worker recovery never restarts, resumes, or otherwise resurrects an existing worker automatically.
 [`bin/fm-clean-commit-relaunch.sh`](../bin/fm-clean-commit-relaunch.sh) is the sole explicit operator path for a missing ordinary ship endpoint: it proves the preserved source isolated copy is clean and committed in its recorded physical repository, then composes the normal spawn boundary to start a distinct destination from that exact commit.
-The source task, its branch, records, session material, validation state, and worktree remain evidence; dirty or manual-salvage cases refuse, and active or parked No-Mistakes custody is carried to a destination hold until Firstmate decides it.
+The source task, its branch, records, session material, validation state, and worktree remain evidence; dirty, manual-salvage, and active or parked No-Mistakes custody cases refuse.
 Before OMP reuses a pooled task worktree, `bin/fm-omp-process-lib.sh` clears prior runtime markers only after both recorded owners are proven absent; live or unverifiable ownership preserves the lease and stops the spawn.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.

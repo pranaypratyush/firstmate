@@ -2,7 +2,6 @@
 # Relaunch one missing ordinary ship worker from its clean committed HEAD.
 #
 # Usage: fm-clean-commit-relaunch.sh <source-task-id> <destination-task-id>
-#        fm-clean-commit-relaunch.sh release-custody <destination-task-id> continue
 #
 # This is deliberately an operator command, not a recovery callback.  It holds
 # the source task's existing spawn lock while it proves that the recorded source
@@ -61,25 +60,6 @@ valid_id() {
     *) return 0 ;;
   esac
 }
-release_custody() {
-  local destination=$1 decision=$2 handoff meta worktree tmp
-  valid_id "$destination" && [ "$decision" = continue ] || return 2
-  handoff=$DATA/$destination/relaunch-handoff.json
-  meta=$STATE/$destination.meta
-  [ -f "$handoff" ] && [ ! -L "$handoff" ] && [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  command -v jq >/dev/null 2>&1 || return 1
-  jq -e --arg destination "$destination" '.destination == $destination and (.no_mistakes_custody.state == "active" or .no_mistakes_custody.state == "parked") and .no_mistakes_custody.hold.state == "held"' "$handoff" >/dev/null || return 1
-  worktree=$(sed -n 's/^worktree=//p' "$meta")
-  [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
-  tmp=$(mktemp "$DATA/$destination/.relaunch-handoff.XXXXXX") || return 1
-  jq --arg decision "$decision" '.no_mistakes_custody.hold = {state:"released",decision:$decision}' "$handoff" > "$tmp" && mv -f -- "$tmp" "$handoff" || { rm -f -- "$tmp"; return 1; }
-  find "$worktree" -path "$worktree/.git" -prune -o -exec chmod u+w {} +
-}
-if [ "${1:-}" = release-custody ]; then
-  [ "$#" -eq 3 ] || { usage >&2; exit 2; }
-  release_custody "$2" "$3"
-  exit $?
-fi
 [ "$#" -eq 2 ] || { usage >&2; exit 2; }
 SOURCE=$1
 DESTINATION=$2
@@ -312,6 +292,10 @@ fi
   echo "error: source task $SOURCE No-Mistakes custody is unreadable; preserved every source record" >&2
   exit 1
 }
+[ "$CUSTODY" != active ] && [ "$CUSTODY" != parked ] || {
+  echo "error: source task $SOURCE has active or parked No-Mistakes custody; resolve it before clean-commit relaunch" >&2
+  exit 1
+}
 
 command -v jq >/dev/null 2>&1 || {
   echo "error: jq is required to publish the destination relaunch handoff" >&2
@@ -332,22 +316,6 @@ case "$PR_COUNT" in
   1) PR=$(sed -n 's/^pr=//p' "$SOURCE_META") ;;
   *) echo "error: source PR metadata is ambiguous; source was preserved" >&2; exit 1 ;;
 esac
-
-# A live or parked run is intentionally not aborted or synchronized.  The
-# destination brief gets a visible non-authoritative hold before launch; the
-# JSON handoff below remains the durable authority for the decision.
-if [ "$CUSTODY" = active ] || [ "$CUSTODY" = parked ]; then
-  if ! grep -Fq '<!-- fm-clean-commit-relaunch-custody-hold -->' "$DEST_BRIEF"; then
-    cat >> "$DEST_BRIEF" <<'EOF'
-
-## Relaunch custody hold
-
-<!-- fm-clean-commit-relaunch-custody-hold -->
-
-Do not modify code or start a validation run until Firstmate supplies a supported custody decision for the preserved source run.
-EOF
-  fi
-fi
 
 if ! grep -Fq '<!-- fm-clean-commit-relaunch-handoff -->' "$DEST_BRIEF"; then
   cat >> "$DEST_BRIEF" <<EOF
@@ -381,7 +349,7 @@ jq -n \
   --arg run_branch "$RUN_BRANCH" \
   --arg run_head "$RUN_HEAD" \
   --arg next_action "$RUN_NEXT_ACTION" \
-  '{schema:$schema,source:$source,destination:$destination,repository_identity:$repository_identity,source_commit:$source_commit,source_branch:$source_branch,delivery:{mode:$mode,yolo:$yolo},source_brief_identity:$source_brief_identity,destination_brief_identity:$destination_brief_identity,no_mistakes_custody:({state:$custody,run_id:$run_id,status:$run_status,branch:$run_branch,head:$run_head,next_action:$next_action} + (if $custody == "active" or $custody == "parked" then {hold:{state:"held",decision:""}} else {} end))} + (if $pr == "" then {} else {pr:$pr} end)' \
+  '{schema:$schema,source:$source,destination:$destination,repository_identity:$repository_identity,source_commit:$source_commit,source_branch:$source_branch,delivery:{mode:$mode,yolo:$yolo},source_brief_identity:$source_brief_identity,destination_brief_identity:$destination_brief_identity,no_mistakes_custody:{state:$custody,run_id:$run_id,status:$run_status,branch:$run_branch,head:$run_head,next_action:$next_action}} + (if $pr == "" then {} else {pr:$pr} end)' \
   > "$HANDOFF_TMP"
 mv -f -- "$HANDOFF_TMP" "$DEST_HANDOFF"
 HANDOFF_TMP=
@@ -398,11 +366,7 @@ EFFORT=$(sed -n 's/^effort=//p' "$SOURCE_META")
 PREWALK=$(sed -n 's/^prewalk_into=//p' "$SOURCE_META")
 [ -z "$PREWALK" ] || SPAWN_ARGS+=(--prewalk-into "$PREWALK")
 grep -Fxq 'allow_project_omp_extensions=1' "$SOURCE_META" && SPAWN_ARGS+=(--allow-project-omp-extensions)
-CUSTODY_HOLD=0
-case "$CUSTODY" in active|parked) CUSTODY_HOLD=1 ;; esac
-
 FM_CLEAN_COMMIT_RELAUNCH=1 \
   FM_CLEAN_COMMIT_DESTINATION_LOCK_OWNER="${BASHPID:-$$}" \
-  FM_CLEAN_COMMIT_CUSTODY_HOLD="$CUSTODY_HOLD" \
   "$SCRIPT_DIR/fm-spawn.sh" "${SPAWN_ARGS[@]}"
 echo "relaunched $SOURCE as $DESTINATION at $SOURCE_COMMIT"

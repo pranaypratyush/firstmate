@@ -34,7 +34,7 @@ Do not resume an old session, restart an old worker, close an endpoint, or reuse
 When the recorded endpoint is authoritatively `missing`, the operator may explicitly run `bin/fm-clean-commit-relaunch.sh <source-task-id> <destination-task-id>` only after preparing the destination's complete ship brief.
 That command accepts only a readable, completely clean source isolated copy at an exact committed branch tip in the recorded physical repository, then makes a separate destination worker and preserves the source as evidence.
 Uncommitted, dirty, unreadable, dead-but-present, ambiguous, malformed, cross-home, or manual-salvage cases stay blocked with every source record intact.
-An active or parked No-Mistakes run is never changed by the relaunch; its recorded custody holds destination code mutation until Firstmate supplies a supported decision.
+An active or parked No-Mistakes run is never changed by the relaunch and refuses before destination creation.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
 ## Live-endpoint escalation
