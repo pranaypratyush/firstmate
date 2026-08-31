@@ -1298,6 +1298,19 @@ assert_no_grep 'pane send-keys' "$HERDR_LOG" \
   "bound remote OMP delivery used Enter as a transport or receipt"
 [ -f "$OMP_TURN_STARTED" ] || fail "bound remote OMP delivery did not publish its task-bound turn start"
 [ -f "$OMP_INBOX/handled/001.msg" ] || fail "bound remote OMP inbox request lacked the durable handled acknowledgement"
+sent_before_handled_retry=$(wc -l < "$OMP_SENT")
+set +e
+remote_env "$ROOT/bin/fm-on.sh" remote-omp fm-remote-secondmate-control.sh send remote-omp "$OMP_BODY" \
+  > "$TMP_ROOT/remote-omp-handled-retry.out" 2>&1
+handled_retry_rc=$?
+set -e
+[ "$handled_retry_rc" = 10 ] || fail "handled remote OMP retry did not refuse its canonical request (rc=$handled_retry_rc)"
+assert_grep 'remote-omp-inbox-duplicate' "$TMP_ROOT/remote-omp-handled-retry.out" \
+  "handled remote OMP retry did not name its non-resend refusal"
+[ "$(wc -l < "$OMP_SENT")" = "$sent_before_handled_retry" ] \
+  || fail "handled remote OMP retry replayed a programmatic request"
+[ ! -e "$OMP_INBOX/002.msg" ] \
+  || fail "handled remote OMP retry allocated a second canonical request"
 
 BAD_EXIT="[fm-from-firstmate]"$'\xE2\x81\xA3'"/exit"
 set +e
@@ -1308,6 +1321,18 @@ set -e
 [ "$bad_exit_rc" = 9 ] || fail "uncorrelated remote OMP slash carrier was not refused (rc=$bad_exit_rc)"
 assert_grep 'canonical parent correlation' "$TMP_ROOT/remote-omp-bad-exit.out" \
   "uncorrelated remote OMP slash carrier did not report its named refusal"
+
+UPPERCASE_CARRIER="[fm-from-firstmate]"$'\xE2\x81\xA3'"corr=ABCDEF0123456789 uppercase correlation"
+set +e
+remote_env "$ROOT/bin/fm-on.sh" remote-omp fm-remote-secondmate-control.sh send remote-omp "$UPPERCASE_CARRIER" \
+  > "$TMP_ROOT/remote-omp-uppercase-corr.out" 2>&1
+uppercase_corr_rc=$?
+set -e
+[ "$uppercase_corr_rc" = 9 ] || fail "uppercase remote OMP correlation was not refused (rc=$uppercase_corr_rc)"
+assert_grep 'canonical lowercase parent correlation' "$TMP_ROOT/remote-omp-uppercase-corr.out" \
+  "uppercase remote OMP correlation did not report its canonical-input refusal"
+[ ! -e "$OMP_INBOX/002.msg" ] \
+  || fail "uppercase remote OMP correlation enqueued a request after refusal"
 
 rm -f "$OMP_READY"
 set +e

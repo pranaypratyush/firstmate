@@ -376,11 +376,10 @@ cmd_send() {
       || remote_omp_delivery_refuse "relay request lacks the parent-owned from-firstmate carrier"
     fm_operational_input_body "$message" relay_body \
       || remote_omp_delivery_refuse "relay request carrier cannot be parsed"
-    if [[ "$relay_body" = /* ]]; then
-      remote_omp_delivery_refuse "relay request lacks the canonical parent correlation"
-    elif [[ "$relay_body" =~ ^corr=[[:xdigit:]]{16}[[:space:]]+(/.*)$ ]]; then
-      relay_body=${BASH_REMATCH[1]}
-    fi
+    [[ "$relay_body" =~ ^corr=[a-f0-9]{16}[[:space:]]+ ]] \
+      || remote_omp_delivery_refuse "relay request lacks a canonical lowercase parent correlation"
+    relay_body=${relay_body:21}
+    relay_body=${relay_body#"${relay_body%%[![:space:]]*}"}
     if [[ "$relay_body" = /* ]]; then
       # Slash commands retain the pre-inbox typed control path. In particular,
       # /exit must not be converted into a durable ordinary-text steer or carry

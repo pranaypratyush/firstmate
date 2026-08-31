@@ -884,7 +884,7 @@ else
     if [ "$PRESERVE_INBOUND_FROM_FIRSTMATE" = 1 ]; then
       existing_corr=$(fm_pending_reply_extract_corr "$MESSAGE")
       if [ -n "$existing_corr" ] \
-        && INBOX_RECORD=$(fm_task_inbox_unhandled_corr "$STATE" "$TARGET_TASK_ID" "$existing_corr"); then
+        && INBOX_RECORD=$(fm_task_inbox_corr_record "$STATE" "$TARGET_TASK_ID" "$existing_corr"); then
         fm_lock_release "$INBOX_META_LOCK"
         INBOX_META_LOCK_HELD=0
         echo "error: remote-omp-inbox-duplicate: the canonical request is already durable at $INBOX_RECORD; do not resend" >&2

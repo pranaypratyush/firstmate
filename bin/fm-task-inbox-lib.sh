@@ -177,20 +177,22 @@ fm_task_inbox_body() {  # <record-path>
   return 1
 }
 
-fm_task_inbox_unhandled_corr() {  # <state-dir> <task-id> <corr>
-  local state=$1 task=$2 corr=$3 dir f body
+fm_task_inbox_corr_record() {  # <state-dir> <task-id> <corr>
+  local state=$1 task=$2 corr=$3 dir parent f body
   case "$corr" in
-    [[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]) ;;
+    [a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9]) ;;
     *) return 1 ;;
   esac
   dir=$(fm_task_inbox_dir "$state" "$task")
-  for f in "$dir"/*.msg; do
-    [ -f "$f" ] || continue
-    body=$(fm_task_inbox_body "$f") || continue
-    if [[ "$body" =~ (^|[[:space:]])corr=${corr}([[:space:]]|$) ]]; then
-      printf '%s' "$f"
-      return 0
-    fi
+  for parent in "$dir" "$dir/handled"; do
+    for f in "$parent"/*.msg; do
+      [ -f "$f" ] || continue
+      body=$(fm_task_inbox_body "$f") || continue
+      if [[ "$body" =~ (^|[[:space:]])corr=${corr}([[:space:]]|$) ]]; then
+        printf '%s' "$f"
+        return 0
+      fi
+    done
   done
   return 1
 }
