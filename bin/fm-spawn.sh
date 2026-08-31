@@ -507,10 +507,6 @@ if [ "$ACCEPTED_LOCAL_BASE_SET" -eq 1 ]; then
   fi
 fi
 if [ "$CLEAN_COMMIT_SET" -eq 1 ]; then
-  [ "${FM_CLEAN_COMMIT_RELAUNCH:-}" = 1 ] || {
-    echo "error: --accepted-clean-commit is reserved for bin/fm-clean-commit-relaunch.sh" >&2
-    exit 1
-  }
   if [ "$KIND" != ship ]; then
     echo "error: --accepted-clean-commit is valid only for a ship spawn" >&2
     exit 1
@@ -529,9 +525,13 @@ if [ "$CLEAN_COMMIT_SET" -eq 1 ]; then
     echo "error: --accepted-clean-commit must be a full 40- to 64-character commit SHA" >&2
     exit 1
   fi
+  [ "$CLEAN_COMMIT_SOURCE_COMMON_SET" -eq 1 ] || {
+    echo "error: --accepted-clean-commit requires its relaunch-owned source repository proof" >&2
+    exit 1
+  }
 fi
 if [ "$CLEAN_COMMIT_SOURCE_COMMON_SET" -eq 1 ]; then
-  [ "$CLEAN_COMMIT_SET" -eq 1 ] && [ "${FM_CLEAN_COMMIT_RELAUNCH:-}" = 1 ] || {
+  [ "$CLEAN_COMMIT_SET" -eq 1 ] || {
     echo "error: --accepted-clean-commit-source-common is reserved for bin/fm-clean-commit-relaunch.sh" >&2
     exit 1
   }
@@ -1203,10 +1203,12 @@ fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; 
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_forbid_branch "new-task spawn (fm-spawn)"
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
-if [ -n "${FM_CLEAN_COMMIT_DESTINATION_LOCK_OWNER:-}" ]; then
-  owner_pid=${FM_CLEAN_COMMIT_DESTINATION_LOCK_OWNER}
+if [ "$CLEAN_COMMIT_SET" -eq 1 ]; then
+  owner_pid=${FM_CLEAN_COMMIT_DESTINATION_LOCK_OWNER:-}
+  source_owner_pid=${FM_CLEAN_COMMIT_SOURCE_LOCK_OWNER:-}
   lock_pid=$(cat "$SPAWN_TASK_LOCK/pid" 2>/dev/null || true)
   [ "$CLEAN_COMMIT_SET" -eq 1 ] && [ "$owner_pid" = "${PPID:-}" ] \
+    && [ "$source_owner_pid" = "${PPID:-}" ] \
     && [ "$lock_pid" = "$owner_pid" ] && fm_pid_alive "$owner_pid" || {
     echo "error: clean-commit relaunch destination lock ownership could not be verified" >&2
     exit 1
@@ -2605,6 +2607,84 @@ validate_accepted_local_base() {
   }
 }
 validate_accepted_local_base || exit 1
+
+clean_commit_sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  else
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+clean_commit_meta_exact() {  # <meta> <key>
+  local meta=$1 key=$2 count value
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
+  [ "$count" -eq 1 ] || return 1
+  value=$(sed -n "s/^$key=//p" "$meta")
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+validate_clean_commit_relaunch_carrier() {
+  local handoff source source_meta source_worktree source_top source_common project_common identity lock_pid
+  handoff="$DATA/$ID/relaunch-handoff.json"
+  [ -f "$handoff" ] && [ ! -L "$handoff" ] && command -v jq >/dev/null 2>&1 || {
+    echo "error: accepted clean commit needs a relaunch-owned durable handoff" >&2
+    return 1
+  }
+  source=$(jq -er '.source | strings' "$handoff" 2>/dev/null) || {
+    echo "error: accepted clean commit handoff has no valid source identity" >&2
+    return 1
+  }
+  fm_task_id_creation_valid "$source" || {
+    echo "error: accepted clean commit handoff has an invalid source identity" >&2
+    return 1
+  }
+  jq -e --arg id "$ID" --arg commit "$CLEAN_COMMIT" \
+    '.schema == "fm-clean-commit-relaunch.v1" and .destination == $id and .source_commit == $commit and (.repository_identity | strings) and (.delivery.mode | strings) and (.delivery.yolo | strings) and .no_mistakes_custody.state == "none"' \
+    "$handoff" >/dev/null 2>&1 || {
+    echo "error: accepted clean commit handoff does not bind this destination and commit" >&2
+    return 1
+  }
+  lock_pid=$(cat "$STATE/.spawn-$source.lock/pid" 2>/dev/null || true)
+  [ "$lock_pid" = "${FM_CLEAN_COMMIT_SOURCE_LOCK_OWNER:-}" ] && [ "$lock_pid" = "${PPID:-}" ] || {
+    echo "error: clean-commit relaunch source lock ownership could not be verified" >&2
+    return 1
+  }
+  source_meta="$STATE/$source.meta"
+  source_worktree=$(clean_commit_meta_exact "$source_meta" worktree) || {
+    echo "error: accepted clean commit handoff source metadata is invalid" >&2
+    return 1
+  }
+  [ -d "$source_worktree" ] && [ ! -L "$source_worktree" ] || {
+    echo "error: accepted clean commit handoff source worktree is unreadable" >&2
+    return 1
+  }
+  source_top=$(git -C "$source_worktree" rev-parse --show-toplevel 2>/dev/null || true)
+  source_common=$(git -C "$source_worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  source_top=$(cd "$source_top" 2>/dev/null && pwd -P || true)
+  source_common=$(cd "$source_common" 2>/dev/null && pwd -P || true)
+  project_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  project_common=$(cd "$project_common" 2>/dev/null && pwd -P || true)
+  [ "$source_top" = "$(cd "$source_worktree" 2>/dev/null && pwd -P)" ] \
+    && [ -n "$source_common" ] && [ "$source_common" = "$CLEAN_COMMIT_SOURCE_COMMON" ] \
+    && [ "$project_common" = "$source_common" ] || {
+    echo "error: accepted clean commit carrier does not match its recorded physical repository" >&2
+    return 1
+  }
+  identity=$(clean_commit_sha256_text "$source_common")
+  jq -e --arg identity "$identity" '.repository_identity == $identity' "$handoff" >/dev/null 2>&1 || {
+    echo "error: accepted clean commit handoff has no matching physical repository identity" >&2
+    return 1
+  }
+  [ -d "$STATE/$ID.inbox" ] && [ ! -L "$STATE/$ID.inbox" ] || {
+    echo "error: accepted clean commit needs its relaunch inbox handoff" >&2
+    return 1
+  }
+}
+
+[ "$CLEAN_COMMIT_SET" -eq 0 ] || validate_clean_commit_relaunch_carrier || exit 1
 
 real_path_or_raw() {  # <path>
   local path=$1 real

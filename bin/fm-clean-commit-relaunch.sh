@@ -126,7 +126,32 @@ meta_optional_exact() {  # <key>
   echo "error: source task $SOURCE has no readable regular metadata" >&2
   exit 1
 }
-[ ! -e "$DEST_META" ] && [ ! -L "$DEST_META" ] && [ ! -e "$STATE/$DESTINATION.status" ] && [ ! -L "$STATE/$DESTINATION.status" ] && [ ! -e "$STATE/$DESTINATION.inbox" ] && [ ! -L "$STATE/$DESTINATION.inbox" ] && [ ! -e "$DEST_HANDOFF" ] && [ ! -L "$DEST_HANDOFF" ] || {
+destination_artifact_exists() {
+  local artifact
+  for artifact in \
+    "$STATE/$DESTINATION.inbox" "$STATE/$DESTINATION.status" \
+    "$STATE/$DESTINATION.turn-ended" "$STATE/$DESTINATION.meta" \
+    "$STATE/$DESTINATION.pi-ext.ts" "$STATE/$DESTINATION.omp-ext.ts" \
+    "$STATE/$DESTINATION.omp-ready" "$STATE/$DESTINATION.omp-started" \
+    "$STATE/$DESTINATION.grok-turnend-token" "$STATE/$DESTINATION.kimi-turnend-token" \
+    "$STATE/$DESTINATION.hermes-turnend-token" "$STATE/$DESTINATION.hermes-session" \
+    "$STATE/$DESTINATION.hermes-started" "$STATE/$DESTINATION.busy-state" \
+    "$STATE/$DESTINATION.busy-gen" "$STATE/$DESTINATION.herdr-presentation" \
+    "$STATE/.$DESTINATION.open-decisions-cursor" "$STATE/$DESTINATION.check.sh" \
+    "$STATE/$DESTINATION.pr-poll" "$STATE/$DESTINATION.pr-poll-registration" \
+    "$STATE/$DESTINATION.pr-poll-retirement" "$STATE/$DESTINATION.check-trust" \
+    "$STATE/.pr-check-quarantine/$DESTINATION.diagnostic.pending-noncanonical" \
+    "$STATE/.pr-check-quarantine/$DESTINATION.diagnostic.noncanonical" \
+    "$DEST_HANDOFF"; do
+    if [ -e "$artifact" ] || [ -L "$artifact" ]; then
+      printf '%s' "$artifact"
+      return 0
+    fi
+  done
+  return 1
+}
+DESTINATION_ARTIFACT=$(destination_artifact_exists || true)
+[ -z "$DESTINATION_ARTIFACT" ] || {
   echo "error: destination task $DESTINATION already has durable task state" >&2
   exit 1
 }
@@ -206,6 +231,10 @@ esac
 fm_backend_validate_task_endpoint "$SOURCE_META" "$SOURCE" >/dev/null || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 TARGET=$FM_BACKEND_VALIDATED_TARGET
+[ "$BACKEND" != orca ] || {
+  echo "error: source task $SOURCE uses backend=orca, which cannot honor an exact-commit relaunch" >&2
+  exit 1
+}
 case "$(fm_backend_agent_state "$BACKEND" "$TARGET" "$SOURCE_META")" in
   missing) ;;
   *) echo "error: source task $SOURCE endpoint is not authoritatively missing; preserved every source record" >&2; exit 1 ;;
@@ -298,7 +327,9 @@ RUN_BRANCH=
 RUN_NEXT_ACTION=none
 NM_OUTPUT=$(fm_nm_run_bounded "$SOURCE_WORKTREE" "$NM_TIMEOUT" axi status 2>&1) || NM_STATUS=$?
 NM_STATUS=${NM_STATUS:-0}
-if [ "$NM_STATUS" -eq 0 ] && [ -n "$NM_OUTPUT" ]; then
+if [ "$NM_STATUS" -eq 0 ] && [ -z "$(fm_nm_trim "$NM_OUTPUT")" ]; then
+  :
+elif [ "$NM_STATUS" -eq 0 ] && [ -n "$NM_OUTPUT" ]; then
   RUN_ID=$(fm_nm_strip_quotes "$(fm_nm_field "$NM_OUTPUT" id)")
   RUN_BRANCH=$(fm_nm_strip_quotes "$(fm_nm_field "$NM_OUTPUT" branch)")
   RUN_HEAD=$(fm_nm_strip_quotes "$(fm_nm_field "$NM_OUTPUT" head)")
@@ -412,5 +443,6 @@ SPAWN_ARGS=("$DESTINATION" "$PROJECT" --mode "$MODE" --yolo "$YOLO" --harness "$
 [ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 0 ] || SPAWN_ARGS+=(--allow-project-omp-extensions)
 FM_CLEAN_COMMIT_RELAUNCH=1 \
   FM_CLEAN_COMMIT_DESTINATION_LOCK_OWNER="${BASHPID:-$$}" \
+  FM_CLEAN_COMMIT_SOURCE_LOCK_OWNER="${BASHPID:-$$}" \
   "$SCRIPT_DIR/fm-spawn.sh" "${SPAWN_ARGS[@]}"
 echo "relaunched $SOURCE as $DESTINATION at $SOURCE_COMMIT"

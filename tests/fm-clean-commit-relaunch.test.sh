@@ -185,6 +185,17 @@ run_destination_spawn() {
       --harness codex --backend tmux 2>&1
 }
 
+run_direct_clean_commit_spawn() {
+  local common
+  common=$(git -C "$SOURCE_DIR" rev-parse --path-format=absolute --git-common-dir)
+  common=$(cd "$common" && pwd -P)
+  FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_SPAWN_NO_GUARD=1 IS_SANDBOX=1 \
+    FM_DEST_WORKTREE="$DEST_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" dest "$PROJECT_DIR" --mode no-mistakes --yolo off \
+      --harness codex --backend tmux --accepted-clean-commit "$SOURCE_HEAD" \
+      --accepted-clean-commit-source-common "$common" 2>&1
+}
+
 test_clean_committed_unpushed_success_preserves_source() {
   local rec out status
   rec=$(make_case success)
@@ -221,6 +232,19 @@ test_clean_commit_replaces_newer_clean_destination_base() {
   expect_code 0 "$status" 'newer clean destination should accept exact source commit'
   [ "$(git -C "$DEST_DIR" rev-parse HEAD)" = "$SOURCE_HEAD" ] || fail 'destination did not replace newer clean base with source exact HEAD'
   pass 'a newer clean destination base resets to the admitted source exact HEAD'
+}
+
+test_direct_clean_commit_carrier_refuses() {
+  local rec out status
+  rec=$(make_case direct-clean-carrier)
+  read_case "$rec"
+  out=$(run_direct_clean_commit_spawn)
+  status=$?
+  [ "$status" -ne 0 ] || fail 'direct exact-commit carrier unexpectedly spawned a destination'
+  assert_contains "$out" 'destination lock ownership could not be verified' \
+    'direct exact-commit carrier did not require relaunch-owned lock state'
+  [ ! -e "$HOME_DIR/state/dest.meta" ] || fail 'direct exact-commit carrier created destination state'
+  pass 'direct exact-commit carriers require a relaunch-owned transaction'
 }
 
 test_dirty_staged_untracked_and_git_operation_refuse() {
@@ -345,6 +369,21 @@ test_nonship_crosshome_and_identity_sources_refuse() {
   pass 'malformed, unsupported, and identity-mismatched sources refuse before allocation'
 }
 
+test_destination_artifact_inventory_refuses() {
+  local artifact rec out status path
+  for artifact in inbox status turn-ended meta pi-ext.ts omp-ext.ts omp-ready omp-started grok-turnend-token kimi-turnend-token hermes-turnend-token hermes-session hermes-started busy-state busy-gen herdr-presentation check.sh pr-poll pr-poll-registration pr-poll-retirement check-trust; do
+    rec=$(make_case "destination-artifact-$artifact")
+    read_case "$rec"
+    path="$HOME_DIR/state/dest.$artifact"
+    if [ "$artifact" = inbox ]; then mkdir -p "$path"; else : > "$path"; fi
+    FM_ENDPOINT_STATE_VALUE=missing out=$(run_relaunch)
+    status=$?
+    [ "$status" -ne 0 ] || fail "existing destination $artifact unexpectedly relaunched"
+    [ -e "$path" ] || fail "existing destination $artifact was replaced"
+  done
+  pass 'every destination-owned state artifact refuses before publication'
+}
+
 test_missing_source_branch_commit_refuses() {
   local rec out status
   rec=$(make_case missing-source-branch-commit)
@@ -378,7 +417,7 @@ test_active_or_parked_validation_custody_refuses() {
 
 test_unreadable_validation_custody_refuses() {
   local custody rec out status
-  for custody in unreadable unknown empty mixed-error; do
+  for custody in unreadable unknown mixed-error; do
     rec=$(make_case "$custody-validation")
     read_case "$rec"
     source_snapshot "$CASE_DIR/before"
@@ -390,6 +429,31 @@ test_unreadable_validation_custody_refuses() {
     [ ! -e "$HOME_DIR/state/dest.meta" ] || fail "$custody validation custody allocated a destination"
   done
   pass 'unreadable and unclassifiable no-mistakes custody refuse without source mutation'
+}
+
+test_empty_validation_custody_allows_relaunch() {
+  local rec out status
+  rec=$(make_case empty-validation)
+  read_case "$rec"
+  FM_ENDPOINT_STATE_VALUE=missing FM_NM_CUSTODY_VALUE=empty out=$(run_relaunch)
+  status=$?
+  expect_code 0 "$status" 'empty no-mistakes status should permit a no-custody relaunch'
+  [ -e "$HOME_DIR/state/dest.meta" ] || fail 'empty no-mistakes status did not create a destination'
+  pass 'an empty no-mistakes status is an admitted no-custody state'
+}
+
+test_orca_source_refuses_before_publication() {
+  local rec out status
+  rec=$(make_case orca-source)
+  read_case "$rec"
+  printf 'backend=orca\n' >> "$HOME_DIR/state/source.meta"
+  FM_ENDPOINT_STATE_VALUE=missing out=$(run_relaunch)
+  status=$?
+  [ "$status" -ne 0 ] || fail 'orca source unexpectedly relaunched through an unsupported exact-commit path'
+  [ ! -e "$HOME_DIR/state/dest.meta" ] || fail 'orca source created destination metadata'
+  [ ! -e "$HOME_DIR/data/dest/relaunch-handoff.json" ] || fail 'orca source published a handoff'
+  [ ! -e "$HOME_DIR/state/dest.inbox" ] || fail 'orca source published a destination inbox'
+  pass 'orca sources refuse before relaunch publication'
 }
 
 test_dangling_destination_state_refuses() {
@@ -466,14 +530,18 @@ test_destination_failure_and_concurrent_admission_preserve_source() {
 
 test_clean_committed_unpushed_success_preserves_source
 test_clean_commit_replaces_newer_clean_destination_base
+test_direct_clean_commit_carrier_refuses
 test_dirty_staged_untracked_and_git_operation_refuse
 test_every_nonmissing_endpoint_verdict_refuses
 test_collisions_and_repository_mismatch_refuse
 test_destination_physical_repository_collision_refuses
 test_nonship_crosshome_and_identity_sources_refuse
+test_destination_artifact_inventory_refuses
 test_missing_source_branch_commit_refuses
 test_active_or_parked_validation_custody_refuses
 test_unreadable_validation_custody_refuses
+test_empty_validation_custody_allows_relaunch
+test_orca_source_refuses_before_publication
 test_dangling_destination_state_refuses
 test_missing_or_symlinked_source_brief_refuses
 test_destination_failure_and_concurrent_admission_preserve_source
