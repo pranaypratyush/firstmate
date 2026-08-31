@@ -30,6 +30,7 @@ type OmpDoorbellApi = {
 export type TaskInboxDoorbellOptions = {
 	inboxDir?: string;
 	readyMarker?: string;
+	currentSession?: () => string;
 };
 
 export type TaskInboxDoorbell = {
@@ -73,6 +74,16 @@ function bestEffortUnlink(path: string): void {
 	} catch {
 		return;
 	}
+}
+
+function requestContent(raw: string, currentSession: (() => string) | undefined): string | undefined {
+	if (!raw.startsWith("omp_session=")) return raw;
+	const separator = raw.indexOf("\n--\n");
+	if (separator < 0) return undefined;
+	const expectedSession = raw.slice("omp_session=".length, separator);
+	if (!expectedSession.startsWith("/") || !expectedSession.endsWith(".jsonl")) return undefined;
+	if (!currentSession || currentSession() !== expectedSession) return undefined;
+	return raw.slice(separator + "\n--\n".length);
 }
 
 function reconcileAmbiguousClaims(requestDir: string): void {
@@ -128,7 +139,11 @@ export function installTaskInboxDoorbell(
 				}
 				try {
 					if (typeof omp.sendMessage !== "function") throw new Error("OMP sendMessage unavailable");
-					const content = readFileSync(ambiguous, "utf8");
+					const content = requestContent(readFileSync(ambiguous, "utf8"), options.currentSession);
+					if (content === undefined) {
+						renameSync(ambiguous, `${pending}.refused`);
+						continue;
+					}
 					invoked = true;
 					omp.sendMessage(
 						{

@@ -131,6 +131,7 @@ fm_omp_task_doorbell_request_existing() {  # <marker> <request-id>
     return 1
   fi
   [ ! -f "${base}.pending.ambiguous" ] || return 2
+  [ ! -f "${base}.pending.refused" ] || return 5
   for processing in "${base}.pending.processing."*; do
     [ -f "$processing" ] && return 2
   done
@@ -138,11 +139,12 @@ fm_omp_task_doorbell_request_existing() {  # <marker> <request-id>
   return 3
 }
 
-fm_omp_task_doorbell_request() {  # <marker> <verified-pid> <request-id> <doorbell-line>
-  local marker=$1 pid=$2 request_id=$3 line=$4 request_dir staged pending cancelled attempts i existing
+fm_omp_task_doorbell_request() {  # <marker> <verified-pid> <request-id> <doorbell-line> [expected-session]
+  local marker=$1 pid=$2 request_id=$3 line=$4 expected_session=${5:-} request_dir staged pending cancelled attempts i existing
   fm_omp_task_doorbell_marker_read "$marker" || return 1
   [ "$FM_OMP_TASK_DOORBELL_PID" = "$pid" ] || return 1
   case "$request_id" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$expected_session" in ''|/*.jsonl) ;; *) return 1 ;; esac
   request_dir="${marker}.requests"
   [ -d "$request_dir" ] && [ ! -L "$request_dir" ] || return 1
   pending="$request_dir/request.$request_id.pending"
@@ -153,7 +155,10 @@ fm_omp_task_doorbell_request() {  # <marker> <verified-pid> <request-id> <doorbe
     4) ;;
     3)
       staged=$(mktemp "$request_dir/.request.XXXXXX") || return 1
-      if ! printf '%s' "$line" > "$staged" || ! chmod 0600 "$staged"; then
+      if ! {
+        [ -z "$expected_session" ] || printf 'omp_session=%s\n--\n' "$expected_session"
+        printf '%s' "$line"
+      } > "$staged" || ! chmod 0600 "$staged"; then
         rm -f "$staged"
         return 1
       fi

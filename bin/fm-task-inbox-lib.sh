@@ -143,7 +143,8 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
 # Durably enqueue one steer: temp-write, then atomic rename into the next
 # sequence slot. Prints the record path. Fails without a partial record.
 fm_task_inbox_write() {  # <state-dir> <task-id> <text>
-  local state=$1 task=$2 text=$3 dir lock seq tmp rec status=0
+  local state=$1 task=$2 text=$3 dir lock seq tmp rec status=0 expected_session=${FM_TASK_INBOX_OMP_EXPECTED_SESSION:-}
+  case "$expected_session" in ''|/*.jsonl) ;; *) return 1 ;; esac
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
   lock="$dir/.seq.lock"
@@ -154,6 +155,7 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text>
     {
       printf 'schema=%s\n' "$FM_TASK_INBOX_SCHEMA"
       printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      [ -z "$expected_session" ] || printf 'omp_session=%s\n' "$expected_session"
       printf -- '--\n'
       printf '%s' "$text"
     } > "$tmp" && mv "$tmp" "$rec" || status=1
@@ -164,6 +166,16 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text>
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1
   printf '%s' "$rec"
+}
+
+fm_task_inbox_expected_session() {  # <record-path>
+  local line session=
+  [ -f "$1" ] || return 1
+  while IFS= read -r line; do
+    [ "$line" != -- ] || break
+    case "$line" in omp_session=*) session=${line#omp_session=} ;; esac
+  done < "$1"
+  case "$session" in ''|/*.jsonl) printf '%s' "$session" ;; *) return 1 ;; esac
 }
 
 # The exact enqueued text back out of a record.
@@ -223,15 +235,16 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # proof; the acknowledgement move is the only delivery signal.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness] [omp-runtime] [omp-bin]
   local backend=$1 target=$2 rec=$3 label=${4:-}
-  local harness=${5:-} omp_runtime=${6:-} omp_bin=${7:-} line cstate verdict ready_marker request_id programmatic_rc
+  local harness=${5:-} omp_runtime=${6:-} omp_bin=${7:-} line cstate verdict ready_marker request_id programmatic_rc expected_session
   local programmatic_required=${FM_TASK_INBOX_OMP_REQUIRE_PROGRAMMATIC:-0}
   line=$(fm_task_inbox_doorbell_line "$rec")
   if [ "$harness" = omp ]; then
     ready_marker="${rec%/*}"
     ready_marker="${ready_marker%.inbox}.omp-doorbell-ready"
     request_id=${rec##*/}
+    expected_session=$(fm_task_inbox_expected_session "$rec") || return 5
     programmatic_rc=0
-    fm_backend_omp_trigger_turn "$backend" "$target" "$ready_marker" "$omp_runtime" "$omp_bin" "$request_id" "$line" \
+    fm_backend_omp_trigger_turn "$backend" "$target" "$ready_marker" "$omp_runtime" "$omp_bin" "$request_id" "$line" "$expected_session" \
       || programmatic_rc=$?
     case "$programmatic_rc" in
       0) return 0 ;;
@@ -239,6 +252,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [har
         [ "$programmatic_required" = 1 ] && return 4
         return 0
         ;;
+      5) return 5 ;;
     esac
     [ "$programmatic_required" = 1 ] && return 3
   fi

@@ -85,6 +85,24 @@ process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
 assert.equal(existsSync(`${failing}.requests/one.pending.failed`), true);
 assert.equal(existsSync(failing), false);
 
+const sessionBound = `${process.env.READY}.session-bound`;
+let sessionBoundSends = 0;
+const sessionBoundDoorbell = installTaskInboxDoorbell(
+  { sendMessage() { sessionBoundSends += 1; } },
+  {
+    inboxDir: process.env.INBOX,
+    readyMarker: sessionBound,
+    currentSession: () => "/sessions/current.jsonl",
+  },
+);
+sessionBoundDoorbell.activate();
+writeFileSync(`${sessionBound}.requests/one.pending`, `omp_session=/sessions/original.jsonl\n--\n${line}`);
+process.emit(FM_TASK_INBOX_DOORBELL_SIGNAL);
+assert.equal(sessionBoundSends, 0);
+assert.equal(existsSync(`${sessionBound}.requests/one.pending.refused`), true);
+assert.equal(existsSync(sessionBound), true);
+sessionBoundDoorbell.retire();
+
 const uncertain = `${process.env.READY}.uncertain`;
 const uncertainDoorbell = installTaskInboxDoorbell(
   { sendMessage() { throw new Error("uncertain"); } },
@@ -243,6 +261,13 @@ rc=$?
 set -e
 [ "$rc" = 2 ]
 [ -f "$request_dir/request.claimed.msg.pending.processing.4242" ]
+
+: > "$request_dir/request.refused.msg.pending.refused"
+set +e
+fm_omp_task_doorbell_request_existing "$MARKER" refused.msg
+rc=$?
+set -e
+[ "$rc" = 5 ]
 
 : > "$request_dir/request.ambiguous.msg.pending.ambiguous"
 set +e

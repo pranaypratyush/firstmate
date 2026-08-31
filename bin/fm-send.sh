@@ -927,6 +927,10 @@ else
         echo "error: remote-omp-inbox-ambiguous: the exact programmatic OMP request may have reached the session; request remains at $INBOX_RECORD; do not resend" >&2
         exit 7
         ;;
+      5)
+        echo "error: remote-omp-binding-refused: the exact programmatic OMP request session changed before notification; request remains at $INBOX_RECORD; do not resend" >&2
+        exit 9
+        ;;
     esac
     if [ "$TARGET_HARNESS" = omp ] && [ "$INBOX_OMP_TURNSTART_REQUIRED" = 1 ] \
        && ! fm_send_wait_for_omp_turn_start; then

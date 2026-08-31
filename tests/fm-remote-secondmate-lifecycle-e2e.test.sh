@@ -1185,6 +1185,7 @@ const doorbell = installTaskInboxDoorbell(
   {
     inboxDir: process.env.FM_TEST_OMP_INBOX,
     readyMarker: process.env.FM_TEST_OMP_READY,
+    currentSession: () => readFileSync(process.env.FM_TEST_OMP_SESSION, "utf8").trim(),
   },
 );
 doorbell.activate();
@@ -1204,11 +1205,13 @@ OMP_INBOX="$OMP_CONTROL_STATE/remote-omp.inbox"
 OMP_TURN_STARTED="$OMP_CONTROL_STATE/remote-omp.omp-started"
 OMP_SENT="$TMP_ROOT/remote-omp-send-message.log"
 OMP_SKIP_HANDLED="$TMP_ROOT/remote-omp-skip-handled"
+OMP_EXTENSION_SESSION="$TMP_ROOT/remote-omp-extension-session"
 rm -f "$OMP_READY" "$OMP_TURN_STARTED" "$OMP_ACTIVE_PID" "$OMP_SENT" "$OMP_SKIP_HANDLED"
+cat "$OMP_REMOTE_HOME/state/.omp-session" > "$OMP_EXTENSION_SESSION"
 FM_TEST_OMP_HELPER="$REMOTE_ROOT/.omp/extensions/lib/fm-task-inbox-doorbell.ts" \
   FM_TEST_OMP_SENT="$OMP_SENT" FM_TEST_OMP_TURN_STARTED="$OMP_TURN_STARTED" \
   FM_TEST_OMP_INBOX="$OMP_INBOX" FM_TEST_OMP_READY="$OMP_READY" \
-  FM_TEST_OMP_PID="$OMP_ACTIVE_PID" FM_TEST_OMP_SKIP_HANDLED="$OMP_SKIP_HANDLED" \
+  FM_TEST_OMP_PID="$OMP_ACTIVE_PID" FM_TEST_OMP_SKIP_HANDLED="$OMP_SKIP_HANDLED" FM_TEST_OMP_SESSION="$OMP_EXTENSION_SESSION" \
   bash -c 'exec -a bun "$1" "$2"' _ \
     "$REMOTE_ROOT/bin/bun" "$REMOTE_ROOT/bin/omp" \
   > "$TMP_ROOT/remote-omp-listener.out" 2>&1 &
@@ -1394,6 +1397,20 @@ assert_grep 'does not match the currently reported exact agent session' "$TMP_RO
 jq --arg pane "$OMP_PANE" --arg session "$POINTER_SESSION" \
   '.omp_session[$pane] = $session' "$HERDR_STATE" > "$HERDR_STATE.session-restored"
 mv "$HERDR_STATE.session-restored" "$HERDR_STATE"
+printf '%s\n' "$LIVE_SESSION" > "$OMP_EXTENSION_SESSION"
+sent_before_session_switch=$(wc -l < "$OMP_SENT")
+set +e
+remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp "session switched after binding" \
+  > "$TMP_ROOT/remote-omp-session-switch.out" 2>&1
+session_switch_rc=$?
+set -e
+[ "$session_switch_rc" = 9 ] || fail "remote OMP session switch did not refuse notification (rc=$session_switch_rc)"
+assert_grep 'remote-omp-binding-refused' "$TMP_ROOT/remote-omp-session-switch.out" \
+  "remote OMP session switch did not report its binding refusal"
+[ "$(wc -l < "$OMP_SENT")" = "$sent_before_session_switch" ] \
+  || fail "remote OMP session switch retargeted a programmatic delivery"
+[ -f "$OMP_INBOX/003.msg" ] \
+  || fail "remote OMP session switch did not retain its canonical request"
 
 cp "$OMP_CONTROL_STATE/remote-omp.meta" "$TMP_ROOT/remote-omp.meta.before-stale"
 meta_tmp="$OMP_CONTROL_STATE/remote-omp.meta.tmp"
