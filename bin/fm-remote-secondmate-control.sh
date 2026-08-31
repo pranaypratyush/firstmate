@@ -162,7 +162,7 @@ remote_omp_delivery_load_libs() {
 }
 
 remote_omp_delivery_binding() { # <id>
-  local id=$1 harness session_dir session_dir_real pointer session session_parent
+  local id=$1 harness session_dir session_dir_real pointer session session_parent live_session
   local primary_marker doorbell_marker expected_version path
   remote_omp_delivery_load_libs
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
@@ -220,6 +220,13 @@ remote_omp_delivery_binding() { # <id>
     || remote_omp_delivery_refuse "OMP task doorbell extension is inactive"
   [ "$FM_OMP_TASK_DOORBELL_PID" = "$FM_OMP_MARKER_PID" ] \
     || remote_omp_delivery_refuse "OMP task doorbell and primary extension belong to different process instances"
+  fm_backend_herdr_parse_target "$REMOTE_ENDPOINT_TARGET" \
+    || remote_omp_delivery_refuse "exact remote OMP endpoint target cannot be parsed"
+  fm_backend_herdr_omp_submit_snapshot "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
+    || remote_omp_delivery_refuse "exact remote OMP agent session is unavailable"
+  live_session=$FM_BACKEND_HERDR_OMP_SUBMIT_SESSION
+  [ "$live_session" = "$session" ] \
+    || remote_omp_delivery_refuse "OMP session pointer does not match the currently reported exact agent session"
 }
 
 state_value() { # <id>; prints recovery-grade state

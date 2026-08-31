@@ -1375,6 +1375,26 @@ assert_grep 'remote-omp-inbox-duplicate' "$TMP_ROOT/remote-omp-retry.out" \
   || fail "remote OMP retry allocated a second canonical request"
 rm -f "$OMP_SKIP_HANDLED"
 
+LIVE_SESSION="$OMP_REMOTE_HOME/state/omp-sessions/replaced.jsonl"
+printf '{"type":"session"}\n' > "$LIVE_SESSION"
+POINTER_SESSION=$(cat "$OMP_REMOTE_HOME/state/.omp-session")
+jq --arg pane "$OMP_PANE" --arg session "$LIVE_SESSION" \
+  '.omp_session[$pane] = $session' "$HERDR_STATE" > "$HERDR_STATE.session-mismatch"
+mv "$HERDR_STATE.session-mismatch" "$HERDR_STATE"
+set +e
+remote_env "$ROOT/bin/fm-send.sh" fm-remote-omp "stale session pointer" \
+  > "$TMP_ROOT/remote-omp-session-mismatch.out" 2>&1
+session_mismatch_rc=$?
+set -e
+[ "$session_mismatch_rc" = 9 ] || fail "stale remote OMP session pointer did not refuse delivery (rc=$session_mismatch_rc)"
+assert_grep 'does not match the currently reported exact agent session' "$TMP_ROOT/remote-omp-session-mismatch.out" \
+  "stale remote OMP session pointer did not report its binding refusal"
+[ ! -e "$OMP_INBOX/003.msg" ] \
+  || fail "stale remote OMP session pointer enqueued a request after refusal"
+jq --arg pane "$OMP_PANE" --arg session "$POINTER_SESSION" \
+  '.omp_session[$pane] = $session' "$HERDR_STATE" > "$HERDR_STATE.session-restored"
+mv "$HERDR_STATE.session-restored" "$HERDR_STATE"
+
 cp "$OMP_CONTROL_STATE/remote-omp.meta" "$TMP_ROOT/remote-omp.meta.before-stale"
 meta_tmp="$OMP_CONTROL_STATE/remote-omp.meta.tmp"
 sed 's/^endpoint_task_id=.*/endpoint_task_id=stale-endpoint/' "$OMP_CONTROL_STATE/remote-omp.meta" > "$meta_tmp"
