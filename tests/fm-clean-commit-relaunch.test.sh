@@ -61,7 +61,7 @@ SH
   chmod +x "$fakebin/tmux"
 cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
-case "${FM_NM_CUSTODY:-none}" in
+  case "${FM_NM_CUSTODY:-none}" in
   active|parked)
     status=running
     [ "${FM_NM_CUSTODY:-none}" = active ] || status=awaiting_approval
@@ -76,6 +76,15 @@ EOF
   unreadable)
     echo 'validation service unavailable' >&2
     exit 2
+    ;;
+  unknown)
+    cat <<EOF
+id: run-source
+branch: fm/source
+head: ${FM_SOURCE_COMMIT:?}
+status: gibberish
+EOF
+    exit 0
     ;;
 esac
 echo 'no active run' >&2
@@ -136,7 +145,7 @@ EOF
 }
 
 read_case() {
-  IFS='|' read -r CASE_DIR HOME_DIR _PROJECT_DIR SOURCE_DIR DEST_DIR FAKEBIN_DIR SOURCE_HEAD <<EOF
+  IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR SOURCE_DIR DEST_DIR FAKEBIN_DIR SOURCE_HEAD <<EOF
 $1
 EOF
 }
@@ -164,6 +173,13 @@ run_relaunch() {
     "$RELAUNCH" "${1:-source}" "${2:-dest}" 2>&1
 }
 
+run_destination_spawn() {
+  FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_SPAWN_NO_GUARD=1 IS_SANDBOX=1 \
+    FM_DEST_WORKTREE="$DEST_DIR" PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" dest "$PROJECT_DIR" --mode no-mistakes --yolo off \
+      --harness codex --backend tmux 2>&1
+}
+
 test_clean_committed_unpushed_success_preserves_source() {
   local rec out status
   rec=$(make_case success)
@@ -187,7 +203,7 @@ test_clean_committed_unpushed_success_preserves_source() {
 
 test_dirty_staged_untracked_and_git_operation_refuse() {
   local kind rec out status operation
-  for kind in dirty staged untracked operation; do
+  for kind in dirty staged untracked operation operation-symlink; do
     rec=$(make_case "refuse-$kind")
     read_case "$rec"
     case "$kind" in
@@ -197,6 +213,10 @@ test_dirty_staged_untracked_and_git_operation_refuse() {
       operation)
         operation=$(git -C "$SOURCE_DIR" rev-parse --git-path rebase-merge)
         mkdir -p "$operation"
+        ;;
+      operation-symlink)
+        operation=$(git -C "$SOURCE_DIR" rev-parse --git-path MERGE_HEAD)
+        ln -s /dev/null "$operation"
         ;;
     esac
     source_snapshot "$CASE_DIR/before"
@@ -327,21 +347,43 @@ test_validation_custody_handoff_holds_destination() {
 }
 
 test_unreadable_validation_custody_refuses() {
-  local rec out status
-  rec=$(make_case unreadable-validation)
-  read_case "$rec"
-  source_snapshot "$CASE_DIR/before"
-  FM_ENDPOINT_STATE_VALUE=missing FM_NM_CUSTODY_VALUE=unreadable out=$(run_relaunch)
-  status=$?
-  source_snapshot "$CASE_DIR/after"
-  [ "$status" -ne 0 ] || fail 'unreadable validation custody unexpectedly relaunched'
-  cmp -s "$CASE_DIR/before" "$CASE_DIR/after" || fail 'unreadable validation custody changed source state'
-  [ ! -e "$HOME_DIR/state/dest.meta" ] || fail 'unreadable validation custody allocated a destination'
-  pass 'unreadable no-mistakes custody refuses without source mutation'
+  local custody rec out status
+  for custody in unreadable unknown; do
+    rec=$(make_case "$custody-validation")
+    read_case "$rec"
+    source_snapshot "$CASE_DIR/before"
+    FM_ENDPOINT_STATE_VALUE=missing FM_NM_CUSTODY_VALUE=$custody out=$(run_relaunch)
+    status=$?
+    source_snapshot "$CASE_DIR/after"
+    [ "$status" -ne 0 ] || fail "$custody validation custody unexpectedly relaunched"
+    cmp -s "$CASE_DIR/before" "$CASE_DIR/after" || fail "$custody validation custody changed source state"
+    [ ! -e "$HOME_DIR/state/dest.meta" ] || fail "$custody validation custody allocated a destination"
+  done
+  pass 'unreadable and unclassifiable no-mistakes custody refuse without source mutation'
+}
+
+test_missing_or_symlinked_source_brief_refuses() {
+  local shape rec out status
+  for shape in missing symlink; do
+    rec=$(make_case "source-brief-$shape")
+    read_case "$rec"
+    case "$shape" in
+      missing) rm "$HOME_DIR/data/source/brief.md" ;;
+      symlink) rm "$HOME_DIR/data/source/brief.md"; ln -s /dev/null "$HOME_DIR/data/source/brief.md" ;;
+    esac
+    source_snapshot "$CASE_DIR/before"
+    FM_ENDPOINT_STATE_VALUE=missing out=$(run_relaunch)
+    status=$?
+    source_snapshot "$CASE_DIR/after"
+    [ "$status" -ne 0 ] || fail "$shape source brief unexpectedly relaunched"
+    cmp -s "$CASE_DIR/before" "$CASE_DIR/after" || fail "$shape source brief refusal changed source state"
+    [ ! -e "$HOME_DIR/state/dest.meta" ] || fail "$shape source brief allocated a destination"
+  done
+  pass 'missing and symlinked source briefs refuse without source mutation'
 }
 
 test_destination_failure_and_concurrent_admission_preserve_source() {
-  local rec out status first second
+  local rec out status first second ordinary
   rec=$(make_case destination-failure)
   read_case "$rec"
   source_snapshot "$CASE_DIR/before"
@@ -356,6 +398,11 @@ test_destination_failure_and_concurrent_admission_preserve_source() {
   FM_ENDPOINT_STATE_VALUE=missing FM_DEST_FAIL_VALUE=0 FM_NEW_WINDOW_DELAY_VALUE=2 FM_NM_CUSTODY_VALUE=none run_relaunch > "$CASE_DIR/first.out" 2>&1 &
   first=$!
   sleep 0.2
+  ordinary=$(run_destination_spawn)
+  status=$?
+  [ "$status" -ne 0 ] || fail 'ordinary destination spawn bypassed relaunch reservation'
+  assert_contains "$ordinary" 'another spawn is already creating task dest' \
+    'ordinary destination spawn did not observe the relaunch reservation'
   FM_ENDPOINT_STATE_VALUE=missing FM_DEST_FAIL_VALUE=0 FM_NEW_WINDOW_DELAY_VALUE=0 second=$(run_relaunch)
   status=$?
   if ! wait "$first"; then
@@ -376,6 +423,7 @@ test_nonship_crosshome_and_identity_sources_refuse
 test_missing_source_branch_commit_refuses
 test_validation_custody_handoff_holds_destination
 test_unreadable_validation_custody_refuses
+test_missing_or_symlinked_source_brief_refuses
 test_destination_failure_and_concurrent_admission_preserve_source
 
 echo '# all fm-clean-commit-relaunch tests passed'

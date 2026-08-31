@@ -1203,9 +1203,19 @@ fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; 
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_forbid_branch "new-task spawn (fm-spawn)"
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
-if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
-  echo "error: another spawn is already creating task $ID" >&2
-  exit 1
+if [ -n "${FM_CLEAN_COMMIT_DESTINATION_LOCK_OWNER:-}" ]; then
+  owner_pid=${FM_CLEAN_COMMIT_DESTINATION_LOCK_OWNER}
+  lock_pid=$(cat "$SPAWN_TASK_LOCK/pid" 2>/dev/null || true)
+  [ "$CLEAN_COMMIT_SET" -eq 1 ] && [ "$owner_pid" = "${PPID:-}" ] \
+    && [ "$lock_pid" = "$owner_pid" ] && fm_pid_alive "$owner_pid" || {
+    echo "error: clean-commit relaunch destination lock ownership could not be verified" >&2
+    exit 1
+  }
+else
+  if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
+    echo "error: another spawn is already creating task $ID" >&2
+    exit 1
+  fi
 fi
 SPAWN_TASK_LOCK_HELD=1
 PROJ=

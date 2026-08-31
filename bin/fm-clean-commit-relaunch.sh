@@ -75,13 +75,16 @@ fi
 SOURCE_META=$STATE/$SOURCE.meta
 DEST_META=$STATE/$DESTINATION.meta
 SOURCE_LOCK=$STATE/.spawn-$SOURCE.lock
+DEST_LOCK=$STATE/.spawn-$DESTINATION.lock
 DEST_BRIEF=$DATA/$DESTINATION/brief.md
 DEST_HANDOFF=$DATA/$DESTINATION/relaunch-handoff.json
 HANDOFF_TMP=
 LOCK_HELD=0
+DEST_LOCK_HELD=0
 
 cleanup() {
   [ -z "$HANDOFF_TMP" ] || rm -f -- "$HANDOFF_TMP"
+  [ "$DEST_LOCK_HELD" -eq 0 ] || fm_lock_release "$DEST_LOCK" || true
   [ "$LOCK_HELD" -eq 0 ] || fm_lock_release "$SOURCE_LOCK" || true
 }
 trap cleanup EXIT HUP INT TERM
@@ -91,6 +94,11 @@ if ! fm_lock_try_acquire "$SOURCE_LOCK"; then
   exit 1
 fi
 LOCK_HELD=1
+if ! fm_lock_try_acquire "$DEST_LOCK"; then
+  echo "error: destination task $DESTINATION is busy with another spawn or relaunch" >&2
+  exit 1
+fi
+DEST_LOCK_HELD=1
 
 meta_exact() {  # <key>
   local key=$1 count value
@@ -194,7 +202,7 @@ SOURCE_STATUS=$(git -C "$SOURCE_WORKTREE" status --porcelain --untracked-files=a
 }
 for operation in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD REBASE_HEAD sequencer rebase-apply rebase-merge; do
   operation_path=$(git -C "$SOURCE_WORKTREE" rev-parse --git-path "$operation" 2>/dev/null || true)
-  [ -z "$operation_path" ] || [ ! -e "$operation_path" ] || [ -L "$operation_path" ] || {
+  [ -z "$operation_path" ] || { [ ! -e "$operation_path" ] && [ ! -L "$operation_path" ]; } || {
     echo "error: source task $SOURCE has a Git operation in progress ($operation)" >&2
     exit 1
   }
@@ -263,6 +271,9 @@ if [ "$NM_STATUS" -eq 0 ] && [ -n "$NM_OUTPUT" ]; then
         if printf '%s\n' "$NM_OUTPUT" | grep -Eq '^[[:space:]]*(awaiting_agent|gate):'; then
           CUSTODY=parked
           RUN_NEXT_ACTION=firstmate-custody-decision-required
+        else
+          CUSTODY=unreadable
+          RUN_NEXT_ACTION=manual-validation-custody-inspection-required
         fi
         ;;
     esac
@@ -282,8 +293,14 @@ command -v jq >/dev/null 2>&1 || {
   exit 1
 }
 SOURCE_BRIEF=$DATA/$SOURCE/brief.md
-SOURCE_BRIEF_IDENTITY=
-[ -f "$SOURCE_BRIEF" ] && [ ! -L "$SOURCE_BRIEF" ] && SOURCE_BRIEF_IDENTITY=$(sha256_file "$SOURCE_BRIEF")
+[ -f "$SOURCE_BRIEF" ] && [ ! -L "$SOURCE_BRIEF" ] && [ -r "$SOURCE_BRIEF" ] || {
+  echo "error: source task $SOURCE needs a readable regular brief to bind its preserved-work handoff" >&2
+  exit 1
+}
+SOURCE_BRIEF_IDENTITY=$(sha256_file "$SOURCE_BRIEF") || {
+  echo "error: source task $SOURCE brief identity could not be read" >&2
+  exit 1
+}
 PR_COUNT=$(grep -c '^pr=' "$SOURCE_META" 2>/dev/null || true)
 case "$PR_COUNT" in
   0) PR= ;;
@@ -357,5 +374,7 @@ PREWALK=$(sed -n 's/^prewalk_into=//p' "$SOURCE_META")
 [ -z "$PREWALK" ] || SPAWN_ARGS+=(--prewalk-into "$PREWALK")
 grep -Fxq 'allow_project_omp_extensions=1' "$SOURCE_META" && SPAWN_ARGS+=(--allow-project-omp-extensions)
 
-FM_CLEAN_COMMIT_RELAUNCH=1 "$SCRIPT_DIR/fm-spawn.sh" "${SPAWN_ARGS[@]}"
+FM_CLEAN_COMMIT_RELAUNCH=1 \
+  FM_CLEAN_COMMIT_DESTINATION_LOCK_OWNER="${BASHPID:-$$}" \
+  "$SCRIPT_DIR/fm-spawn.sh" "${SPAWN_ARGS[@]}"
 echo "relaunched $SOURCE as $DESTINATION at $SOURCE_COMMIT"
