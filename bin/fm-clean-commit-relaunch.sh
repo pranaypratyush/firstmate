@@ -2,6 +2,8 @@
 # Relaunch one missing ordinary ship worker from its clean committed HEAD.
 #
 # Usage: fm-clean-commit-relaunch.sh <source-task-id> <destination-task-id>
+# Validation receipts: append final-head evidence through fm-receipt.sh to
+# data/fm-clean-commit-worker-relaunch/evidence.jsonl.
 #
 # This is deliberately an operator command, not a recovery callback.  It holds
 # the source task's existing spawn lock while it proves that the recorded source
@@ -108,6 +110,15 @@ meta_exact() {  # <key>
   [ -n "$value" ] || return 1
   printf '%s' "$value"
 }
+meta_optional_exact() {  # <key>
+  local key=$1 count value
+  count=$(grep -c "^$key=" "$SOURCE_META" 2>/dev/null || true)
+  case "$count" in
+    0) return 0 ;;
+    1) value=$(sed -n "s/^$key=//p" "$SOURCE_META"); [ -n "$value" ] || return 1; printf '%s' "$value" ;;
+    *) return 1 ;;
+  esac
+}
 
 [ -f "$SOURCE_META" ] && [ ! -L "$SOURCE_META" ] || {
   echo "error: source task $SOURCE has no readable regular metadata" >&2
@@ -160,6 +171,31 @@ grep -Fxq "Delivery contract: mode=$MODE" "$DEST_BRIEF" || {
   echo "error: destination brief delivery contract does not match source mode=$MODE" >&2
   exit 1
 }
+MODEL=$(meta_optional_exact model) || { echo "error: source task $SOURCE has malformed model metadata" >&2; exit 1; }
+case "$MODEL" in
+  ''|default) ;;
+  *[!A-Za-z0-9._:/@+-]*) echo "error: source task $SOURCE has invalid model metadata" >&2; exit 1 ;;
+esac
+EFFORT=$(meta_optional_exact effort) || { echo "error: source task $SOURCE has malformed effort metadata" >&2; exit 1; }
+case "$EFFORT" in
+  ''|default|low|medium|high|xhigh|max) ;;
+  *) echo "error: source task $SOURCE has invalid effort metadata" >&2; exit 1 ;;
+esac
+PREWALK=$(meta_optional_exact prewalk_into) || { echo "error: source task $SOURCE has malformed prewalk metadata" >&2; exit 1; }
+case "$PREWALK" in
+  '') ;;
+  *[!A-Za-z0-9._:/@+-]*) echo "error: source task $SOURCE has invalid prewalk metadata" >&2; exit 1 ;;
+esac
+[ -z "$PREWALK" ] || [ "$HARNESS" = omp ] || {
+  echo "error: source task $SOURCE has prewalk metadata for non-OMP harness $HARNESS" >&2
+  exit 1
+}
+EXTENSION_COUNT=$(grep -c '^allow_project_omp_extensions=' "$SOURCE_META" 2>/dev/null || true)
+case "$EXTENSION_COUNT" in
+  0) ALLOW_PROJECT_OMP_EXTENSIONS=0 ;;
+  1) grep -Fxq 'allow_project_omp_extensions=1' "$SOURCE_META" || { echo "error: source task $SOURCE has invalid OMP extension metadata" >&2; exit 1; }; ALLOW_PROJECT_OMP_EXTENSIONS=1 ;;
+  *) echo "error: source task $SOURCE has malformed OMP extension metadata" >&2; exit 1 ;;
+esac
 
 fm_backend_validate_task_endpoint "$SOURCE_META" "$SOURCE" >/dev/null || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
@@ -359,13 +395,10 @@ fm_task_inbox_write "$STATE" "$DESTINATION" "Read the preserved-work handoff at 
 }
 
 SPAWN_ARGS=("$DESTINATION" "$PROJECT" --mode "$MODE" --yolo "$YOLO" --harness "$HARNESS" --backend "$BACKEND" --accepted-clean-commit "$SOURCE_COMMIT" --accepted-clean-commit-source-common "$SOURCE_COMMON")
-MODEL=$(sed -n 's/^model=//p' "$SOURCE_META")
-EFFORT=$(sed -n 's/^effort=//p' "$SOURCE_META")
 [ -z "$MODEL" ] || [ "$MODEL" = default ] || SPAWN_ARGS+=(--model "$MODEL")
 [ -z "$EFFORT" ] || [ "$EFFORT" = default ] || SPAWN_ARGS+=(--effort "$EFFORT")
-PREWALK=$(sed -n 's/^prewalk_into=//p' "$SOURCE_META")
 [ -z "$PREWALK" ] || SPAWN_ARGS+=(--prewalk-into "$PREWALK")
-grep -Fxq 'allow_project_omp_extensions=1' "$SOURCE_META" && SPAWN_ARGS+=(--allow-project-omp-extensions)
+[ "$ALLOW_PROJECT_OMP_EXTENSIONS" -eq 0 ] || SPAWN_ARGS+=(--allow-project-omp-extensions)
 FM_CLEAN_COMMIT_RELAUNCH=1 \
   FM_CLEAN_COMMIT_DESTINATION_LOCK_OWNER="${BASHPID:-$$}" \
   "$SCRIPT_DIR/fm-spawn.sh" "${SPAWN_ARGS[@]}"

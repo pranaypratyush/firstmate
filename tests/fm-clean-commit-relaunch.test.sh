@@ -206,6 +206,23 @@ test_clean_committed_unpushed_success_preserves_source() {
   pass 'clean unpushed commit relaunches through a fresh destination while preserving the source'
 }
 
+test_clean_commit_replaces_newer_clean_destination_base() {
+  local rec out status
+  rec=$(make_case newer-destination)
+  read_case "$rec"
+  printf 'newer default commit\n' > "$PROJECT_DIR/newer.txt"
+  git -C "$PROJECT_DIR" add newer.txt
+  git -C "$PROJECT_DIR" commit --quiet -m 'newer default commit'
+  git -C "$DEST_DIR" fetch --quiet origin
+  git -C "$DEST_DIR" merge --ff-only --quiet origin/master
+  [ "$(git -C "$DEST_DIR" rev-parse HEAD)" != "$SOURCE_HEAD" ] || fail 'fixture did not advance destination beyond source commit'
+  FM_ENDPOINT_STATE_VALUE=missing out=$(run_relaunch)
+  status=$?
+  expect_code 0 "$status" 'newer clean destination should accept exact source commit'
+  [ "$(git -C "$DEST_DIR" rev-parse HEAD)" = "$SOURCE_HEAD" ] || fail 'destination did not replace newer clean base with source exact HEAD'
+  pass 'a newer clean destination base resets to the admitted source exact HEAD'
+}
+
 test_dirty_staged_untracked_and_git_operation_refuse() {
   local kind rec out status operation
   for kind in dirty staged untracked operation operation-symlink bisect; do
@@ -300,7 +317,7 @@ test_destination_physical_repository_collision_refuses() {
 
 test_nonship_crosshome_and_identity_sources_refuse() {
   local shape rec out status
-  for shape in scout secondmate crosshome identity malformed; do
+  for shape in scout secondmate crosshome identity malformed model-duplicate effort-invalid prewalk-duplicate extension-duplicate; do
     rec=$(make_case "source-$shape")
     read_case "$rec"
     case "$shape" in
@@ -309,6 +326,10 @@ test_nonship_crosshome_and_identity_sources_refuse() {
       crosshome) printf 'home=/foreign/home\n' >> "$HOME_DIR/state/source.meta" ;;
       identity) sed -i 's/^endpoint_task_id=source$/endpoint_task_id=another-task/' "$HOME_DIR/state/source.meta" ;;
       malformed) sed -i '/^harness=/d' "$HOME_DIR/state/source.meta" ;;
+      model-duplicate) printf 'model=other\n' >> "$HOME_DIR/state/source.meta" ;;
+      effort-invalid) sed -i 's/^effort=default$/effort=invalid/' "$HOME_DIR/state/source.meta" ;;
+      prewalk-duplicate) printf 'prewalk_into=one\nprewalk_into=two\n' >> "$HOME_DIR/state/source.meta" ;;
+      extension-duplicate) printf 'allow_project_omp_extensions=1\nallow_project_omp_extensions=1\n' >> "$HOME_DIR/state/source.meta" ;;
     esac
     source_snapshot "$CASE_DIR/before"
     FM_ENDPOINT_STATE_VALUE=missing out=$(run_relaunch)
@@ -441,6 +462,7 @@ test_destination_failure_and_concurrent_admission_preserve_source() {
 }
 
 test_clean_committed_unpushed_success_preserves_source
+test_clean_commit_replaces_newer_clean_destination_base
 test_dirty_staged_untracked_and_git_operation_refuse
 test_every_nonmissing_endpoint_verdict_refuses
 test_collisions_and_repository_mismatch_refuse

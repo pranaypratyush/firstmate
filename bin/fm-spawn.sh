@@ -2695,7 +2695,7 @@ validate_spawn_pool_lease() { # <source> <inspect-target>
     refuse_spawn_pool_lease "$source has no readable $target base" "$inspect_target"
     return 1
   }
-  if ! git -C "$WT" merge-base --is-ancestor HEAD "$target" 2>/dev/null; then
+  if [ -z "$CLEAN_COMMIT" ] && ! git -C "$WT" merge-base --is-ancestor HEAD "$target" 2>/dev/null; then
     refuse_spawn_pool_lease "$source HEAD is not an ancestor of $target (not fast-forwardable); refusing to discard local commits" "$inspect_target"
     return 1
   fi
@@ -2740,6 +2740,18 @@ freshen_spawn_worktree_base() {  # <worktree>
     return 1
   }
   if [ "$current" = "$expected" ]; then
+    return 0
+  fi
+  if [ -n "$CLEAN_COMMIT" ]; then
+    if ! git -C "$worktree" checkout --quiet --detach "$target"; then
+      echo "error: could not check out accepted clean commit '$target' in pooled worktree '$worktree'" >&2
+      return 1
+    fi
+    actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+    if [ "$actual" != "$expected" ]; then
+      echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not accepted clean commit '$expected'; refusing to launch" >&2
+      return 1
+    fi
     return 0
   fi
   if ! git -C "$worktree" merge-base --is-ancestor HEAD "$target" 2>/dev/null; then
