@@ -562,6 +562,7 @@ ok - spawn guards Treehouse reset before non-ancestor acquisition
 ### Clean-commit destination base
 
 The explicit clean-commit destination base was validated on 2026-08-31 by the portable relaunch regression.
+The Firstmate version was b3267150ea0415e6b97aee28aa5e285eafa5e1a5.
 
 ```sh
 bash tests/fm-clean-commit-relaunch.test.sh

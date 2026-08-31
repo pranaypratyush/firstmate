@@ -317,7 +317,7 @@ test_destination_physical_repository_collision_refuses() {
 
 test_nonship_crosshome_and_identity_sources_refuse() {
   local shape rec out status
-  for shape in scout secondmate crosshome identity malformed model-duplicate effort-invalid prewalk-duplicate extension-duplicate; do
+  for shape in scout secondmate crosshome identity malformed harness-unsupported model-duplicate effort-invalid prewalk-duplicate extension-duplicate pr-empty pr-noncanonical; do
     rec=$(make_case "source-$shape")
     read_case "$rec"
     case "$shape" in
@@ -326,10 +326,13 @@ test_nonship_crosshome_and_identity_sources_refuse() {
       crosshome) printf 'home=/foreign/home\n' >> "$HOME_DIR/state/source.meta" ;;
       identity) sed -i 's/^endpoint_task_id=source$/endpoint_task_id=another-task/' "$HOME_DIR/state/source.meta" ;;
       malformed) sed -i '/^harness=/d' "$HOME_DIR/state/source.meta" ;;
+      harness-unsupported) sed -i 's/^harness=codex$/harness=bogus/' "$HOME_DIR/state/source.meta" ;;
       model-duplicate) printf 'model=other\n' >> "$HOME_DIR/state/source.meta" ;;
       effort-invalid) sed -i 's/^effort=default$/effort=invalid/' "$HOME_DIR/state/source.meta" ;;
       prewalk-duplicate) printf 'prewalk_into=one\nprewalk_into=two\n' >> "$HOME_DIR/state/source.meta" ;;
       extension-duplicate) printf 'allow_project_omp_extensions=1\nallow_project_omp_extensions=1\n' >> "$HOME_DIR/state/source.meta" ;;
+      pr-empty) printf 'pr=\n' >> "$HOME_DIR/state/source.meta" ;;
+      pr-noncanonical) printf 'pr=not-a-pr\n' >> "$HOME_DIR/state/source.meta" ;;
     esac
     source_snapshot "$CASE_DIR/before"
     FM_ENDPOINT_STATE_VALUE=missing out=$(run_relaunch)
@@ -339,7 +342,7 @@ test_nonship_crosshome_and_identity_sources_refuse() {
     cmp -s "$CASE_DIR/before" "$CASE_DIR/after" || fail "$shape source refusal changed source state"
     [ ! -e "$HOME_DIR/state/dest.meta" ] || fail "$shape source allocated destination state"
   done
-  pass 'scout, secondmate, cross-home, malformed, and identity-mismatched sources refuse before allocation'
+  pass 'malformed, unsupported, and identity-mismatched sources refuse before allocation'
 }
 
 test_missing_source_branch_commit_refuses() {

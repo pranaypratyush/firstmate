@@ -47,6 +47,8 @@ DATA=$(resolve_dir data "$DATA") || exit 1
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 usage() {
   sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
@@ -161,6 +163,10 @@ ENDPOINT_TASK=$(meta_exact endpoint_task_id) || {
 SOURCE_WORKTREE=$(meta_exact worktree) || { echo "error: source task $SOURCE has malformed worktree metadata" >&2; exit 1; }
 PROJECT=$(meta_exact project) || { echo "error: source task $SOURCE has malformed project metadata" >&2; exit 1; }
 HARNESS=$(meta_exact harness) || { echo "error: source task $SOURCE has malformed harness metadata" >&2; exit 1; }
+case "$HARNESS" in
+  claude|codex|opencode|pi|pi-signed|omp|grok|kimi|hermes) ;;
+  *) echo "error: source task $SOURCE has unsupported harness metadata: $HARNESS" >&2; exit 1 ;;
+esac
 MODE=$(meta_exact mode) || { echo "error: source task $SOURCE has malformed delivery metadata" >&2; exit 1; }
 YOLO=$(meta_exact yolo) || { echo "error: source task $SOURCE has malformed merge-posture metadata" >&2; exit 1; }
 case "$MODE:$YOLO" in
@@ -346,12 +352,17 @@ SOURCE_BRIEF_IDENTITY=$(sha256_file "$SOURCE_BRIEF") || {
   echo "error: source task $SOURCE brief identity could not be read" >&2
   exit 1
 }
-PR_COUNT=$(grep -c '^pr=' "$SOURCE_META" 2>/dev/null || true)
-case "$PR_COUNT" in
-  0) PR= ;;
-  1) PR=$(sed -n 's/^pr=//p' "$SOURCE_META") ;;
-  *) echo "error: source PR metadata is ambiguous; source was preserved" >&2; exit 1 ;;
-esac
+PR=$(meta_optional_exact pr) || {
+  echo "error: source PR metadata is malformed; source was preserved" >&2
+  exit 1
+}
+if [ -n "$PR" ]; then
+  fm_pr_url_parse "$PR" && [ "$FM_PR_URL" = "$PR" ] || {
+    echo "error: source PR metadata is not a canonical PR URL; source was preserved" >&2
+    exit 1
+  }
+  PR=$FM_PR_URL
+fi
 
 if ! grep -Fq '<!-- fm-clean-commit-relaunch-handoff -->' "$DEST_BRIEF"; then
   cat >> "$DEST_BRIEF" <<EOF
