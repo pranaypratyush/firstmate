@@ -227,6 +227,7 @@ remote_omp_delivery_binding() { # <id>
   live_session=$FM_BACKEND_HERDR_OMP_SUBMIT_SESSION
   [ "$live_session" = "$session" ] \
     || remote_omp_delivery_refuse "OMP session pointer does not match the currently reported exact agent session"
+  printf '%s' "$live_session"
 }
 
 state_value() { # <id>; prints recovery-grade state
@@ -366,7 +367,7 @@ cmd_launch() {
 }
 
 cmd_send() {
-  local id=$1 message=$2 harness relay_body meta
+  local id=$1 message=$2 harness relay_body meta live_session
   validate_id "$id"
   validate_home "$id"
   if ! remote_endpoint_load "$id"; then
@@ -395,7 +396,7 @@ cmd_send() {
         "$SCRIPT_DIR/fm-send.sh" "$REMOTE_ENDPOINT_TARGET" "$relay_body"
       return
     fi
-    remote_omp_delivery_binding "$id"
+    live_session=$(remote_omp_delivery_binding "$id")
     FM_HOME="$TARGET_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$CONTROL_STATE" \
       FM_DATA_OVERRIDE="$CONTROL_DATA" FM_SEND_PRESERVE_INBOUND_FROM_FIRSTMATE=1 \
       FM_TASK_INBOX_OMP_EXPECTED_SESSION="$live_session" \
