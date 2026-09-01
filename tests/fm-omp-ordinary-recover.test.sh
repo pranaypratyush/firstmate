@@ -405,6 +405,9 @@ test_failures_restore_original_metadata_and_only_retire_new_endpoint() {
   [ "$status" -ne 0 ] || fail "unprovable cleanup passed recovery"
   [ "$(cat "$dir/home/state/$TASK_ID.meta")" = "$before" ] || fail "unprovable cleanup changed original metadata"
   assert_contains "$out" 's1:newpane' "unprovable cleanup did not name retained replacement endpoint"
+  [ -f "$dir/home/state/$TASK_ID.omp-ready" ] || fail "unprovable cleanup did not restore historical readiness marker"
+  [ "$(cat "$dir/home/state/$TASK_ID.omp-doorbell-ready")" = 999 ] \
+    || fail "unprovable cleanup did not restore historical doorbell marker"
   pass "ordinary OMP recovery failure preserves original state and retires only proven new endpoints"
 }
 

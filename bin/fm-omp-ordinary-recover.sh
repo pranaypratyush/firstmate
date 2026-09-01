@@ -441,14 +441,13 @@ cleanup() {
       metadata_restored=0
       printf 'error: recovery could not restore original metadata after a failed replacement publication; preserving replacement endpoint %s\n' "$NEW_TARGET" >&2
     fi
-    if [ "$metadata_restored" -eq 1 ] && [ -n "$NEW_TARGET" ]; then
-      if retire_new_endpoint; then
+    if [ "$metadata_restored" -eq 1 ]; then
+      if [ "$MARKERS_PREPARED" -eq 1 ]; then
         restore_historical_markers || true
-      else
+      fi
+      if [ -n "$NEW_TARGET" ] && ! retire_new_endpoint; then
         printf 'error: recovery preserved unretired replacement endpoint %s because exact cleanup proof failed\n' "$NEW_TARGET" >&2
       fi
-    elif [ "$metadata_restored" -eq 1 ] && [ "$MARKERS_PREPARED" -eq 1 ]; then
-      restore_historical_markers || true
     fi
   fi
   if [ "$META_LOCK_HELD" -eq 1 ]; then
