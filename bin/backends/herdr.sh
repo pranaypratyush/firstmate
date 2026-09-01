@@ -1641,7 +1641,7 @@ fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace> [<launcher-
 # as dead|present|unknown from its JSON body, never from process exit status.
 fm_backend_herdr_pane_presence_state() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code pid
-  out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1)
+  out=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1) || true
   code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
   if [ -n "$code" ]; then
     [ "$code" = "pane_not_found" ] && printf 'dead' || printf 'unknown'
@@ -1715,7 +1715,7 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
     esac
     return 0
   fi
-  out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1)
+  out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>&1) || true
   code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
   if [ -n "$code" ]; then
     [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
@@ -1879,6 +1879,98 @@ EOF
     fi
   fi
   printf '%s %s' "$tab_id" "$pane_id"
+}
+
+# fm_backend_herdr_recovery_endpoint_matches: prove an exact response-derived
+# replacement tab/pane still belongs to one known task label and workspace.
+# It grants cleanup authority only for that newly-created endpoint.
+fm_backend_herdr_recovery_endpoint_matches() {  # <session> <workspace> <tab> <pane> <label>
+  local session=$1 workspace=$2 tab=$3 pane=$4 label=$5 tabs panes info
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e --arg tab "$tab" --arg label "$label" '
+    (.result.tabs | type) == "array"
+    and ([.result.tabs[] | select(.tab_id == $tab and .label == $label)] | length) == 1
+  ' >/dev/null 2>&1 || return 1
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e --arg tab "$tab" --arg pane "$pane" '
+    (.result.panes | type) == "array"
+    and ([.result.panes[] | select(.tab_id == $tab and .pane_id == $pane)] | length) == 1
+  ' >/dev/null 2>&1 || return 1
+  info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" '
+    .result.pane.pane_id == $pane
+    and .result.pane.tab_id == $tab
+    and .result.pane.workspace_id == $workspace
+  ' >/dev/null 2>&1
+}
+
+# fm_backend_herdr_create_recovery_task: create one unrecorded ordinary-task
+# replacement without closing or altering the recorded dead endpoint.
+#
+# The normal task-create helper reclaims a dead duplicate label after creating
+# its replacement, which is correct for fresh spawn but would erase the only
+# prior endpoint before an exact-session recovery has reached its publication
+# boundary. This recovery-only owner accepts exactly the pre-recorded dead or
+# missing shape, creates one same-labeled tab, and leaves the old pane intact.
+# It prints "<tab_id> <pane_id>" only after the new endpoint round-trips.
+fm_backend_herdr_create_recovery_task() {  # <session> <workspace> <label> <old-tab> <old-pane> <dead|missing> <cwd>
+  local session=$1 workspace=$2 label=$3 old_tab=$4 old_pane=$5 old_state=$6 cwd=$7
+  local tabs panes matches old_live_pane out tab pane
+  case "$old_state" in dead|missing) ;; *) return 1 ;; esac
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+  matches=$(printf '%s' "$tabs" | jq -r --arg label "$label" '
+    if (.result.tabs | type) == "array"
+      then [.result.tabs[] | select(.label == $label) | .tab_id] | .[]
+      else error("missing result.tabs")
+    end
+  ' 2>/dev/null) || return 1
+  case "$old_state" in
+    dead)
+      [ "$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d '[:space:]')" = 1 ] \
+        && [ "$matches" = "$old_tab" ] || {
+        echo "error: Herdr recovery found an ambiguous prior tab for '$label' in workspace $workspace" >&2
+        return 1
+      }
+      panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || return 1
+      old_live_pane=$(printf '%s' "$panes" | jq -r --arg tab "$old_tab" '
+        if (.result.panes | type) == "array"
+          then [.result.panes[] | select(.tab_id == $tab) | .pane_id]
+          | if length == 1 then .[0] else empty end
+          else error("missing result.panes")
+        end
+      ' 2>/dev/null) || return 1
+      [ "$old_live_pane" = "$old_pane" ] \
+        && [ "$(fm_backend_herdr_pane_agent_state "$session" "$old_pane")" = no-agent ] || {
+        echo "error: Herdr recovery could not re-prove the recorded dead pane for '$label'" >&2
+        return 1
+      }
+      ;;
+    missing)
+      [ -z "$matches" ] || {
+        echo "error: Herdr recovery found a same-labeled tab for missing endpoint '$label'; refusing ambiguity" >&2
+        return 1
+      }
+      [ "$(fm_backend_herdr_pane_agent_state "$session" "$old_pane")" = dead ] || {
+        echo "error: Herdr recovery could not re-prove the recorded missing pane for '$label'" >&2
+        return 1
+      }
+      ;;
+  esac
+  out=$(fm_backend_herdr_cli "$session" tab create --workspace "$workspace" --cwd "$cwd" --label "$label" --no-focus 2>/dev/null) || {
+    echo "error: Herdr recovery tab creation returned no exact endpoint in $session:$workspace for '$label'" >&2
+    return 2
+  }
+  tab=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
+  pane=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
+  if [ -z "$tab" ] || [ -z "$pane" ]; then
+    echo "error: Herdr recovery created an endpoint with unknown tab or pane in $session:$workspace for '$label'; preserve it for inspection" >&2
+    return 2
+  fi
+  if ! fm_backend_herdr_recovery_endpoint_matches "$session" "$workspace" "$tab" "$pane" "$label"; then
+    echo "error: Herdr recovery could not re-prove new endpoint $session:$pane; preserve it for inspection" >&2
+    return 2
+  fi
+  printf '%s %s' "$tab" "$pane"
 }
 
 # fm_backend_herdr_projection_create_task: create one disposable presentation
@@ -2426,11 +2518,11 @@ fm_backend_herdr_send_key() {  # <target> <key>
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
 }
 
-# Wake an OMP task through its in-process extension without submitting the
-# Herdr composer. The extension PID must still be the exact pane's foreground
-# process-group owner and match the task's canonical OMP launch identity.
-fm_backend_herdr_omp_trigger_turn() {  # <target> <ready-marker> <omp-runtime> <omp-bin> <request-id> <doorbell-line>
-  local target=$1 marker=$2 expected_bun=$3 expected_omp=$4 request_id=$5 line=$6 info foreground_pid comm args
+# fm_backend_herdr_omp_ready_process_matches: prove the ready marker belongs to
+# the exact target's foreground OMP process without delivering any message.
+fm_backend_herdr_omp_ready_process_matches() {  # <target> <ready-marker> <omp-runtime> <omp-bin>
+  local target=$1 marker=$2 expected_bun=$3 expected_omp=$4 info foreground_pid comm args
+  FM_BACKEND_HERDR_OMP_READY_PID=
   fm_omp_task_doorbell_marker_read "$marker" || return 1
   fm_backend_herdr_parse_target "$target" || return 1
   info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
@@ -2443,7 +2535,17 @@ fm_backend_herdr_omp_trigger_turn() {  # <target> <ready-marker> <omp-runtime> <
   args=$(ps -p "$foreground_pid" -o args= 2>/dev/null) || return 1
   FM_OMP_PROCESS_EXPECTED_BUN="$expected_bun" FM_OMP_PROCESS_EXPECTED_BIN="$expected_omp" \
     fm_omp_process_matches "$comm" "$args" "$foreground_pid" || return 1
-  fm_omp_task_doorbell_request "$marker" "$foreground_pid" "$request_id" "$line"
+  # shellcheck disable=SC2034 # The trigger reuses the proven PID.
+  FM_BACKEND_HERDR_OMP_READY_PID=$foreground_pid
+}
+
+# Wake an OMP task through its in-process extension without submitting the
+# Herdr composer. The extension PID must still be the exact pane's foreground
+# process-group owner and match the task's canonical OMP launch identity.
+fm_backend_herdr_omp_trigger_turn() {  # <target> <ready-marker> <omp-runtime> <omp-bin> <request-id> <doorbell-line>
+  local target=$1 marker=$2 expected_bun=$3 expected_omp=$4 request_id=$5 line=$6
+  fm_backend_herdr_omp_ready_process_matches "$target" "$marker" "$expected_bun" "$expected_omp" || return 1
+  fm_omp_task_doorbell_request "$marker" "$FM_BACKEND_HERDR_OMP_READY_PID" "$request_id" "$line"
 }
 
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors

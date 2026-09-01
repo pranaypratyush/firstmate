@@ -72,6 +72,21 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
+## Ordinary OMP endpoint recovery
+
+`bin/fm-omp-ordinary-recover.sh` is the only supported recovery path for an existing ordinary OMP ship or scout whose recorded Herdr endpoint is exactly `dead` or `missing`.
+First run `bin/fm-omp-ordinary-recover.sh --check <task-id>`, and run the mutating form only when that read-only admission succeeds.
+Admission requires the recorded `harness=omp`, `backend=herdr`, ordinary task kind, isolated Git worktree, exact canonical OMP paths, task-bound extension and inbox, and exactly one direct-child retained session file.
+It refuses live, unreadable, ambiguous, symlinked, escaping, malformed, or concurrently changed state rather than guessing which task state is safe to resume.
+The recovery creates one unrecorded replacement pane in the recorded workspace and resumes the exact retained session with the existing extension.
+It does not publish the replacement endpoint until a fresh session-start marker, a live native agent, and an exact foreground-process proof bind that pane to the recorded OMP runtime and entrypoint.
+Publication atomically replaces only `window=` and the four Herdr endpoint fields, preserving every other metadata line, then rings the oldest existing inbox record without re-sending its payload.
+Before publication, failure restores the original metadata and historical markers and retires only a response-derived replacement pane whose current shape still proves that exact cleanup is safe.
+An endpoint that cannot be proven safe to retire remains named for inspection.
+Do not use `fm-spawn`, manually create or launch a Herdr pane, hand-edit endpoint metadata, allocate another worktree, create another task, or restart validation or branch custody for this recovery.
+`tests/fm-omp-ordinary-recover.test.sh` covers deterministic admission, proof, publication, handoff, race, and rollback cases.
+`tests/fm-omp-ordinary-recover-live-e2e.test.sh` is the opt-in named-lab smoke path.
+
 ## Presentation spaces
 
 Each new crewmate or scout is placed in a disposable one-task workspace by default.
@@ -342,6 +357,8 @@ tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-omp-secondmate.test.sh
+tests/fm-omp-ordinary-recover.test.sh
+tests/fm-omp-ordinary-recover-live-e2e.test.sh
 tests/fm-omp-herdr-live-e2e.test.sh
 tests/fm-omp-herdr-exit-live-e2e.test.sh
 tests/fm-herdr-session-cleanup.test.sh
@@ -351,5 +368,5 @@ tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
 
 Real Herdr tests use the named lab helper and default-session tripwire.
-The two OMP live fixtures are opt-in and need an exact guarded environment rather than a bare invocation.
+The OMP live fixtures are opt-in and need an exact guarded environment rather than a bare invocation.
 [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) records the active version, CLI, projection, event, and lifecycle evidence, including those exact opt-in commands, without task-specific chronology.

@@ -129,22 +129,22 @@ test_launch_boundary_marker_preserves_exact_omp_identity() {
   fakebin=$(make_marker_fakebin "$TMP_ROOT/marker")
   path="$fakebin:$(dirname "$(command -v node)"):${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
 
-  out=$(PATH="$path" env -u PI_CODING_AGENT -u CLAUDECODE -u GROK_AGENT \
+  out=$(PATH="$path" env -u PI_CODING_AGENT -u CLAUDECODE -u GROK_AGENT -u FM_OMP_BUN -u FM_OMP_BIN \
     FM_OMP_HARNESS=omp "$ROOT/bin/fm-harness.sh")
   [ "$out" = omp ] || fail "exact OMP launch marker resolved '$out'"
 
   home="$TMP_ROOT/marker-home"
   mkdir -p "$home/state"
   : > "$home/state/.omp-primary-extension-loaded"
-  out=$(PATH="$path" env -u PI_CODING_AGENT -u CLAUDECODE -u GROK_AGENT \
+  out=$(PATH="$path" env -u PI_CODING_AGENT -u CLAUDECODE -u GROK_AGENT -u FM_OMP_BUN -u FM_OMP_BIN \
     FM_HOME="$home" FM_OMP_HARNESS=omp "$ROOT/bin/fm-harness.sh")
   [ "$out" = omp ] || fail "an unrelated primary marker suppressed worker launch-shape identity: $out"
 
-  out=$(PATH="$path" env -u PI_CODING_AGENT -u GROK_AGENT CLAUDECODE=1 \
+  out=$(PATH="$path" env -u PI_CODING_AGENT -u GROK_AGENT -u FM_OMP_BUN -u FM_OMP_BIN CLAUDECODE=1 \
     FM_OMP_HARNESS=omp "$ROOT/bin/fm-harness.sh")
   [ "$out" = omp ] || fail "OMP worker lost its identity to an inherited claude marker: $out"
 
-  out=$(PATH="$path" env -u PI_CODING_AGENT -u GROK_AGENT CLAUDECODE=1 \
+  out=$(PATH="$path" env -u PI_CODING_AGENT -u GROK_AGENT -u FM_OMP_BUN -u FM_OMP_BIN CLAUDECODE=1 \
     FM_TEST_HARNESS_PARENT=500 FM_OMP_HARNESS=omp "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] \
     || fail "claude nested inside an OMP worker inherited the launch marker: $out"
@@ -154,7 +154,7 @@ test_launch_boundary_marker_preserves_exact_omp_identity() {
     "$ROOT/bin/fm-harness.sh")
   [ "$out" != omp ] || fail "exact OMP ancestry fell back to launch-shape evidence after an identity mismatch"
 
-  out=$(PATH="$path" env -u PI_CODING_AGENT -u CLAUDECODE -u GROK_AGENT \
+  out=$(PATH="$path" env -u PI_CODING_AGENT -u CLAUDECODE -u GROK_AGENT -u FM_OMP_BUN -u FM_OMP_BIN \
     FM_OMP_HARNESS=omp-helper "$ROOT/bin/fm-harness.sh")
   [ "$out" != omp ] || fail "inexact OMP launch marker was accepted"
   pass "OMP worker tools preserve the exact launch-boundary harness identity"
@@ -396,6 +396,26 @@ test_capability_probe_scopes_exact_max_time_to_bounded_launches() {
   pass "OMP max-time capability is exact and scoped to bounded launch templates"
 }
 
+test_capability_probe_validates_recorded_binary_without_path_fallback() {
+  local stored decoy out status
+  stored="$TMP_ROOT/recorded/omp"
+  decoy="$TMP_ROOT/decoy/omp"
+  mkdir -p "$(dirname "$stored")" "$(dirname "$decoy")"
+  write_fake_omp "$stored"
+  write_fake_omp "$decoy" '--auto-approve'
+
+  out=$(PATH="$(dirname "$decoy"):/usr/bin:/bin" "$CAPABILITIES" --binary "$stored" --print-binary 2>&1)
+  status=$?
+  expect_code 0 "$status" "recorded OMP capability probe"
+  [ "$out" = "$stored" ] || fail "recorded OMP capability probe fell back to PATH: $out"
+
+  out=$(PATH="$(dirname "$decoy"):/usr/bin:/bin" "$CAPABILITIES" --binary relative/omp 2>&1)
+  status=$?
+  expect_code 1 "$status" "relative recorded OMP executable refusal"
+  assert_contains "$out" 'absolute recorded executable path' "relative recorded executable refusal was not concrete"
+  pass "OMP capability probe validates the exact recorded executable without PATH fallback"
+}
+
 test_capability_probe_never_falls_back_when_omp_is_missing() {
   local empty out status
   empty="$TMP_ROOT/no-omp"
@@ -419,4 +439,5 @@ test_capability_probe_rejects_no_shebang_text_wrapper
 test_capability_probe_rejects_non_bun_entrypoint
 test_capability_probe_reports_every_missing_requirement
 test_capability_probe_scopes_exact_max_time_to_bounded_launches
+test_capability_probe_validates_recorded_binary_without_path_fallback
 test_capability_probe_never_falls_back_when_omp_is_missing

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Verify the selected OMP executable has Firstmate's required lifecycle and exact process-ownership surface.
-# Usage: fm-omp-capabilities.sh [--print-binary] [--require-max-time]
+# Verify one selected OMP executable has Firstmate's required lifecycle and exact process-ownership surface.
+# Usage: fm-omp-capabilities.sh [--binary <absolute-path>] [--print-binary] [--require-max-time]
+# Without --binary, the selected executable is resolved from PATH as `omp`.
+# --binary validates that exact recorded executable and never falls back to PATH.
 # Success is silent unless --print-binary prints the resolved executable path.
 # Capability checks, rather than a semantic-version floor, own compatibility.
 set -u
@@ -10,20 +12,39 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 PRINT_BINARY=0
 REQUIRE_MAX_TIME=0
+BINARY_ARG=
+want_value=
 while [ "$#" -gt 0 ]; do
+  if [ -n "$want_value" ]; then
+    case "$1" in --*) echo "error: --$want_value requires a value" >&2; exit 2 ;; esac
+    case "$want_value" in binary) BINARY_ARG=$1 ;; esac
+    want_value=
+    shift
+    continue
+  fi
   case "$1" in
     --print-binary) PRINT_BINARY=1 ;;
     --require-max-time) REQUIRE_MAX_TIME=1 ;;
+    --binary) want_value=binary ;;
+    --binary=*) BINARY_ARG=${1#--binary=} ;;
     -h|--help)
-      sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "error: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
 done
+[ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 2; }
 
-binary=$(command -v omp 2>/dev/null || true)
+if [ -n "$BINARY_ARG" ]; then
+  case "$BINARY_ARG" in
+    /*) binary=$BINARY_ARG ;;
+    *) echo "error: --binary must be an absolute recorded executable path" >&2; exit 1 ;;
+  esac
+else
+  binary=$(command -v omp 2>/dev/null || true)
+fi
 if [ -z "$binary" ]; then
   echo "error: omp executable not found on PATH; install a capability-complete OMP build or select a different verified harness; selected omp never falls back to pi or another harness" >&2
   exit 1

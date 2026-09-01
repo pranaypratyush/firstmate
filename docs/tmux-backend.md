@@ -57,6 +57,7 @@ The canonical `omp_bun` and `omp_bin` identities must be absolute, executable, a
 Legacy launches invoke the selected OMP entrypoint directly, with env-based Bun shebangs receiving a launch-local `PATH` binding and explicit absolute Bun shebangs using their declared interpreter, while standalone launches invoke the selected executable directly without passing it through Bun.
 The primary adapter refuses unsupported paths before marker publication and replaces its marker atomically so a pre-existing symlink is never followed to its target.
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.
+The Herdr-specific ordinary OMP continuation uses the dedicated recovery entrypoint described in [the Herdr backend guide](herdr-backend.md#ordinary-omp-endpoint-recovery) and never a fresh spawn.
 
 For positive attribution, the probe combines two independent name sources rather than making either one load-bearing.
 `#{pane_current_command}` and the pane tty foreground process group's kernel `comm` values expose different name fields, and which one retains executable identity is platform-dependent.
